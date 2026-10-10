@@ -609,13 +609,26 @@ impl App {
         }
         for (i, g) in self.machine.gpus.iter().enumerate() {
             if let Some(series) = h.gpus.get(&g.card) {
-                out.push((Resource::Gpu(g.card.clone()), format!("GPU {i} · {}", g.driver), percent(g.busy_percent.map(f32::from)), series, 1.0));
+                let figure = if g.power.as_deref() == Some("suspended") {
+                    "Asleep".to_string()
+                } else {
+                    percent(self.gpu_busy(g))
+                };
+                out.push((Resource::Gpu(g.card.clone()), format!("GPU {i} · {}", g.driver), figure, series, 1.0));
             }
         }
         if let Some(b) = &self.machine.battery {
             out.push((Resource::Battery, "Battery".to_string(), format!("{} %", b.percent), &h.battery, 1.0));
         }
         out
+    }
+
+    /// A card's busy figure, from wherever its driver keeps one.
+    fn gpu_busy(&self, g: &hyprforge_procman::machine::Gpu) -> Option<f32> {
+        match g.driver.as_str() {
+            "nvidia" => self.nvidia.as_ref().and_then(|n| n.as_ref().ok()).and_then(|n| n.busy),
+            _ => g.busy_percent.map(f32::from),
+        }
     }
 
     fn disk_rate(&self, name: &str) -> Option<DiskRate> {
@@ -717,15 +730,48 @@ impl App {
             }
             Resource::Gpu(card) => {
                 let Some(g) = m.gpus.iter().find(|g| &g.card == card) else { return self.gone(s) };
-                let mut facts = column![widgets::fact("Driver", g.driver.clone(), s), widgets::fact("Temperature", celsius(g.celsius), s)].spacing(spacing::XS);
+                let asleep = g.power.as_deref() == Some("suspended");
+                let nvidia = (g.driver == "nvidia").then_some(self.nvidia.as_ref()).flatten();
+                let reading = nvidia.and_then(|n| n.as_ref().ok());
+                let mut facts = column![
+                    widgets::fact("Driver", g.driver.clone(), s),
+                    widgets::fact(
+                        "Power",
+                        match g.power.as_deref() {
+                            Some("suspended") => "Asleep, saving power — not woken to be read",
+                            Some("active") => "Awake",
+                            _ => "—",
+                        },
+                        s
+                    ),
+                ]
+                .spacing(spacing::XS);
+                if let Some(r) = reading {
+                    facts = facts.push(widgets::fact("Model", r.name.clone(), s));
+                    facts = facts.push(widgets::fact("Temperature", celsius(r.celsius), s));
+                    if let (Some(used), Some(total)) = (r.vram_used, r.vram_total) {
+                        facts = facts.push(widgets::fact("Video memory", format!("{} of {}", bytes(used), bytes(total)), s));
+                    }
+                    if let Some(w) = r.watts {
+                        facts = facts.push(widgets::fact("Power draw", format!("{w:.1} W"), s));
+                    }
+                    if let Some(c) = r.clock_mhz {
+                        facts = facts.push(widgets::fact("Clock", format!("{c} MHz of {} · {}", r.max_clock_mhz.map_or("—".to_string(), |m| m.to_string()), r.pstate), s));
+                    }
+                } else if let Some(Err(why)) = nvidia {
+                    facts = facts.push(widgets::fact("Can't read it", why.clone(), s));
+                } else if !asleep && g.driver != "nvidia" {
+                    facts = facts.push(widgets::fact("Temperature", celsius(g.celsius), s));
+                }
                 if let (Some(used), Some(total)) = (g.vram_used, g.vram_total) {
                     facts = facts.push(widgets::fact("Video memory", format!("{} of {}", bytes(used), bytes(total)), s));
                 }
                 if let Some(w) = g.watts {
                     facts = facts.push(widgets::fact("Power", format!("{w:.1} W"), s));
                 }
+                let figure = if asleep { "Asleep".to_string() } else { percent(self.gpu_busy(g)) };
                 match self.history.gpus.get(card) {
-                    Some(series) => self.page("GPU", percent(g.busy_percent.map(f32::from)), series, 1.0, facts.into(), None, s),
+                    Some(series) => self.page("GPU", figure, series, 1.0, facts.into(), None, s),
                     None => self.gone(s),
                 }
             }

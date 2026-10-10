@@ -79,7 +79,7 @@ pub struct Verbose {
 
 /// The `status` lines [`Verbose`] holds.
 pub fn parse_status(text: &str) -> Option<Verbose> {
-    let field = |key: &str| text.lines().find_map(|l| l.strip_prefix(key)?.trim().split_whitespace().next()?.parse::<u64>().ok());
+    let field = |key: &str| text.lines().find_map(|l| l.strip_prefix(key)?.split_whitespace().next()?.parse::<u64>().ok());
     Some(Verbose {
         // Kernel threads have no VmSwap line at all.
         swap_bytes: field("VmSwap:").unwrap_or(0) * 1024,

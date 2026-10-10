@@ -70,6 +70,11 @@ pub struct Gpu {
     /// Package power in watts, from the driver's sensor — on an APU this
     /// is the CPU and GPU together (amdgpu's `PPT`).
     pub watts: Option<f32>,
+    /// Runtime power management: `active`, or `suspended` when a laptop's
+    /// second GPU is asleep to save the battery. Read without waking it.
+    pub power: Option<String>,
+    /// The PCI address, `0000:01:00.0`.
+    pub pci: String,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -363,6 +368,8 @@ impl SysFs {
                 let resolved = fs::canonicalize(&device).ok();
                 let chip = chip_on(chips, resolved.as_deref());
                 Some(Gpu {
+                    power: read(device.join("power/runtime_status")),
+                    pci: resolved.as_ref().and_then(|p| p.file_name()).map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
                     busy_percent: number(device.join("gpu_busy_percent")),
                     vram_used: number(device.join("mem_info_vram_used")),
                     vram_total: number(device.join("mem_info_vram_total")),
@@ -635,6 +642,12 @@ mod tests {
         w("sys/class/hwmon/hwmon7/temp1_label", "edge\n");
         w("sys/class/hwmon/hwmon7/power1_average", "12414000\n");
         link(apu, "sys/class/hwmon/hwmon7/device");
+        // The NVIDIA card: a driver link and a power state, nothing else.
+        let dgpu = "sys/devices/pci0000:00/0000:00:01.1/0000:01:00.0";
+        w(&format!("{dgpu}/power/runtime_status"), "active\n");
+        dir("sys/bus/pci/drivers/nvidia");
+        link("sys/bus/pci/drivers/nvidia", &format!("{dgpu}/driver"));
+        link(dgpu, "sys/class/drm/card1/device");
         w("sys/class/hwmon/hwmon8/name", "k10temp\n");
         w("sys/class/hwmon/hwmon8/temp1_input", "60250\n");
         w("sys/class/hwmon/hwmon8/temp1_label", "Tctl\n");
@@ -677,7 +690,10 @@ mod tests {
     fn the_apu_reads_busy_vram_temperature_and_package_power() {
         let t = framework();
         let m = SysFs::rooted_at(t.path()).read();
-        assert_eq!(m.gpus.len(), 1, "card2-DP-2 is a connector, not a card");
+        assert_eq!(m.gpus.len(), 2, "card2-DP-2 is a connector, not a card; the NVIDIA card is listed though it says little");
+        let nvidia = m.gpus.iter().find(|g| g.driver == "nvidia").unwrap();
+        assert_eq!((nvidia.busy_percent, nvidia.power.as_deref(), nvidia.pci.as_str()), (None, Some("active"), "0000:01:00.0"));
+        let m = Machine { gpus: m.gpus.into_iter().filter(|g| g.driver == "amdgpu").collect(), ..m };
         let g = &m.gpus[0];
         assert_eq!((g.driver.as_str(), g.busy_percent, g.vram_total), ("amdgpu", Some(5), Some(2147483648)));
         assert_eq!(g.celsius, Some(52.0));

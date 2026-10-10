@@ -198,6 +198,8 @@ pub struct Reading {
     machine: Machine,
     windows: Result<Vec<Window>, String>,
     at: std::time::Instant,
+    /// The NVIDIA card's answer, when it was asked this time.
+    nvidia: Option<Result<hyprforge_procman::nvidia::Reading, String>>,
     /// Show everything was on and polkit said no this time: its few
     /// minutes ran out. The window locks again rather than prompting
     /// once a second.
@@ -288,6 +290,9 @@ pub struct App {
     pub everything: Everything,
     last_at: Option<std::time::Instant>,
     gpu_scan: GpuScan,
+    /// The NVIDIA card's last answer, and when it was asked.
+    pub nvidia: Option<Result<hyprforge_procman::nvidia::Reading, String>>,
+    nvidia_asked: Option<std::time::Instant>,
     last_gpu: HashMap<i32, hyprforge_procman::gpu::DrmUse>,
     /// Why there are no apps, when Hyprland could not be asked.
     pub no_windows: Option<String>,
@@ -332,14 +337,19 @@ pub fn search_id() -> WidgetId {
     WidgetId::new("procman-search")
 }
 
-fn read(fs: ProcFs, helper: Option<zbus::Connection>, scan: GpuScan) -> Task<Message> {
+fn read(fs: ProcFs, helper: Option<zbus::Connection>, scan: GpuScan, ask_nvidia: bool) -> Task<Message> {
     Task::perform(
         async move {
-            let (mut snapshot, machine, windows, gpu) = tokio::task::spawn_blocking(move || {
+            let (mut snapshot, machine, windows, gpu, nvidia) = tokio::task::spawn_blocking(move || {
                 let snapshot = fs.snapshot().map_err(|e| format!("couldn't read /proc: {e}"))?;
                 let pids: Vec<i32> = snapshot.procs.iter().filter(|p| !p.kernel).map(|p| p.pid).collect();
                 let gpu = scan.lock().map(|mut s| s.read(std::path::Path::new("/proc"), &pids)).unwrap_or_default();
-                Ok::<_, String>((snapshot, SysFs::default().read(), windows::read(), gpu))
+                let machine = SysFs::default().read();
+                // Only a card that is already awake is asked: asking one
+                // that sleeps would wake it.
+                let awake = machine.gpus.iter().any(|g| g.driver == "nvidia" && g.power.as_deref() == Some("active"));
+                let nvidia = (ask_nvidia && awake).then(hyprforge_procman::nvidia::query);
+                Ok::<_, String>((snapshot, machine, windows::read(), gpu, nvidia))
             })
             .await
             .map_err(|e| e.to_string())??;
@@ -348,7 +358,7 @@ fn read(fs: ProcFs, helper: Option<zbus::Connection>, scan: GpuScan) -> Task<Mes
             if let Some(system) = helper {
                 everything_lapsed = !fill_in(&system, &mut snapshot).await;
             }
-            Ok(Box::new(Reading { snapshot, gpu, machine, windows, at, everything_lapsed }))
+            Ok(Box::new(Reading { snapshot, gpu, machine, windows, at, nvidia, everything_lapsed }))
         },
         Message::Read,
     )
@@ -416,6 +426,8 @@ impl App {
             everything: Everything::Locked,
             last_at: None,
             gpu_scan: GpuScan::default(),
+            nvidia: None,
+            nvidia_asked: None,
             last_gpu: HashMap::new(),
             no_windows: None,
             paused: false,
@@ -436,7 +448,7 @@ impl App {
             reading: true,
         };
         let scan = app.gpu_scan.clone();
-        (app, read(fs, None, scan))
+        (app, read(fs, None, scan, false))
     }
 
     fn load_services(&mut self) -> Task<Message> {
@@ -491,6 +503,17 @@ impl App {
         self.services.memory = memory;
     }
 
+    /// Whether this refresh asks the NVIDIA card: only while Performance
+    /// is open, at most every three seconds — see `nvidia.rs`.
+    fn ask_nvidia(&mut self) -> bool {
+        let due = self.nvidia_asked.is_none_or(|t| t.elapsed() >= Duration::from_secs(3));
+        let ask = self.tab == Tab::Performance && due;
+        if ask {
+            self.nvidia_asked = Some(std::time::Instant::now());
+        }
+        ask
+    }
+
     pub fn everything_open(&self) -> bool {
         matches!(self.everything, Everything::Open(_))
     }
@@ -528,7 +551,7 @@ impl App {
                         let list = self.load_services();
                         if !self.reading {
                             self.reading = true;
-                            return Task::batch([list, read(self.fs.clone(), self.helper(), self.gpu_scan.clone())]);
+                            return Task::batch([list, read(self.fs.clone(), self.helper(), self.gpu_scan.clone(), self.ask_nvidia())]);
                         }
                         return list;
                     }
@@ -537,7 +560,7 @@ impl App {
                 // machine gets fewer refreshes, not a queue of them.
                 if !self.reading {
                     self.reading = true;
-                    return read(self.fs.clone(), self.helper(), self.gpu_scan.clone());
+                    return read(self.fs.clone(), self.helper(), self.gpu_scan.clone(), self.ask_nvidia());
                 }
             }
             Message::Read(result) => {
@@ -624,7 +647,7 @@ impl App {
                 Ok(()) => {
                     if !self.reading {
                         self.reading = true;
-                        return read(self.fs.clone(), self.helper(), self.gpu_scan.clone());
+                        return read(self.fs.clone(), self.helper(), self.gpu_scan.clone(), self.ask_nvidia());
                     }
                 }
                 Err(e) => self.notice = Some(format!("Couldn't change its priority: {e}.")),
@@ -731,7 +754,7 @@ impl App {
                 self.notice = (refused > 0).then(|| format!("{refused} of the processes under {} weren't yours to end.", c.name));
                 if !self.reading {
                     self.reading = true;
-                    return read(self.fs.clone(), self.helper(), self.gpu_scan.clone());
+                    return read(self.fs.clone(), self.helper(), self.gpu_scan.clone(), self.ask_nvidia());
                 }
             }
             Message::Confirmed => {
@@ -743,7 +766,7 @@ impl App {
                             // the next tick would.
                             if !self.reading {
                                 self.reading = true;
-                                return read(self.fs.clone(), self.helper(), self.gpu_scan.clone());
+                                return read(self.fs.clone(), self.helper(), self.gpu_scan.clone(), self.ask_nvidia());
                             }
                         }
                         Err(signal::Refused::NotAllowed) => {
@@ -769,7 +792,7 @@ impl App {
                         self.notice = Some(format!("Couldn't {} it: {e}", if frozen { "freeze" } else { "resume" }));
                     } else if !self.reading {
                         self.reading = true;
-                        return read(self.fs.clone(), self.helper(), self.gpu_scan.clone());
+                        return read(self.fs.clone(), self.helper(), self.gpu_scan.clone(), self.ask_nvidia());
                     }
                 }
             }
@@ -808,7 +831,7 @@ impl App {
                     self.notice = None;
                     if !self.reading {
                         self.reading = true;
-                        return read(self.fs.clone(), self.helper(), self.gpu_scan.clone());
+                        return read(self.fs.clone(), self.helper(), self.gpu_scan.clone(), self.ask_nvidia());
                     }
                 }
                 Err(e) => self.notice = Some(format!("Couldn't end it: {e}.")),
@@ -859,7 +882,14 @@ impl App {
     }
 
     fn take(&mut self, reading: Reading) {
-        let Reading { snapshot, gpu, machine, windows, at, everything_lapsed } = reading;
+        let Reading { snapshot, gpu, machine, windows, at, nvidia, everything_lapsed } = reading;
+        if let Some(answer) = nvidia {
+            self.nvidia = Some(answer);
+        }
+        // A card that went to sleep has no figures; its old ones would lie.
+        if machine.gpus.iter().any(|g| g.driver == "nvidia" && g.power.as_deref() == Some("suspended")) {
+            self.nvidia = None;
+        }
         let seconds = self.last_at.map_or(0.0, |t| at.duration_since(t).as_secs_f64());
         if self.last_at.is_some() {
             let (disks, nets) = machine::rates(&self.machine, &machine, seconds);
@@ -873,8 +903,14 @@ impl App {
             self.net_rates = nets;
         }
         for gpu in &machine.gpus {
-            if let Some(busy) = gpu.busy_percent {
-                self.history.gpus.entry(gpu.card.clone()).or_default().push(f32::from(busy) / 100.0);
+            // Every card has a graph, even one with nothing to put in it.
+            let series = self.history.gpus.entry(gpu.card.clone()).or_default();
+            let busy = match gpu.driver.as_str() {
+                "nvidia" => self.nvidia.as_ref().and_then(|n| n.as_ref().ok()).and_then(|n| n.busy).map(|b| b / 100.0),
+                _ => gpu.busy_percent.map(|b| f32::from(b) / 100.0),
+            };
+            if let Some(busy) = busy {
+                series.push(busy);
             }
         }
         if let Some(b) = &machine.battery {
@@ -1050,7 +1086,7 @@ mod render {
         let snapshot = fs.snapshot().unwrap();
         let pids: Vec<i32> = snapshot.procs.iter().filter(|p| !p.kernel).map(|p| p.pid).collect();
         let gpu = scan.lock().unwrap().read(std::path::Path::new("/proc"), &pids);
-        Reading { snapshot, gpu, machine: SysFs::default().read(), windows: windows::read(), at: std::time::Instant::now(), everything_lapsed: false }
+        Reading { snapshot, gpu, machine: SysFs::default().read(), windows: windows::read(), at: std::time::Instant::now(), nvidia: Some(hyprforge_procman::nvidia::query()), everything_lapsed: false }
     }
 
     fn draw(app: &App, name: &str, dir: &std::path::Path) {
@@ -1104,7 +1140,7 @@ mod render {
             app.resource = Resource::Disk(disk.name.clone());
             draw(&app, "performance-disk", &dir);
         }
-        if let Some(gpu) = app.machine.gpus.iter().find(|g| g.busy_percent.is_some()) {
+        if let Some(gpu) = app.machine.gpus.iter().find(|g| g.driver == "nvidia").or(app.machine.gpus.first()) {
             app.resource = Resource::Gpu(gpu.card.clone());
             draw(&app, "performance-gpu", &dir);
         }

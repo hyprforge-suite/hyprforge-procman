@@ -14,6 +14,7 @@ pub mod inspect;
 pub mod history;
 pub mod machine;
 pub mod model;
+pub mod nvidia;
 pub mod proc;
 pub mod sample;
 pub mod services;
