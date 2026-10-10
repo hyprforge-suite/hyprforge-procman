@@ -1,0 +1,65 @@
+# CI for the hyprforge-procman repository. In the Hyprforge monorepo this
+# directory is a submodule at `crates/hyprforge-procman`; this file takes
+# effect only here, at the repository's root.
+#
+# What this checks: every feature set builds — the window, the helper,
+# hyprforge-top, and the eBPF network counter compiled by clang — clippy
+# is silent for each (a clippy warning is a build failure in Hyprforge),
+# and the tests that need nothing but this process: the /proc and /sys
+# parsers against real fixtures, the journal (round trip, torn tails,
+# format versions), intervals, reports, the TUI drawn to a test backend,
+# and the helper's D-Bus interface over a socket pair with a stand-in
+# polkit.
+#
+# What it deliberately does NOT check:
+#   - anything as root. Loading the eBPF counter, hearing exits over
+#     taskstats and the helper's own polkit checks are ignored tests,
+#     run by hand on a real machine.
+#   - the window on a screen: there is no compositor on a runner.
+#
+# A green run means the code is internally consistent. It does not mean
+# the recorder has ever recorded a day.
+
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  tier-1:
+    name: "Tier 1 (no root, no compositor): build, clippy -D warnings, cargo test"
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install the pinned Rust toolchain (rust-toolchain.toml)
+        # Exactly the channel and components it pins: clippy's lint set
+        # moves between releases and this job treats a warning as a failure.
+        run: rustup show
+
+      - name: Cache the cargo registry and build output
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+
+      - name: Install native dependencies
+        # wayland and xkbcommon for the window; clang and libbpf's headers
+        # to compile bpf/net.bpf.c for the `netbpf` feature.
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y pkg-config libxkbcommon-dev libwayland-dev clang libbpf-dev
+
+      - name: cargo build (every binary, every feature)
+        run: cargo build --all-targets --features tui,netbpf
+
+      - name: cargo clippy --all-targets -D warnings (default features)
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: cargo clippy --all-targets -D warnings (tui, netbpf)
+        run: cargo clippy --all-targets --features tui,netbpf -- -D warnings
+
+      - name: cargo clippy -D warnings (the recorder alone, no GUI or D-Bus)
+        run: cargo clippy --no-default-features --features netbpf --bin hyprforge-procman-recorder -- -D warnings
+
+      - name: "cargo test (tier 1 only)"
+        run: cargo test --all-targets --features tui,netbpf

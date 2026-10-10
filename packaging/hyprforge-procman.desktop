@@ -1,0 +1,17 @@
+[Desktop Entry]
+Type=Application
+Name=Hyprforge Process Manager
+GenericName=Task Manager
+Comment=See what is running and what it costs, and end what shouldn't be
+# On PATH, never an absolute prefix: see the Files entry for why.
+Exec=hyprforge-procman
+# A theme name, not a file: no icon ships yet, and a launcher falling
+# back to a generic one is right for a missing icon.
+Icon=utilities-system-monitor
+Terminal=false
+Categories=System;Monitor;
+Keywords=task;manager;process;kill;cpu;memory;monitor;services;systemd;top;
+StartupNotify=true
+# The window's Wayland app id, so a launcher matches the open window to
+# this entry.
+StartupWMClass=hyprforge-procman
