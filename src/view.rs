@@ -23,6 +23,7 @@ pub const NAME_PORTION: u16 = 6;
 pub const CPU_W: f32 = 84.0;
 pub const MEM_W: f32 = 104.0;
 pub const DISK_W: f32 = 104.0;
+pub const GPU_W: f32 = 76.0;
 pub const PID_W: f32 = 84.0;
 pub const USER_W: f32 = 120.0;
 
@@ -168,6 +169,7 @@ impl App {
             self.column_head("CPU", Column::Cpu, Length::Fixed(s.apply(CPU_W)), true, s),
             self.column_head("Memory", Column::Memory, Length::Fixed(s.apply(MEM_W)), true, s),
             self.column_head("Disk", Column::Disk, Length::Fixed(s.apply(DISK_W)), true, s),
+            self.column_head("GPU", Column::Gpu, Length::Fixed(s.apply(GPU_W)), true, s),
             self.column_head("PID", Column::Pid, Length::Fixed(s.apply(PID_W)), true, s),
             self.column_head("User", Column::User, Length::Fixed(s.apply(USER_W)), false, s),
         ]
@@ -206,15 +208,15 @@ impl App {
                 let name = row![chevron, name].spacing(spacing::XS).align_y(Alignment::Center);
                 let count = app.members.len();
                 let user = if count > 1 { format!("{} · {count}", app.lead.user) } else { app.lead.user.clone() };
-                self.row(id, name.into(), app.cpu(), app.private_bytes(), app.disk(), id.pid, user, s)
+                self.row(id, name.into(), app.cpu(), app.private_bytes(), app.disk(), app.gpu(), id.pid, user, s)
             }
             Line::Member(e) => {
                 let name = row![Space::new().width(Length::Fixed(s.apply(16.0) + spacing::XS * 2.0)), self.entry_name(&e, s)].align_y(Alignment::Center);
-                self.row(e.id, name.into(), e.cpu, e.private_bytes, e.disk, e.id.pid, e.user.clone(), s)
+                self.row(e.id, name.into(), e.cpu, e.private_bytes, e.disk, e.gpu, e.id.pid, e.user.clone(), s)
             }
             Line::Process(e) => {
                 let name = self.entry_name(&e, s);
-                self.row(e.id, name, e.cpu, e.private_bytes, e.disk, e.id.pid, e.user.clone(), s)
+                self.row(e.id, name, e.cpu, e.private_bytes, e.disk, e.gpu, e.id.pid, e.user.clone(), s)
             }
         }
     }
@@ -234,7 +236,7 @@ impl App {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn row<'a>(&self, id: Id, name: Element<'a, Message>, cpu: Option<f32>, memory: u64, disk: Option<f64>, pid: i32, user: String, s: FontScale) -> Element<'a, Message> {
+    fn row<'a>(&self, id: Id, name: Element<'a, Message>, cpu: Option<f32>, memory: u64, disk: Option<f64>, gpu: Option<f32>, pid: i32, user: String, s: FontScale) -> Element<'a, Message> {
         let selected = self.selected == Some(id);
         let cell = |content: String, width: f32| {
             container(widgets::scaled_text(content, density::ROW_TEXT_BASE, s).font(theme::mono_font()))
@@ -247,6 +249,8 @@ impl App {
             cell(percent(cpu), CPU_W),
             cell(bytes(memory), MEM_W),
             cell(rate(disk), DISK_W),
+            // No GPU open is not 0 %: blank, as Task Manager draws it.
+            cell(gpu.map_or(String::new(), |g| percent(Some(g))), GPU_W),
             cell(pid.to_string(), PID_W),
             container(widgets::meta_text(user, density::ROW_TEXT_BASE, s)).width(Length::Fixed(s.apply(USER_W))).padding([0.0, spacing::SM]),
         ]

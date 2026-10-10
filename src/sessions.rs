@@ -166,6 +166,7 @@ mod tests {
             own: false,
             cpu,
             disk: None,
+            gpu: None,
             private_bytes: bytes,
             threads: 1,
             state: 'S',

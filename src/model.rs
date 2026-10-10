@@ -34,6 +34,9 @@ pub struct Entry {
     /// this window may not see it (another user's, without Show
     /// everything).
     pub disk: Option<f64>,
+    /// Percent of its busiest GPU engine; `None` for a process that has
+    /// no GPU open (or one this user may not read).
+    pub gpu: Option<f32>,
     pub private_bytes: u64,
     pub threads: u32,
     pub state: char,
@@ -62,6 +65,12 @@ impl App {
     /// Known only when every member has a reading.
     pub fn cpu(&self) -> Option<f32> {
         self.members.iter().map(|m| m.cpu).sum()
+    }
+
+    /// The members that use the GPU, added up; `None` when none does.
+    pub fn gpu(&self) -> Option<f32> {
+        let used: Vec<f32> = self.members.iter().filter_map(|m| m.gpu).collect();
+        (!used.is_empty()).then(|| used.iter().sum::<f32>().min(100.0))
     }
 
     /// Known only when every member's is.
@@ -104,6 +113,7 @@ pub fn table(
             own: p.uid == me,
             cpu: usage.cpu.get(&id).copied(),
             disk: usage.disk.get(&id).copied(),
+            gpu: usage.gpu.get(&id).copied(),
             private_bytes: p.private_bytes,
             threads: p.threads,
             state: p.state,
@@ -177,6 +187,7 @@ pub enum Column {
     Cpu,
     Memory,
     Disk,
+    Gpu,
     Pid,
     User,
 }
@@ -202,7 +213,7 @@ impl Sort {
         if self.column == column {
             Sort { descending: !self.descending, ..self }
         } else {
-            Sort { column, descending: matches!(column, Column::Cpu | Column::Memory | Column::Disk) }
+            Sort { column, descending: matches!(column, Column::Cpu | Column::Memory | Column::Disk | Column::Gpu) }
         }
     }
 }
@@ -236,6 +247,7 @@ struct Key<'a> {
     cpu: Option<f32>,
     memory: u64,
     disk: Option<f64>,
+    gpu: Option<f32>,
     id: Id,
     user: &'a str,
 }
@@ -247,6 +259,7 @@ fn compare(sort: Sort, a: Key, b: Key) -> Ordering {
         Column::Cpu => a.cpu.unwrap_or(-1.0).total_cmp(&b.cpu.unwrap_or(-1.0)),
         Column::Memory => a.memory.cmp(&b.memory),
         Column::Disk => a.disk.unwrap_or(-1.0).total_cmp(&b.disk.unwrap_or(-1.0)),
+        Column::Gpu => a.gpu.unwrap_or(-1.0).total_cmp(&b.gpu.unwrap_or(-1.0)),
         Column::Pid => a.id.pid.cmp(&b.id.pid),
         Column::User => a.user.cmp(b.user),
     };
@@ -260,11 +273,11 @@ fn compare(sort: Sort, a: Key, b: Key) -> Ordering {
 }
 
 fn key(e: &Entry) -> Key<'_> {
-    Key { name: &e.name, cpu: e.cpu, memory: e.private_bytes, disk: e.disk, id: e.id, user: &e.user }
+    Key { name: &e.name, cpu: e.cpu, memory: e.private_bytes, disk: e.disk, gpu: e.gpu, id: e.id, user: &e.user }
 }
 
 fn app_key(a: &App) -> Key<'_> {
-    Key { name: &a.lead.name, cpu: a.cpu(), memory: a.private_bytes(), disk: a.disk(), id: a.lead.id, user: &a.lead.user }
+    Key { name: &a.lead.name, cpu: a.cpu(), memory: a.private_bytes(), disk: a.disk(), gpu: a.gpu(), id: a.lead.id, user: &a.lead.user }
 }
 
 fn matches(e: &Entry, query: &str) -> bool {

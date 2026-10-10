@@ -7,6 +7,7 @@
 //! [`signal`] is the one thing that changes anything — ending a process,
 //! never one that merely reused its number. The window is `main.rs`.
 
+pub mod gpu;
 pub mod graph;
 pub mod helper;
 pub mod inspect;

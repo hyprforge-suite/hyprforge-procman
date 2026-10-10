@@ -193,6 +193,8 @@ pub struct Confirm {
 #[derive(Debug, Clone)]
 pub struct Reading {
     snapshot: Snapshot,
+    /// GPU counters for the processes seen holding a GPU.
+    gpu: HashMap<i32, hyprforge_procman::gpu::DrmUse>,
     machine: Machine,
     windows: Result<Vec<Window>, String>,
     at: std::time::Instant,
@@ -285,6 +287,8 @@ pub struct App {
     pub admin_offer: Option<Confirm>,
     pub everything: Everything,
     last_at: Option<std::time::Instant>,
+    gpu_scan: GpuScan,
+    last_gpu: HashMap<i32, hyprforge_procman::gpu::DrmUse>,
     /// Why there are no apps, when Hyprland could not be asked.
     pub no_windows: Option<String>,
     pub paused: bool,
@@ -321,16 +325,21 @@ pub struct Totals {
     pub threads: u64,
 }
 
+/// The GPU scan's state, kept between readings on the reader's thread.
+type GpuScan = std::sync::Arc<std::sync::Mutex<hyprforge_procman::gpu::Scan>>;
+
 pub fn search_id() -> WidgetId {
     WidgetId::new("procman-search")
 }
 
-fn read(fs: ProcFs, helper: Option<zbus::Connection>) -> Task<Message> {
+fn read(fs: ProcFs, helper: Option<zbus::Connection>, scan: GpuScan) -> Task<Message> {
     Task::perform(
         async move {
-            let (mut snapshot, machine, windows) = tokio::task::spawn_blocking(move || {
+            let (mut snapshot, machine, windows, gpu) = tokio::task::spawn_blocking(move || {
                 let snapshot = fs.snapshot().map_err(|e| format!("couldn't read /proc: {e}"))?;
-                Ok::<_, String>((snapshot, SysFs::default().read(), windows::read()))
+                let pids: Vec<i32> = snapshot.procs.iter().filter(|p| !p.kernel).map(|p| p.pid).collect();
+                let gpu = scan.lock().map(|mut s| s.read(std::path::Path::new("/proc"), &pids)).unwrap_or_default();
+                Ok::<_, String>((snapshot, SysFs::default().read(), windows::read(), gpu))
             })
             .await
             .map_err(|e| e.to_string())??;
@@ -339,7 +348,7 @@ fn read(fs: ProcFs, helper: Option<zbus::Connection>) -> Task<Message> {
             if let Some(system) = helper {
                 everything_lapsed = !fill_in(&system, &mut snapshot).await;
             }
-            Ok(Box::new(Reading { snapshot, machine, windows, at, everything_lapsed }))
+            Ok(Box::new(Reading { snapshot, gpu, machine, windows, at, everything_lapsed }))
         },
         Message::Read,
     )
@@ -406,6 +415,8 @@ impl App {
             admin_offer: None,
             everything: Everything::Locked,
             last_at: None,
+            gpu_scan: GpuScan::default(),
+            last_gpu: HashMap::new(),
             no_windows: None,
             paused: false,
             interval: INTERVALS[1],
@@ -424,7 +435,8 @@ impl App {
             critical: Default::default(),
             reading: true,
         };
-        (app, read(fs, None))
+        let scan = app.gpu_scan.clone();
+        (app, read(fs, None, scan))
     }
 
     fn load_services(&mut self) -> Task<Message> {
@@ -516,7 +528,7 @@ impl App {
                         let list = self.load_services();
                         if !self.reading {
                             self.reading = true;
-                            return Task::batch([list, read(self.fs.clone(), self.helper())]);
+                            return Task::batch([list, read(self.fs.clone(), self.helper(), self.gpu_scan.clone())]);
                         }
                         return list;
                     }
@@ -525,7 +537,7 @@ impl App {
                 // machine gets fewer refreshes, not a queue of them.
                 if !self.reading {
                     self.reading = true;
-                    return read(self.fs.clone(), self.helper());
+                    return read(self.fs.clone(), self.helper(), self.gpu_scan.clone());
                 }
             }
             Message::Read(result) => {
@@ -612,7 +624,7 @@ impl App {
                 Ok(()) => {
                     if !self.reading {
                         self.reading = true;
-                        return read(self.fs.clone(), self.helper());
+                        return read(self.fs.clone(), self.helper(), self.gpu_scan.clone());
                     }
                 }
                 Err(e) => self.notice = Some(format!("Couldn't change its priority: {e}.")),
@@ -719,7 +731,7 @@ impl App {
                 self.notice = (refused > 0).then(|| format!("{refused} of the processes under {} weren't yours to end.", c.name));
                 if !self.reading {
                     self.reading = true;
-                    return read(self.fs.clone(), self.helper());
+                    return read(self.fs.clone(), self.helper(), self.gpu_scan.clone());
                 }
             }
             Message::Confirmed => {
@@ -731,7 +743,7 @@ impl App {
                             // the next tick would.
                             if !self.reading {
                                 self.reading = true;
-                                return read(self.fs.clone(), self.helper());
+                                return read(self.fs.clone(), self.helper(), self.gpu_scan.clone());
                             }
                         }
                         Err(signal::Refused::NotAllowed) => {
@@ -757,7 +769,7 @@ impl App {
                         self.notice = Some(format!("Couldn't {} it: {e}", if frozen { "freeze" } else { "resume" }));
                     } else if !self.reading {
                         self.reading = true;
-                        return read(self.fs.clone(), self.helper());
+                        return read(self.fs.clone(), self.helper(), self.gpu_scan.clone());
                     }
                 }
             }
@@ -796,7 +808,7 @@ impl App {
                     self.notice = None;
                     if !self.reading {
                         self.reading = true;
-                        return read(self.fs.clone(), self.helper());
+                        return read(self.fs.clone(), self.helper(), self.gpu_scan.clone());
                     }
                 }
                 Err(e) => self.notice = Some(format!("Couldn't end it: {e}.")),
@@ -847,7 +859,7 @@ impl App {
     }
 
     fn take(&mut self, reading: Reading) {
-        let Reading { snapshot, machine, windows, at, everything_lapsed } = reading;
+        let Reading { snapshot, gpu, machine, windows, at, everything_lapsed } = reading;
         let seconds = self.last_at.map_or(0.0, |t| at.duration_since(t).as_secs_f64());
         if self.last_at.is_some() {
             let (disks, nets) = machine::rates(&self.machine, &machine, seconds);
@@ -877,6 +889,8 @@ impl App {
         if let Some(before) = &self.last {
             usage.cpu = sample::shares(before, &snapshot);
             usage.disk = sample::disk_rates(before, &snapshot, seconds);
+            let ids: HashMap<i32, Id> = snapshot.procs.iter().map(|p| (p.pid, Id { pid: p.pid, start: p.start })).collect();
+            usage.gpu = hyprforge_procman::gpu::shares(&self.last_gpu, &gpu, &ids, seconds);
         }
         self.last_at = Some(at);
         let windows = match windows {
@@ -948,6 +962,7 @@ impl App {
                 self.selected = None;
             }
         }
+        self.last_gpu = gpu;
         self.boot = snapshot.boot;
         self.last = Some(snapshot);
     }

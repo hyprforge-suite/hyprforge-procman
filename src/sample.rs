@@ -76,6 +76,8 @@ pub struct Use {
     pub cpu: HashMap<Id, f32>,
     /// Storage bytes a second.
     pub disk: HashMap<Id, f64>,
+    /// Percent of the busiest GPU engine.
+    pub gpu: HashMap<Id, f32>,
 }
 
 #[cfg(test)]
