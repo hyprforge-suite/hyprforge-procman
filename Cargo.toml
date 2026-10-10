@@ -40,6 +40,12 @@ name = "hyprforge-procman-helper"
 path = "src/bin/helper.rs"
 required-features = ["dbus"]
 
+# Samples the machine every ten seconds into a private journal, as root.
+# No features: it links neither iced nor zbus.
+[[bin]]
+name = "hyprforge-procman-recorder"
+path = "src/bin/recorder.rs"
+
 [dependencies]
 # By crates.io version, as every component names its siblings — see the
 # suite's CLAUDE.md on `[patch.crates-io]`.

@@ -165,6 +165,15 @@ mod tests {
         assert!(load_config(&p).is_err());
     }
 
+    /// The example config shipped in packaging/ says the defaults, so
+    /// it reads back as exactly them — a default changed in one place
+    /// and not the other fails here.
+    #[test]
+    fn the_shipped_example_is_the_defaults() {
+        let shipped: Config = toml::from_str(include_str!("../packaging/procman-recorder.toml")).unwrap();
+        assert_eq!(shipped, Config::default());
+    }
+
     #[test]
     fn ticks_write_to_the_days_file_and_command_lines_can_be_left_out() {
         let t = tempfile::tempdir().unwrap();

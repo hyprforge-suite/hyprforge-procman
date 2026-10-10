@@ -1,0 +1,28 @@
+# hyprforge-procman's recorder — /etc/hyprforge/procman-recorder.toml.
+# Every key may be left out; these are the defaults. A key the recorder
+# doesn't know is an error, so a typo is said rather than ignored.
+
+# Seconds between samples. About 30 MB a day at 10 on a desktop.
+interval = 10
+
+# How much history to keep: whichever limit is reached first.
+keep_days = 30
+max_bytes = 4294967296
+
+# Keep each process's command line. They can hold secrets (a token passed
+# as an argument); the journal is readable by root alone either way.
+record_cmdlines = true
+
+# Count each process's threads by state (atop's TRUN/TSLPI/TSLPU).
+threads = true
+
+# Proportional set size per process. Costly: the kernel walks every
+# process's page tables.
+pss = false
+
+# Switch on the kernel's delay accounting (kernel.task_delayacct) while
+# recording, so each process's time waiting on block I/O is measured.
+# The previous setting is put back when the recorder stops.
+delay_accounting = true
+
+directory = "/var/log/hyprforge/procman"

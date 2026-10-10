@@ -1,0 +1,48 @@
+# hyprforge-procman's recorder: the whole machine every ten seconds,
+# into a journal only root can read. Installed to
+# /usr/lib/systemd/system/; enabled by Settings -> Set up's "Record
+# system history", never by the package.
+#
+# Root, because every process's I/O and open files, and every exit, are
+# root's to read — and then fenced in: it reads /proc and /sys, writes
+# its own directory, speaks netlink for exits and nothing else.
+[Unit]
+Description=Hyprforge system history recorder
+Documentation=https://github.com/hyprforge-suite/hyprforge-procman
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/hyprforge-procman-recorder
+Restart=on-failure
+RestartSec=10
+# Sampling is not urgent; nothing waits on it.
+Nice=10
+IOSchedulingClass=idle
+
+# Reading every process (CAP_SYS_PTRACE, CAP_DAC_READ_SEARCH), hearing
+# every exit (CAP_NET_ADMIN), and switching delay accounting on and back
+# off (CAP_SYS_ADMIN, for /proc/sys/kernel/task_delayacct).
+CapabilityBoundingSet=CAP_SYS_PTRACE CAP_DAC_READ_SEARCH CAP_NET_ADMIN CAP_SYS_ADMIN
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=read-only
+LogsDirectory=hyprforge/procman
+LogsDirectoryMode=0700
+ReadWritePaths=/proc/sys/kernel/task_delayacct
+PrivateTmp=yes
+PrivateDevices=yes
+PrivateNetwork=yes
+RestrictAddressFamilies=AF_NETLINK AF_UNIX
+ProtectKernelModules=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target
