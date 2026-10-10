@@ -66,9 +66,25 @@ pub fn freeze(id: Id, frozen: bool) -> Result<(), Refused> {
     send(id, if frozen { libc::SIGSTOP } else { libc::SIGCONT })
 }
 
-/// The signal `signal` to `id`, through a pidfd. Signal 0 sends nothing
-/// and only asks whether sending would be allowed.
-fn send(id: Id, signal: i32) -> Result<(), Refused> {
+/// Sets `id`'s nice value, after the same identity check as a signal.
+///
+/// `setpriority` takes a pid, not a pidfd, so a reuse between the check
+/// and the call is possible in principle; it needs the pid space to wrap
+/// in that gap, and the held pidfd keeps the chosen process from being
+/// reaped meanwhile only if it is a child, so this is narrower than a
+/// signal's guarantee and is said so here rather than claimed.
+pub fn renice(id: Id, nice: i32) -> Result<(), Refused> {
+    let _held = open(id)?;
+    // SAFETY: setpriority takes plain integers.
+    let rc = unsafe { libc::setpriority(libc::PRIO_PROCESS, id.pid as libc::id_t, nice) };
+    if rc != 0 {
+        return Err(refused(io::Error::last_os_error()));
+    }
+    Ok(())
+}
+
+/// A pidfd for `id`, once its start time has been checked against it.
+fn open(id: Id) -> Result<OwnedFd, Refused> {
     // SAFETY: pidfd_open takes a pid and flags and returns a new fd or -1.
     let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, id.pid, 0) };
     if fd < 0 {
@@ -79,6 +95,13 @@ fn send(id: Id, signal: i32) -> Result<(), Refused> {
     if crate::proc::start_time(id.pid) != Some(id.start) {
         return Err(Refused::Gone);
     }
+    Ok(pidfd)
+}
+
+/// The signal `signal` to `id`, through a pidfd. Signal 0 sends nothing
+/// and only asks whether sending would be allowed.
+pub fn send(id: Id, signal: i32) -> Result<(), Refused> {
+    let pidfd = open(id)?;
     // SAFETY: a held pidfd, a signal number, no siginfo, no flags.
     let sent = unsafe {
         libc::syscall(libc::SYS_pidfd_send_signal, pidfd.as_raw_fd(), signal, std::ptr::null::<libc::siginfo_t>(), 0)

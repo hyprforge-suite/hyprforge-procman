@@ -21,7 +21,7 @@ always runs as the user. The privileged part is a small separate
 program, never the GUI.
 
 **`hyprforge-procman-helper`** is a system D-Bus service
-(`org.hyprforge.ProcMan1`), started on demand by D-Bus activation and
+(`dev.hyprforge.ProcMan1`), started on demand by D-Bus activation and
 exiting when idle. Every method checks polkit for the caller before
 doing anything. It does two jobs:
 

@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE policyconfig PUBLIC
+ "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN"
+ "http://www.freedesktop.org/standards/PolicyKit/1/policyconfig.dtd">
+<!--
+  hyprforge-procman's helper — see src/helper.rs. The helper runs as
+  root and asks polkit about its *caller* before every call, so these
+  actions are what a person is allowed through it.
+
+  auth_admin_keep for an active local session: "Show everything" asks
+  once and stays unlocked for polkit's few minutes, the way Task
+  Manager's "Show processes from all users" elevates once. Nothing is
+  allowed without authenticating, for inactive or remote sessions
+  either.
+
+  Ending your own processes never comes here: the window does that
+  itself, as you.
+-->
+<policyconfig>
+  <vendor>Hyprforge</vendor>
+  <vendor_url>https://github.com/hyprforge-suite</vendor_url>
+  <action id="org.hyprforge.procman.read-all">
+    <description>See every process's activity</description>
+    <message>Processes needs administrator access to show what every process is reading, writing and holding open</message>
+    <icon_name>utilities-system-monitor</icon_name>
+    <defaults>
+      <allow_any>auth_admin</allow_any>
+      <allow_inactive>auth_admin</allow_inactive>
+      <allow_active>auth_admin_keep</allow_active>
+    </defaults>
+  </action>
+  <action id="org.hyprforge.procman.signal">
+    <description>End, freeze or resume another user's process</description>
+    <message>Processes needs administrator access to end or pause a process that isn't yours</message>
+    <icon_name>utilities-system-monitor</icon_name>
+    <defaults>
+      <allow_any>auth_admin</allow_any>
+      <allow_inactive>auth_admin</allow_inactive>
+      <allow_active>auth_admin_keep</allow_active>
+    </defaults>
+  </action>
+  <action id="org.hyprforge.procman.renice">
+    <description>Change a process's priority</description>
+    <message>Processes needs administrator access to raise a process's priority or change one that isn't yours</message>
+    <icon_name>utilities-system-monitor</icon_name>
+    <defaults>
+      <allow_any>auth_admin</allow_any>
+      <allow_inactive>auth_admin</allow_inactive>
+      <allow_active>auth_admin_keep</allow_active>
+    </defaults>
+  </action>
+</policyconfig>

@@ -16,6 +16,14 @@ publish = false
 name = "hyprforge-procman"
 path = "src/main.rs"
 
+# The privileged half: a system D-Bus service that runs as root, checks
+# polkit for every call, and takes only typed arguments. In this crate
+# because a package's binaries must live in one crate directory (the
+# suite's CLAUDE.md: a binary cannot be fetched).
+[[bin]]
+name = "hyprforge-procman-helper"
+path = "src/bin/helper.rs"
+
 [dependencies]
 # By crates.io version, as every component names its siblings — see the
 # suite's CLAUDE.md on `[patch.crates-io]`.
@@ -43,6 +51,8 @@ tokio = { version = "1.53", features = ["rt-multi-thread", "macros", "sync", "ti
 # signal reaches the process that was chosen and never one that reused
 # its number.
 libc = "0.2"
+# The helper's service and the window's client of it, on the system bus.
+zbus = { version = "5.18", default-features = false, features = ["tokio"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tracing = "0.1"
@@ -50,3 +60,5 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [dev-dependencies]
 tempfile = "3"
+# The helper's tests talk to it over a socket pair, no bus needed.
+zbus = { version = "5.18", default-features = false, features = ["tokio", "p2p"] }

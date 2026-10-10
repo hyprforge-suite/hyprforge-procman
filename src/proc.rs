@@ -159,6 +159,32 @@ pub fn start_time(pid: i32) -> Option<u64> {
     parse_stat(&fs::read_to_string(format!("/proc/{pid}/stat")).ok()?).map(|s| s.start)
 }
 
+/// Whether a `/proc/<pid>/stat` line is a kernel thread's.
+pub fn is_kernel_thread(stat: &str) -> bool {
+    parse_stat(stat).is_some_and(|s| s.flags & PF_KTHREAD != 0)
+}
+
+/// What root can read about `id` that its owner's window may not: storage
+/// I/O and how many files it has open. `None` when it ended, or the pid
+/// now names another process.
+pub fn usage(root: &Path, id: crate::sample::Id) -> Option<crate::helper::Usage> {
+    let dir = root.join(id.pid.to_string());
+    let stat = parse_stat(&fs::read_to_string(dir.join("stat")).ok()?)?;
+    if stat.start != id.start {
+        return None;
+    }
+    let io = fs::read_to_string(dir.join("io")).ok()?;
+    let field = |key: &str| io.lines().find_map(|l| l.strip_prefix(key)?.trim().parse::<u64>().ok());
+    let open_files = fs::read_dir(dir.join("fd")).map(|d| d.count() as u32).unwrap_or(0);
+    Some(crate::helper::Usage {
+        pid: id.pid,
+        start: id.start,
+        read_bytes: field("read_bytes:")?,
+        write_bytes: field("write_bytes:")?,
+        open_files,
+    })
+}
+
 /// `include/linux/sched.h`.
 const PF_KTHREAD: u64 = 0x0020_0000;
 

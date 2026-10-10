@@ -8,6 +8,7 @@
 //! never one that merely reused its number. The window is `main.rs`.
 
 pub mod graph;
+pub mod helper;
 pub mod history;
 pub mod model;
 pub mod proc;

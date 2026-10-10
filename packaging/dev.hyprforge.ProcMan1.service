@@ -1,0 +1,7 @@
+# D-Bus activation for hyprforge-procman's helper, installed to
+# /usr/share/dbus-1/system-services/. The bus starts it as root the
+# first time the window calls it; it exits after a minute idle.
+[D-BUS Service]
+Name=dev.hyprforge.ProcMan1
+Exec=/usr/lib/hyprforge/hyprforge-procman-helper
+User=root
