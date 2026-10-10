@@ -11,6 +11,33 @@ use iced::widget::{button, column, container, row, scrollable, Space};
 use iced::{Alignment, Background, Border, Element, Length};
 
 const NICE_W: f32 = 70.0;
+/// The Advanced columns, after Priority.
+const ADVANCED: [(&str, f32); 7] =
+    [("user · sys", 110.0), ("Swap", 84.0), ("Faults/s", 100.0), ("Switches/s", 116.0), ("Core", 60.0), ("Policy", 92.0), ("Virtual", 96.0)];
+/// The name column when the table scrolls sideways and cannot fill.
+const ADVANCED_NAME_W: f32 = 320.0;
+
+/// The kernel's scheduling policies, in words.
+pub fn policy(p: u32) -> &'static str {
+    match p {
+        0 => "normal",
+        1 => "FIFO",
+        2 => "round-robin",
+        3 => "batch",
+        5 => "idle",
+        6 => "deadline",
+        _ => "other",
+    }
+}
+
+/// `4.1k`, for counts a second.
+fn per_second(v: f64) -> String {
+    if v >= 1000.0 {
+        format!("{:.1}k", v / 1000.0)
+    } else {
+        format!("{v:.0}")
+    }
+}
 const TIME_W: f32 = 96.0;
 const THREADS_W: f32 = 76.0;
 
@@ -26,8 +53,10 @@ pub fn duration(seconds: u64) -> String {
 
 impl App {
     pub fn details_view(&self, s: FontScale) -> Element<'_, Message> {
-        let heads = row![
-            self.column_head("Name", Column::Name, Length::FillPortion(NAME_PORTION), false, s),
+        let advanced = self.advanced;
+        let name_width = if advanced { Length::Fixed(s.apply(ADVANCED_NAME_W)) } else { Length::FillPortion(NAME_PORTION) };
+        let mut heads = row![
+            self.column_head("Name", Column::Name, name_width, false, s),
             self.column_head("PID", Column::Pid, Length::Fixed(s.apply(PID_W)), true, s),
             self.column_head("User", Column::User, Length::Fixed(s.apply(USER_W)), false, s),
             self.column_head("CPU", Column::Cpu, Length::Fixed(s.apply(CPU_W)), true, s),
@@ -38,6 +67,13 @@ impl App {
             container(widgets::meta_text("Priority", density::META_TEXT_BASE, s)).width(Length::Fixed(s.apply(NICE_W))).padding([spacing::XS, spacing::SM]).align_x(Alignment::End),
         ]
         .padding([0.0, spacing::SM]);
+        if advanced {
+            for (label, w) in ADVANCED {
+                heads = heads.push(
+                    container(widgets::meta_text(label, density::META_TEXT_BASE, s)).width(Length::Fixed(s.apply(w))).padding([spacing::XS, spacing::SM]).align_x(Alignment::End),
+                );
+            }
+        }
 
         let lines = model::details(&self.table, &self.view, self.details.tree);
         let mut list = column![].spacing(1.0).padding([spacing::XS, spacing::SM]);
@@ -61,7 +97,23 @@ impl App {
             Space::new().width(Length::Fill),
         ]
         .padding([spacing::SM, spacing::MD]);
-        let mut page = column![controls, widgets::divider(), heads, widgets::divider(), scrollable(list).height(Length::FillPortion(3))];
+        let table: Element<'_, Message> = if advanced {
+            // Wider than the window: the header and the rows scroll
+            // sideways together, and the rows alone scroll down.
+            let fixed = [PID_W, USER_W, CPU_W, TIME_W, MEM_W, DISK_W, THREADS_W, NICE_W].iter().sum::<f32>() + ADVANCED.iter().map(|(_, w)| w).sum::<f32>();
+            let width = s.apply(ADVANCED_NAME_W + fixed) + spacing::SM * 4.0;
+            scrollable(
+                column![heads, widgets::divider(), scrollable(list).height(Length::Fill)]
+                    .width(Length::Fixed(width))
+                    .height(Length::Fill),
+            )
+            .direction(iced::widget::scrollable::Direction::Horizontal(iced::widget::scrollable::Scrollbar::default()))
+            .height(Length::FillPortion(3))
+            .into()
+        } else {
+            column![heads, widgets::divider(), scrollable(list).height(Length::Fill)].height(Length::FillPortion(3)).into()
+        };
+        let mut page = column![controls, widgets::divider(), table];
         if let Some(entry) = self.selected.and_then(|id| model::entries(&self.table).find(|e| e.id == id)) {
             page = page.push(widgets::divider()).push(self.properties(entry, s));
         }
@@ -78,10 +130,11 @@ impl App {
         };
         let indent = Space::new().width(Length::Fixed(s.apply(14.0) * depth as f32));
         let name = row![indent, self.entry_name(&e, s)].align_y(Alignment::Center);
-        let line = row![
-            container(name).width(Length::FillPortion(NAME_PORTION)).padding([0.0, spacing::SM]),
+        let name_width = if self.advanced { Length::Fixed(s.apply(ADVANCED_NAME_W)) } else { Length::FillPortion(NAME_PORTION) };
+        let mut line = row![
+            container(name).width(name_width).padding([0.0, spacing::SM]).clip(true),
             cell(e.id.pid.to_string(), PID_W),
-            container(widgets::meta_text(e.user.clone(), density::ROW_TEXT_BASE, s)).width(Length::Fixed(s.apply(USER_W))).padding([0.0, spacing::SM]),
+            container(widgets::meta_text(e.user.clone(), density::ROW_TEXT_BASE, s).color(crate::view::ink(selected))).width(Length::Fixed(s.apply(USER_W))).padding([0.0, spacing::SM]),
             cell(percent(e.cpu), CPU_W),
             cell(duration(e.ticks / tps), TIME_W),
             cell(bytes(e.private_bytes), MEM_W),
@@ -90,6 +143,24 @@ impl App {
             cell(e.nice.to_string(), NICE_W),
         ]
         .align_y(Alignment::Center);
+        if self.advanced {
+            let d = e.detail;
+            let values = [
+                d.map_or("—".to_string(), |d| format!("{:.1} · {:.1}", d.user_pct, d.system_pct)),
+                e.swap_bytes.map_or("—".to_string(), bytes),
+                d.map_or("—".to_string(), |d| format!("{} · {}", per_second(d.minor_faults), per_second(d.major_faults))),
+                match d.and_then(|d| Some((d.voluntary?, d.forced?))) {
+                    Some((v, f)) => format!("{} · {}", per_second(v), per_second(f)),
+                    None => "—".to_string(),
+                },
+                if e.processor >= 0 { e.processor.to_string() } else { "—".to_string() },
+                policy(e.policy).to_string(),
+                bytes(e.vsize),
+            ];
+            for (value, (_, w)) in values.into_iter().zip(ADVANCED) {
+                line = line.push(cell(value, w));
+            }
+        }
         button(line)
             .padding([spacing::XS, 0.0])
             .width(Length::Fill)
@@ -172,6 +243,14 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn policies_read_as_words() {
+        assert_eq!(policy(0), "normal");
+        assert_eq!(policy(1), "FIFO");
+        assert_eq!(policy(6), "deadline");
+        assert_eq!(per_second(4123.0), "4.1k");
+    }
 
     #[test]
     fn cpu_time_reads_as_a_clock() {

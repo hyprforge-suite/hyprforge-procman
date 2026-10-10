@@ -153,13 +153,15 @@ impl App {
         if self.tab == Tab::Services {
             bar = bar.push(
                 container(widgets::search_field("Search services", &self.services.query, Message::ServiceQuery, None, None, s))
-                    .width(Length::Fixed(s.apply(320.0))),
+                    .width(Length::Fixed(s.apply(if self.advanced { 230.0 } else { 320.0 }))),
             );
         }
         if matches!(self.tab, Tab::Processes | Tab::Details) {
             bar = bar.push(
+                // Narrower when the Advanced switch shares the bar, so
+                // Pause is never pushed off its edge.
                 container(widgets::search_field("Search, or port:8080, file:~/notes.txt", &self.view.query, Message::Query, None, Some(crate::search_id()), s))
-                    .width(Length::Fixed(s.apply(320.0))),
+                    .width(Length::Fixed(s.apply(if self.advanced { 230.0 } else { 320.0 }))),
             );
         }
         let speeds = widgets::segmented_choice(
