@@ -69,6 +69,19 @@ fn kib(value: &str) -> Option<u64> {
     })
 }
 
+/// Who made a card a process has open — "AMD", "NVIDIA", "Intel" — by its
+/// driver, which `gpus` (the machine's cards) names by PCI address.
+/// NVIDIA's own device files have no address and say `nvidia`.
+pub fn maker(card: &str, gpus: &[crate::machine::Gpu]) -> &'static str {
+    let driver = if card == "nvidia" { "nvidia" } else { gpus.iter().find(|g| g.pci == card).map_or("", |g| g.driver.as_str()) };
+    match driver {
+        "nvidia" | "nouveau" => "NVIDIA",
+        "amdgpu" | "radeon" => "AMD",
+        "i915" | "xe" => "Intel",
+        _ => "GPU",
+    }
+}
+
 /// Which descriptors of which processes are GPU ones.
 #[derive(Debug, Default)]
 pub struct Scan {

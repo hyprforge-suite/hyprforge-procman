@@ -11,7 +11,7 @@ use hyprforge_procman::report::{self, Kind};
 use hyprforge_procman::sample::Id;
 use hyprforge_procman::signal::{self, How};
 use hyprforge_procman::tui::render;
-use hyprforge_procman::tui::source::{self, Live, Replay, Screen};
+use hyprforge_procman::tui::source::{self, Extras, Live, Replay, Screen};
 use hyprforge_procman::tui::state::{self, Action, Key, State, View};
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use std::time::{Duration, Instant};
@@ -215,11 +215,18 @@ fn run(mut terminal: ratatui::DefaultTerminal, mut mode: Mode) -> std::io::Resul
             let Some(key) = key_of(k.code) else { continue };
             // The added-up views list users, programs and cgroups, not
             // processes: nothing there to end.
-            let chosen = match state.view {
-                View::Users | View::Programs | View::Cgroups => None,
-                _ => state.rows(&screen.moment).get(state.selected).map(|r| (*r).clone()),
-            };
-            match state.key(key, chosen.as_ref()) {
+            let chosen = if state.view.lists_processes() { state.rows(&screen.moment).get(state.selected).map(|r| (*r).clone()) } else { None };
+            let was = state.view;
+            let action = state.key(key, chosen.as_ref());
+            // A live-only view opened: read it now, not a refresh later.
+            if let Mode::Live(live, _) = &mut mode {
+                live.extras = Extras { threads: state.view == View::Threads, gpu: state.view == View::Gpu };
+                if state.view != was && state.view.live_only() {
+                    screen = live.screen()?;
+                    next_refresh = Instant::now() + Duration::from_secs(1);
+                }
+            }
+            match action {
                 Action::None => {}
                 Action::Quit => return Ok(()),
                 Action::Kill { pid, start } => {

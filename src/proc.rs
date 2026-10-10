@@ -453,6 +453,37 @@ impl ThreadStates {
     }
 }
 
+/// One thread, as its `task/<tid>/stat` gives it — atop's `y` view.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Thread {
+    pub pid: i32,
+    pub tid: i32,
+    /// The thread's own name, which a program may set per thread
+    /// (`tokio-runtime-w`, `Chrome_IOThread`); the process's otherwise.
+    pub name: String,
+    pub state: char,
+    /// User plus system time, in clock ticks, over the thread's life.
+    pub ticks: u64,
+    /// The CPU it last ran on.
+    pub processor: i32,
+}
+
+/// Every thread of `pid` that can be read. A process this user may not
+/// look into, or one that ended, has none.
+pub fn threads(root: &Path, pid: i32) -> Vec<Thread> {
+    let Ok(dir) = fs::read_dir(root.join(pid.to_string()).join("task")) else { return Vec::new() };
+    let mut out: Vec<Thread> = dir
+        .flatten()
+        .filter_map(|entry| {
+            let tid = entry.file_name().to_str()?.parse().ok()?;
+            let stat = parse_stat(&fs::read_to_string(entry.path().join("stat")).ok()?)?;
+            Some(Thread { pid, tid, name: stat.comm, state: stat.state, ticks: stat.utime + stat.stime, processor: stat.processor })
+        })
+        .collect();
+    out.sort_by_key(|t| t.tid);
+    out
+}
+
 /// Each thread's state from `task/<tid>/stat`, counted.
 fn thread_states(dir: &Path) -> Option<ThreadStates> {
     let mut states = ThreadStates::default();
@@ -714,5 +745,20 @@ mod tests {
         assert!(me.private_bytes > 0);
         assert!(!snap.cores.is_empty());
         assert!(snap.memory.total > 0);
+    }
+
+    #[test]
+    fn a_processs_threads_are_read_with_their_own_names() {
+        let (named, stop) = std::sync::mpsc::channel::<()>();
+        let worker = std::thread::Builder::new().name("hogsmeade".into()).spawn(move || {
+            let _ = stop.recv();
+        }).unwrap();
+        let me = std::process::id() as i32;
+        let mine = threads(Path::new("/proc"), me);
+        assert!(mine.iter().any(|t| t.tid == me), "the main thread is the process's own id");
+        assert!(mine.iter().any(|t| t.name == "hogsmeade" && t.tid != me && t.pid == me), "{mine:?}");
+        assert!(threads(Path::new("/proc"), i32::MAX).is_empty(), "no such process is no threads, not an error");
+        drop(named);
+        worker.join().unwrap();
     }
 }

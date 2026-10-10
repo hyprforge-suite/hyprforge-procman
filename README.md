@@ -33,7 +33,7 @@ other Hyprforge component to start.
   see what was busiest, and what the hour around it added up to.
 
 **`hyprforge-top`** is atop's screen in a terminal — its header lines,
-its views (`g m d n s v c u p j`), its keys and sorts — live, or replaying
+its views (`g m d n s v c u p j`, and `y` for threads and `e` for GPU use live), its keys and sorts — live, or replaying
 the recorder's history with `-r DAY -b HH:MM`. `hyprforge-top report
 cpu|mem|disk|net|psi|top` is atopsar: what a day added up to, as text or
 `--json`.

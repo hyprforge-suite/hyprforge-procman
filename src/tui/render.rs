@@ -4,7 +4,7 @@
 //! users can read this without learning a second vocabulary; a figure
 //! that is getting critical is coloured the way atop colours it.
 
-use super::source::Screen;
+use super::source::{GpuRow, Screen, ThreadRow};
 use super::state::{Prompt, SortKey, State, View};
 use crate::moment::{Ended, Row};
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -381,6 +381,8 @@ fn columns(view: View) -> (&'static [&'static str], Vec<Constraint>) {
         View::Command => (&["PID", "CPU", "COMMAND-LINE"], vec![Length(7), Length(6), Min(10)]),
         View::Users => (&["USER", "NPROCS", "CPU", "RSIZE", "RDDSK", "WRDSK"], vec![Length(14), Length(6), Length(7), Length(7), Length(7), Min(7)]),
         View::Programs => (&["PROGRAM", "NPROCS", "CPU", "RSIZE", "RDDSK", "WRDSK"], vec![Length(18), Length(6), Length(7), Length(7), Length(7), Min(7)]),
+        View::Threads => (&["TID", "PID", "S", "CPUNR", "CPU", "THREAD", "PROCESS"], vec![Length(8), Length(8), Length(1), Length(5), Length(6), Length(18), Min(10)]),
+        View::Gpu => (&["PID", "GPUBUSY", "VRAM", "GPU", "CMD"], vec![Length(7), Length(7), Length(7), Length(12), Min(10)]),
         View::Cgroups => (
             &["CPU", "MEM", "MEMMAX", "PIDS", "MPSI", "IOPSI", "OOM", "CGROUP"],
             vec![Length(6), Length(6), Length(6), Length(5), Length(5), Length(5), Length(4), Min(10)],
@@ -498,7 +500,7 @@ fn process_cells(view: View, r: &Row, totals: &Totals) -> Vec<Cell<'static>> {
             Cell::from(name_of(r)),
         ],
         View::Command => vec![pid, cpu_cell(r.cpu_pct), Cell::from(if r.command.is_empty() { name_of(r) } else { r.command.clone() })],
-        View::Users | View::Programs | View::Cgroups => Vec::new(),
+        View::Users | View::Programs | View::Cgroups | View::Threads | View::Gpu => Vec::new(),
     }
 }
 
@@ -538,6 +540,41 @@ fn short_cgroup(path: &str) -> String {
     }
 }
 
+/// The threads view's rows: filtered by process, thread name or either
+/// id, busiest first.
+fn thread_list<'s>(state: &State, screen: &'s Screen) -> Vec<&'s ThreadRow> {
+    let mut out: Vec<&ThreadRow> = screen.threads.iter().flatten().filter(|t| state.shows(&[&t.name, &t.process], &[t.pid, t.tid])).collect();
+    out.sort_by(|a, b| b.cpu_pct.unwrap_or(-1.0).total_cmp(&a.cpu_pct.unwrap_or(-1.0)).then(a.tid.cmp(&b.tid)));
+    out
+}
+
+/// The GPU view's rows, already in order (busiest, then most memory).
+fn gpu_list<'s>(state: &State, screen: &'s Screen) -> Vec<&'s GpuRow> {
+    screen.gpus.iter().flatten().filter(|g| state.shows(&[&g.name], &[g.pid])).collect()
+}
+
+fn thread_cells(t: &ThreadRow) -> Vec<Cell<'static>> {
+    vec![
+        right(t.tid.to_string()),
+        right(t.pid.to_string()),
+        Cell::from(t.state.to_string()),
+        right(t.processor.to_string()),
+        t.cpu_pct.map_or_else(|| right("-".into()), cpu_cell),
+        Cell::from(t.name.clone()),
+        Cell::from(t.process.clone()).style(Style::new().dim()),
+    ]
+}
+
+fn gpu_cells(g: &GpuRow) -> Vec<Cell<'static>> {
+    vec![
+        right(g.pid.to_string()),
+        g.busy_pct.map_or_else(|| right("-".into()), |p| right(format!("{p:.0}%")).style(level(p, 50.0, 90.0))),
+        right(bytes(g.vram)),
+        Cell::from(g.cards.join("+")),
+        Cell::from(g.name.clone()),
+    ]
+}
+
 /// How many rows the list has in this view — what the selection is
 /// clamped to.
 pub fn list_len(state: &State, screen: &Screen) -> usize {
@@ -545,6 +582,8 @@ pub fn list_len(state: &State, screen: &Screen) -> usize {
         View::Users => totals(&state.rows(&screen.moment), |r| &r.user).len(),
         View::Programs => totals(&state.rows(&screen.moment), |r| &r.name).len(),
         View::Cgroups => cgroup_lines(screen).len(),
+        View::Threads => thread_list(state, screen).len(),
+        View::Gpu => gpu_list(state, screen).len(),
         _ => state.rows(&screen.moment).len(),
     }
 }
@@ -561,10 +600,18 @@ fn view_name(view: View) -> &'static str {
         View::Users => "per user",
         View::Programs => "per program",
         View::Cgroups => "cgroups",
+        View::Threads => "threads",
+        View::Gpu => "gpu",
     }
 }
 
 fn sort_name(state: &State, screen: &Screen) -> &'static str {
+    // These two keep an order of their own; the sort keys are for processes.
+    match state.view {
+        View::Threads => return "cpu",
+        View::Gpu => return "gpu busy, then video memory",
+        _ => {}
+    }
     let key = match state.sort {
         SortKey::Auto => super::state::auto_key(&screen.moment),
         k => k,
@@ -598,6 +645,11 @@ fn status(state: &State, screen: &Screen) -> Line<'static> {
     if !state.filter.is_empty() {
         spans.push(Span::styled(format!("  showing {:?}", state.filter), Style::new().fg(Color::Magenta)));
     }
+    // A live-only view in a replay is empty because the journal never
+    // held it, and says so rather than look like an idle machine.
+    if state.view.live_only() && screen.position.is_some() {
+        spans.push(Span::styled("  threads and GPU use are read live, not kept in the journal", Style::new().fg(Color::Yellow)));
+    }
     // The view says it is empty because nothing was counting, not
     // because nothing used the network.
     if state.view == View::Network && screen.moment.rows.iter().all(|r| r.net_rx.is_none()) {
@@ -612,6 +664,7 @@ fn status(state: &State, screen: &Screen) -> Line<'static> {
 
 const HELP: &[(&str, &str)] = &[
     ("g m d n s v c", "process views: generic, memory, disk, network (under sudo), scheduling, various, command line"),
+    ("y e", "live only: every thread by its own name; each process holding a GPU"),
     ("u p j", "added up: per user, per program, per cgroup"),
     ("C M D N A", "sort by CPU, memory, disk, network, or whatever is busiest"),
     ("/", "show only processes matching a name, command, user or pid; Esc clears"),
@@ -645,6 +698,8 @@ pub fn draw(frame: &mut Frame, state: &State, screen: &Screen) {
         View::Users => totals(&state.rows(&screen.moment), |r| &r.user).iter().map(|t| TableRow::new(total_cells(t))).collect(),
         View::Programs => totals(&state.rows(&screen.moment), |r| &r.name).iter().map(|t| TableRow::new(total_cells(t))).collect(),
         View::Cgroups => cgroup_lines(screen).iter().map(|c| TableRow::new(cgroup_cells(c))).collect(),
+        View::Threads => thread_list(state, screen).into_iter().map(|t| TableRow::new(thread_cells(t))).collect(),
+        View::Gpu => gpu_list(state, screen).into_iter().map(|g| TableRow::new(gpu_cells(g))).collect(),
         view => {
             let rows = state.rows(&screen.moment);
             let totals = Totals {
@@ -713,13 +768,43 @@ mod tests {
     #[test]
     fn every_view_draws_its_own_columns() {
         let s = screen();
-        for (key, heading) in [('g', "RDELAY"), ('m', "MAJFLT"), ('d', "WCANCL"), ('n', "BANDWI"), ('s', "BDELAY"), ('v', "PPID"), ('c', "COMMAND-LINE"), ('u', "NPROCS"), ('p', "PROGRAM"), ('j', "CGROUP")] {
+        for (key, heading) in [('g', "RDELAY"), ('m', "MAJFLT"), ('d', "WCANCL"), ('n', "BANDWI"), ('s', "BDELAY"), ('v', "PPID"), ('c', "COMMAND-LINE"), ('u', "NPROCS"), ('p', "PROGRAM"), ('j', "CGROUP"), ('y', "THREAD"), ('e', "GPUBUSY")] {
             let mut state = State::new(false);
             state.key(super::super::state::Key::Char(key), None);
             let out = text(&state, &s);
             assert!(out.contains(heading), "view {key} has no {heading}:\n{out}");
             assert!(out.contains("PRC") && out.contains("MEM") && out.contains("DSK"), "{out}");
         }
+    }
+
+    #[test]
+    fn threads_and_gpu_users_are_listed_busiest_first_and_filtered_like_processes() {
+        use super::super::source::{GpuRow, ThreadRow};
+        let mut s = screen();
+        let t = |tid, name: &str, cpu| ThreadRow { pid: 4242, tid, process: "blender".into(), name: name.into(), state: 'R', cpu_pct: cpu, processor: 3 };
+        s.threads = Some(vec![t(4242, "blender", Some(1.0)), t(4250, "BlenderRender", Some(60.0)), t(4251, "new-thread", None)]);
+        s.gpus = Some(vec![GpuRow { pid: 4242, name: "blender".into(), cards: vec!["AMD".into(), "NVIDIA".into()], busy_pct: Some(88.0), vram: 2 << 30 }]);
+        let mut state = State::new(false);
+        state.key(super::super::state::Key::Char('y'), None);
+        let out = text(&state, &s);
+        let line = |name: &str| out.lines().position(|l| l.contains(name)).unwrap_or_else(|| panic!("{name} not listed:\n{out}"));
+        assert!(line("BlenderRender") < line("1.0%") && line("1.0%") < line("new-thread"), "busiest first, unmeasured last:\n{out}");
+        assert_eq!(list_len(&state, &s), 3);
+        state.filter = "render".into();
+        assert_eq!(list_len(&state, &s), 1, "the filter reaches thread names");
+        state.filter.clear();
+        state.key(super::super::state::Key::Char('e'), None);
+        let out = text(&state, &s);
+        assert!(out.contains("AMD+NVIDIA") && out.contains("88%") && out.contains("2.0G"), "{out}");
+    }
+
+    #[test]
+    fn a_replay_says_threads_and_gpu_use_are_not_in_the_journal() {
+        let mut s = screen();
+        s.position = Some((0, 10));
+        let mut state = State::new(true);
+        state.key(super::super::state::Key::Char('y'), None);
+        assert!(text(&state, &s).contains("not kept in the journal"));
     }
 
     #[test]
@@ -786,10 +871,11 @@ mod live {
     #[ignore = "prints this machine"]
     fn draw_this_machine() {
         let mut live = super::super::source::Live::new();
+        live.extras = super::super::source::Extras { threads: true, gpu: true };
         live.screen().unwrap();
         std::thread::sleep(std::time::Duration::from_secs(2));
         let screen = live.screen().unwrap();
-        for view in ['g', 's', 'j'] {
+        for view in ['g', 's', 'j', 'y', 'e'] {
             let mut state = State::new(false);
             state.key(super::super::state::Key::Char(view), None);
             let mut t = Terminal::new(TestBackend::new(160, 40)).unwrap();

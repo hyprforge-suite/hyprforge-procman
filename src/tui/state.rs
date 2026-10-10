@@ -27,6 +27,24 @@ pub enum View {
     Programs,
     /// `j`: every cgroup — each service, slice and scope.
     Cgroups,
+    /// `y`: every thread, by its own name (live only).
+    Threads,
+    /// `e`: each process holding a GPU — its busiest engine and its video
+    /// memory (live only).
+    Gpu,
+}
+
+impl View {
+    /// Read from `/proc` as the screen is drawn, not kept in the journal.
+    pub fn live_only(self) -> bool {
+        matches!(self, View::Threads | View::Gpu)
+    }
+
+    /// Lists something other than processes, so nothing in it is a
+    /// process to end.
+    pub fn lists_processes(self) -> bool {
+        !matches!(self, View::Users | View::Programs | View::Cgroups | View::Threads | View::Gpu)
+    }
 }
 
 /// atop's sort keys: `C` CPU, `M` memory, `D` disk, `N` network, `A`
@@ -104,6 +122,13 @@ impl State {
     }
 
     /// The rows the list shows, in order: filtered, then sorted.
+    /// The filter, applied to a name and a pid of something that isn't a
+    /// process row (a thread, a GPU user).
+    pub fn shows(&self, names: &[&str], pids: &[i32]) -> bool {
+        let needle = self.filter.to_lowercase();
+        needle.is_empty() || names.iter().any(|n| n.to_lowercase().contains(&needle)) || pids.iter().any(|p| p.to_string() == needle)
+    }
+
     pub fn rows<'m>(&self, moment: &'m Moment) -> Vec<&'m Row> {
         let needle = self.filter.to_lowercase();
         let mut rows: Vec<&Row> = moment
@@ -154,6 +179,8 @@ impl State {
             Key::Char('u') => self.view = View::Users,
             Key::Char('p') => self.view = View::Programs,
             Key::Char('j') => self.view = View::Cgroups,
+            Key::Char('y') => self.view = View::Threads,
+            Key::Char('e') => self.view = View::Gpu,
             Key::Char('C') => self.sort = SortKey::Cpu,
             Key::Char('M') => self.sort = SortKey::Memory,
             Key::Char('D') => self.sort = SortKey::Disk,
@@ -329,5 +356,14 @@ mod tests {
         assert_eq!(auto_key(&m), SortKey::Cpu);
         m.system.disks.push(crate::moment::DiskLine { name: "nvme0n1".into(), busy_pct: 95.0, ..Default::default() });
         assert_eq!(auto_key(&m), SortKey::Disk);
+    }
+
+    #[test]
+    fn nothing_in_a_view_of_threads_gpus_or_totals_is_a_process_to_end() {
+        for view in [View::Users, View::Programs, View::Cgroups, View::Threads, View::Gpu] {
+            assert!(!view.lists_processes(), "{view:?}");
+        }
+        assert!(View::Generic.lists_processes() && View::Network.lists_processes());
+        assert!(View::Threads.live_only() && View::Gpu.live_only() && !View::Generic.live_only());
     }
 }

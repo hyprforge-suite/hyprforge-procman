@@ -1067,19 +1067,7 @@ impl App {
             usage.gpu = hyprforge_procman::gpu::shares(&self.last_gpu, &gpu, &ids, seconds);
             // A card's maker, from its driver; NVIDIA's own device files
             // name no PCI address.
-            let maker = |card: &str| -> String {
-                let driver = if card == "nvidia" {
-                    "nvidia"
-                } else {
-                    self.machine.gpus.iter().find(|g| g.pci == card).map_or("", |g| g.driver.as_str())
-                };
-                match driver {
-                    "nvidia" | "nouveau" => "NVIDIA".to_string(),
-                    "amdgpu" | "radeon" => "AMD".to_string(),
-                    "i915" | "xe" => "Intel".to_string(),
-                    _ => "GPU".to_string(),
-                }
-            };
+            let maker = |card: &str| hyprforge_procman::gpu::maker(card, &self.machine.gpus).to_string();
             usage.gpu_cards = gpu
                 .iter()
                 .filter_map(|(pid, u)| {

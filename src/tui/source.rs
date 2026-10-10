@@ -31,6 +31,45 @@ pub struct Screen {
     pub since_boot: bool,
     /// Replay: which sample, of how many.
     pub position: Option<(usize, usize)>,
+    /// atop's `y`: every thread, read live and only while the view is
+    /// open. `None` is not read — replaying, since the journal keeps
+    /// thread counts, not threads.
+    pub threads: Option<Vec<ThreadRow>>,
+    /// atop's `e`: each process holding a GPU, read the same way.
+    pub gpus: Option<Vec<GpuRow>>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ThreadRow {
+    pub pid: i32,
+    pub tid: i32,
+    /// The process the thread belongs to.
+    pub process: String,
+    pub name: String,
+    pub state: char,
+    /// Of the whole machine, as a process's figure is; `None` for a thread
+    /// first seen this refresh.
+    pub cpu_pct: Option<f32>,
+    pub processor: i32,
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct GpuRow {
+    pub pid: i32,
+    pub name: String,
+    /// By maker — "AMD", "NVIDIA" — in order, once each.
+    pub cards: Vec<String>,
+    /// Its busiest engine's share of the interval; `None` on the first
+    /// reading, or where the driver gives no engine times (NVIDIA).
+    pub busy_pct: Option<f32>,
+    pub vram: u64,
+}
+
+/// What a live screen reads besides the recorder's own sample.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Extras {
+    pub threads: bool,
+    pub gpu: bool,
 }
 
 /// A frame standing in for "at boot": every counter zero, the same boot,
@@ -50,6 +89,12 @@ fn hostname() -> String {
 
 pub struct Live {
     recorder: Recorder,
+    /// Which extra readings the open view wants.
+    pub extras: Extras,
+    thread_ticks: std::collections::HashMap<i32, u64>,
+    gpu_scan: crate::gpu::Scan,
+    gpu_before: std::collections::HashMap<i32, crate::gpu::DrmUse>,
+    gpu_at: Option<std::time::Instant>,
     /// As root: every exit heard, so a process that lived and died
     /// between two refreshes still shows, as `<name>`.
     exits: Option<crate::exits::Listener>,
@@ -66,7 +111,15 @@ impl Live {
         // SAFETY: geteuid cannot fail.
         let root = unsafe { libc::geteuid() } == 0;
         let exits = if root { crate::exits::Listener::start().ok() } else { None };
-        Live { recorder: Recorder::new(config), exits, prev: None, users: Users::default(), tps: crate::proc::ticks_per_second() }
+        Live {
+            recorder: Recorder::new(config),
+            extras: Extras::default(),
+            thread_ticks: Default::default(),
+            gpu_scan: Default::default(),
+            gpu_before: Default::default(),
+            gpu_at: None,
+            exits,
+            prev: None, users: Users::default(), tps: crate::proc::ticks_per_second() }
     }
 
     pub fn screen(&mut self) -> io::Result<Screen> {
@@ -78,7 +131,52 @@ impl Live {
         self.prev = Some(now.clone());
         // SAFETY: geteuid cannot fail.
         let partial = unsafe { libc::geteuid() } != 0;
-        Ok(Screen { moment, prev, now, cpus: cpus(), hostname: hostname(), partial, since_boot, position: None })
+        let cpus = cpus();
+        let threads = self.extras.threads.then(|| self.read_threads(&moment, cpus));
+        let gpus = self.extras.gpu.then(|| self.read_gpus(&moment, &now));
+        Ok(Screen { moment, prev, now, cpus, hostname: hostname(), partial, since_boot, position: None, threads, gpus })
+    }
+
+    fn read_threads(&mut self, moment: &Moment, cpus: u32) -> Vec<ThreadRow> {
+        let root = Path::new("/proc");
+        // Ticks a whole machine has in the interval: what a share is of.
+        let capacity = self.tps as f64 * moment.system.seconds * f64::from(cpus.max(1));
+        let mut seen = std::collections::HashMap::new();
+        let mut out = Vec::new();
+        for r in moment.rows.iter().filter(|r| r.exit.is_none()) {
+            for t in crate::proc::threads(root, r.id.pid) {
+                let cpu_pct = self.thread_ticks.get(&t.tid).map(|&before| (t.ticks.saturating_sub(before) as f64 / capacity.max(1.0) * 100.0) as f32);
+                seen.insert(t.tid, t.ticks);
+                out.push(ThreadRow { pid: t.pid, tid: t.tid, process: r.name.clone(), name: t.name, state: t.state, cpu_pct, processor: t.processor });
+            }
+        }
+        // Forgetting what has gone, so a reused id starts afresh.
+        self.thread_ticks = seen;
+        out
+    }
+
+    fn read_gpus(&mut self, moment: &Moment, now: &Frame) -> Vec<GpuRow> {
+        let pids: Vec<i32> = moment.rows.iter().filter(|r| r.exit.is_none()).map(|r| r.id.pid).collect();
+        let reading = self.gpu_scan.read(Path::new("/proc"), &pids);
+        let at = std::time::Instant::now();
+        let seconds = self.gpu_at.map_or(0.0, |t| at.duration_since(t).as_secs_f64());
+        let ids = moment.rows.iter().map(|r| (r.id.pid, r.id)).collect();
+        let shares = crate::gpu::shares(&self.gpu_before, &reading, &ids, seconds);
+        let names: std::collections::HashMap<i32, &str> = moment.rows.iter().map(|r| (r.id.pid, r.name.as_str())).collect();
+        let mut out: Vec<GpuRow> = reading
+            .iter()
+            .map(|(&pid, u)| {
+                let mut cards: Vec<String> = u.cards.iter().map(|c| crate::gpu::maker(c, &now.machine.gpus).to_string()).collect();
+                cards.sort();
+                cards.dedup();
+                let busy_pct = ids.get(&pid).and_then(|id| shares.get(id)).copied();
+                GpuRow { pid, name: names.get(&pid).copied().unwrap_or("?").to_owned(), cards, busy_pct, vram: u.vram }
+            })
+            .collect();
+        out.sort_by(|a, b| b.busy_pct.unwrap_or(-1.0).total_cmp(&a.busy_pct.unwrap_or(-1.0)).then(b.vram.cmp(&a.vram)).then(a.pid.cmp(&b.pid)));
+        self.gpu_before = reading;
+        self.gpu_at = Some(at);
+        out
     }
 }
 
@@ -177,6 +275,8 @@ impl Replay {
             partial: false,
             since_boot,
             position: Some((self.index, self.len())),
+            threads: None,
+            gpus: None,
         })
     }
 }
