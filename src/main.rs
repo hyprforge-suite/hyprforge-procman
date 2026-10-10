@@ -7,6 +7,7 @@
 //! this?".
 
 mod details;
+mod people;
 mod view;
 
 use hyprforge_keys::{Key, KeyPress};
@@ -19,7 +20,9 @@ use hyprforge_procman::proc::{ProcFs, Snapshot};
 use hyprforge_procman::sample::{self, Id};
 use hyprforge_procman::services::{self, Action, Dbus, Scope, Systemd, Unit};
 use std::collections::HashMap;
+use hyprforge_procman::sessions::{self, Session, SessionAction};
 use hyprforge_procman::signal::{self, How};
+use hyprforge_procman::startup;
 use hyprforge_procman::users::Users;
 use hyprforge_procman::windows::{self, Window};
 use iced::widget::Id as WidgetId;
@@ -43,8 +46,57 @@ pub enum Resource {
 pub enum Tab {
     Processes,
     Performance,
+    Startup,
+    Users,
     Details,
     Services,
+}
+
+/// Everything the Startup tab lists, read off the UI thread.
+#[derive(Debug, Clone)]
+pub struct StartupData {
+    pub autostarts: Vec<startup::Autostart>,
+    /// This user's units, for their state and file state.
+    pub units: Vec<Unit>,
+    /// Measured start times, by unit name.
+    pub blame: HashMap<String, u32>,
+    pub hyprland: Result<Vec<hyprforge_session::autostart::Program>, String>,
+}
+
+fn autostart_dir() -> std::path::PathBuf {
+    std::env::var_os("XDG_CONFIG_HOME")
+        .map(std::path::PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".config")))
+        .unwrap_or_default()
+        .join("autostart")
+}
+
+fn system_autostart_dirs() -> Vec<std::path::PathBuf> {
+    let dirs = std::env::var("XDG_CONFIG_DIRS").unwrap_or_else(|_| "/etc/xdg".into());
+    dirs.split(':').filter(|d| !d.is_empty()).map(|d| std::path::PathBuf::from(d).join("autostart")).collect()
+}
+
+async fn load_startup() -> StartupData {
+    let units = Dbus.list(Scope::User).await.unwrap_or_default();
+    tokio::task::spawn_blocking(move || {
+        let desktops = std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_default();
+        let desktops: Vec<&str> = desktops.split(':').filter(|d| !d.is_empty()).collect();
+        StartupData {
+            autostarts: startup::autostarts(&system_autostart_dirs(), &autostart_dir(), &desktops),
+            units,
+            blame: startup::blame(),
+            hyprland: startup::hyprland_programs(&hyprforge_paths::hyprforge_config_dir().join("session.toml")),
+        }
+    })
+    .await
+    // The read itself failing is said where Hyprland's list would be,
+    // never shown as "nothing starts with you".
+    .unwrap_or_else(|e| StartupData {
+        autostarts: Vec::new(),
+        units: Vec::new(),
+        blame: HashMap::new(),
+        hyprland: Err(format!("reading what starts with you failed: {e}")),
+    })
 }
 
 /// What the Details tab knows about the selected process beyond its row.
@@ -167,6 +219,17 @@ pub enum Message {
     ServicesLoaded(Scope, Result<Vec<Unit>, String>),
     ServiceScope(Scope),
     Tree(bool),
+    StartupLoaded(Box<StartupData>),
+    /// An autostart entry on or off, by id.
+    Autostart(String, bool),
+    /// A user unit on or off at login.
+    UnitAtLogin(String, bool),
+    StartupChanged(Result<(), String>),
+    OpenSessionSettings,
+    SessionsLoaded(Result<Vec<Session>, String>),
+    Session(String, SessionAction),
+    SignOutConfirmed,
+    SessionDone(Result<(), String>),
     EndTree,
     /// Lower (`true`) or raise the selected process's priority.
     Nicer(bool),
@@ -230,6 +293,10 @@ pub struct App {
     pub resource: Resource,
     pub services: ServicesTab,
     pub details: DetailsTab,
+    pub startup: Option<StartupData>,
+    pub sessions: Result<Vec<Session>, String>,
+    /// A sign-out waiting on "are you sure".
+    pub sign_out: Option<Session>,
     /// When the machine booted, seconds since the epoch.
     pub boot: u64,
     pub machine: Machine,
@@ -346,6 +413,9 @@ impl App {
             resource: Resource::Cpu,
             services: ServicesTab::default(),
             details: DetailsTab { tree: true, ..DetailsTab::default() },
+            startup: None,
+            sessions: Ok(Vec::new()),
+            sign_out: None,
             boot: 0,
             machine: Machine::default(),
             disk_rates: Vec::new(),
@@ -466,6 +536,50 @@ impl App {
                 }
             }
             Message::Tree(on) => self.details.tree = on,
+            Message::StartupLoaded(data) => self.startup = Some(*data),
+            Message::Autostart(id, on) => {
+                let Some(entry) = self.startup.as_ref().and_then(|d| d.autostarts.iter().find(|a| a.id == id)).cloned() else {
+                    return Task::none();
+                };
+                let result = startup::set_autostart(&entry, &autostart_dir(), on).map_err(|e| e.to_string());
+                return self.update(Message::StartupChanged(result));
+            }
+            Message::UnitAtLogin(name, on) => {
+                let action = if on { Action::Enable } else { Action::Disable };
+                return Task::perform(async move { Dbus.act(Scope::User, name, action).await }, Message::StartupChanged);
+            }
+            Message::StartupChanged(result) => {
+                if let Err(e) = result {
+                    self.notice = Some(format!("Couldn't change that: {e}."));
+                }
+                return Task::perform(load_startup(), |d| Message::StartupLoaded(Box::new(d)));
+            }
+            Message::OpenSessionSettings => {
+                let mut command = std::process::Command::new("hyprforge-settings");
+                command.args(["--screen", "session"]);
+                if let Err(e) = command.spawn() {
+                    self.notice = Some(format!("Couldn't open Settings: {e}."));
+                }
+            }
+            Message::SessionsLoaded(result) => self.sessions = result,
+            Message::Session(id, action) => {
+                if action == SessionAction::SignOut {
+                    self.sign_out = self.sessions.as_ref().ok().and_then(|s| s.iter().find(|s| s.id == id)).cloned();
+                    return Task::none();
+                }
+                return Task::perform(sessions::act(id, action), Message::SessionDone);
+            }
+            Message::SignOutConfirmed => {
+                if let Some(s) = self.sign_out.take() {
+                    return Task::perform(sessions::act(s.id, SessionAction::SignOut), Message::SessionDone);
+                }
+            }
+            Message::SessionDone(result) => {
+                if let Err(e) = result {
+                    self.notice = Some(format!("That didn't work: {e}."));
+                }
+                return Task::perform(sessions::list(), Message::SessionsLoaded);
+            }
             Message::EndTree => {
                 if let Some(mut c) = self.selected.and_then(|id| self.confirmation(id, How::Ask)) {
                     c.tree = true;
@@ -510,8 +624,11 @@ impl App {
             }
             Message::Tab(tab) => {
                 self.tab = tab;
-                if tab == Tab::Services {
-                    return self.load_services();
+                match tab {
+                    Tab::Services => return self.load_services(),
+                    Tab::Startup => return Task::perform(load_startup(), |d| Message::StartupLoaded(Box::new(d))),
+                    Tab::Users => return Task::perform(sessions::list(), Message::SessionsLoaded),
+                    _ => {}
                 }
             }
             Message::ServicesLoaded(scope, result) => {
@@ -688,6 +805,7 @@ impl App {
             Message::Dismiss => {
                 self.notice = None;
                 self.admin_offer = None;
+                self.sign_out = None;
             }
         }
         Task::none()
@@ -698,6 +816,7 @@ impl App {
         match press.key {
             Key::Escape if self.confirm.is_some() => self.confirm = None,
             Key::Escape if self.services.confirm.is_some() => self.services.confirm = None,
+            Key::Escape if self.sign_out.is_some() => self.sign_out = None,
             Key::Enter if self.confirm.is_some() => return self.update(Message::Confirmed),
             Key::Char('f') if ctrl => return iced::widget::operation::focus(search_id()),
             Key::Delete if self.selected.is_some() && self.confirm.is_none() => {
@@ -705,8 +824,10 @@ impl App {
             }
             Key::Char('1') if ctrl => self.tab = Tab::Processes,
             Key::Char('2') if ctrl => self.tab = Tab::Performance,
-            Key::Char('3') if ctrl => self.tab = Tab::Details,
-            Key::Char('4') if ctrl => return self.update(Message::Tab(Tab::Services)),
+            Key::Char('3') if ctrl => return self.update(Message::Tab(Tab::Startup)),
+            Key::Char('4') if ctrl => return self.update(Message::Tab(Tab::Users)),
+            Key::Char('5') if ctrl => self.tab = Tab::Details,
+            Key::Char('6') if ctrl => return self.update(Message::Tab(Tab::Services)),
             Key::Char('p') if ctrl => self.paused = !self.paused,
             _ => {}
         }

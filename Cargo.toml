@@ -34,6 +34,10 @@ hyprforge-appearance = "0.1"
 # `hyprctl clients -j`, which names the process behind each window, with
 # the suite's bound on how long another program may take to answer.
 hyprforge-process = "0.1"
+# Hyprland's startup programs, read from the file Settings' Session page
+# keeps — through its own module, which owns that file.
+hyprforge-session = "0.1"
+hyprforge-paths = "0.1"
 # `canvas` for the history graphs, on top of the suite's base set.
 iced = { version = "0.14", default-features = false, features = [
     "wgpu",

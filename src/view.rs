@@ -30,6 +30,11 @@ fn scale() -> FontScale {
     FontScale(theme::active().font_scale)
 }
 
+/// The font scale, for a view built outside this file.
+pub fn scale_now() -> FontScale {
+    scale()
+}
+
 /// `12.5 MB`, in the units people read: powers of 1024, named the way
 /// every task manager names them.
 pub fn bytes(n: u64) -> String {
@@ -75,6 +80,8 @@ impl App {
             Tab::Processes => self.processes(s),
             Tab::Performance => self.performance(s),
             Tab::Details => self.details_view(s),
+            Tab::Startup => self.startup_view(s),
+            Tab::Users => self.users_view(s),
             Tab::Services => self.services_view(s),
         };
         let page = column![self.header(s), widgets::divider(), body, widgets::divider(), self.status(s)];
@@ -82,6 +89,9 @@ impl App {
             background: Some(Background::Color(surface::root())),
             ..container::Style::default()
         });
+        if let Some(session) = &self.sign_out {
+            return stack![page, widgets::scrim(self.sign_out_card(session), Some(Message::Dismiss))].into();
+        }
         if let Some((scope, name, action)) = &self.services.confirm {
             return stack![page, widgets::scrim(self.service_confirm_card(*scope, name, *action), Some(Message::ServiceCancelled))].into();
         }
@@ -92,7 +102,14 @@ impl App {
     }
 
     fn header(&self, s: FontScale) -> Element<'_, Message> {
-        let tabs = widgets::panel_tabs(&[(Tab::Processes, "Processes"), (Tab::Performance, "Performance"), (Tab::Details, "Details"), (Tab::Services, "Services")], &self.tab, Message::Tab, s);
+        let tabs = widgets::panel_tabs(&[
+                (Tab::Processes, "Processes"),
+                (Tab::Performance, "Performance"),
+                (Tab::Startup, "Startup"),
+                (Tab::Users, "Users"),
+                (Tab::Details, "Details"),
+                (Tab::Services, "Services"),
+            ], &self.tab, Message::Tab, s);
         let mut bar = row![tabs, Space::new().width(Length::Fill)].spacing(spacing::MD).align_y(Alignment::Center);
         if self.tab == Tab::Services {
             bar = bar.push(
