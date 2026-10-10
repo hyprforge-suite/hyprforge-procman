@@ -34,6 +34,9 @@ pub struct Entry {
     /// this window may not see it (another user's, without Show
     /// everything).
     pub disk: Option<f64>,
+    /// Network bytes a second; `None` without Show everything (only the
+    /// helper's eBPF counter counts it) or until a second reading.
+    pub net: Option<f64>,
     /// Percent of its busiest GPU engine; `None` for a process that has
     /// no GPU open (or one this user may not read).
     pub gpu: Option<f32>,
@@ -94,6 +97,11 @@ impl App {
         self.members.iter().map(|m| m.disk).sum()
     }
 
+    /// Known only when every member's is.
+    pub fn net(&self) -> Option<f64> {
+        self.members.iter().map(|m| m.net).sum()
+    }
+
     pub fn private_bytes(&self) -> u64 {
         self.members.iter().map(|m| m.private_bytes).sum()
     }
@@ -129,6 +137,7 @@ pub fn table(
             own: p.uid == me,
             cpu: usage.cpu.get(&id).copied(),
             disk: usage.disk.get(&id).copied(),
+            net: usage.net.get(&id).copied(),
             gpu: usage.gpu.get(&id).copied(),
             gpu_cards: usage.gpu_cards.get(&id).cloned().unwrap_or_default(),
             private_bytes: p.private_bytes,
@@ -209,6 +218,7 @@ pub enum Column {
     Cpu,
     Memory,
     Disk,
+    Network,
     Gpu,
     Pid,
     User,
@@ -235,7 +245,7 @@ impl Sort {
         if self.column == column {
             Sort { descending: !self.descending, ..self }
         } else {
-            Sort { column, descending: matches!(column, Column::Cpu | Column::Memory | Column::Disk | Column::Gpu) }
+            Sort { column, descending: matches!(column, Column::Cpu | Column::Memory | Column::Disk | Column::Network | Column::Gpu) }
         }
     }
 }
@@ -269,6 +279,7 @@ struct Key<'a> {
     cpu: Option<f32>,
     memory: u64,
     disk: Option<f64>,
+    net: Option<f64>,
     gpu: Option<f32>,
     id: Id,
     user: &'a str,
@@ -281,6 +292,7 @@ fn compare(sort: Sort, a: Key, b: Key) -> Ordering {
         Column::Cpu => a.cpu.unwrap_or(-1.0).total_cmp(&b.cpu.unwrap_or(-1.0)),
         Column::Memory => a.memory.cmp(&b.memory),
         Column::Disk => a.disk.unwrap_or(-1.0).total_cmp(&b.disk.unwrap_or(-1.0)),
+        Column::Network => a.net.unwrap_or(-1.0).total_cmp(&b.net.unwrap_or(-1.0)),
         Column::Gpu => a.gpu.unwrap_or(-1.0).total_cmp(&b.gpu.unwrap_or(-1.0)),
         Column::Pid => a.id.pid.cmp(&b.id.pid),
         Column::User => a.user.cmp(b.user),
@@ -295,11 +307,11 @@ fn compare(sort: Sort, a: Key, b: Key) -> Ordering {
 }
 
 fn key(e: &Entry) -> Key<'_> {
-    Key { name: &e.name, cpu: e.cpu, memory: e.private_bytes, disk: e.disk, gpu: e.gpu, id: e.id, user: &e.user }
+    Key { name: &e.name, cpu: e.cpu, memory: e.private_bytes, disk: e.disk, net: e.net, gpu: e.gpu, id: e.id, user: &e.user }
 }
 
 fn app_key(a: &App) -> Key<'_> {
-    Key { name: &a.lead.name, cpu: a.cpu(), memory: a.private_bytes(), disk: a.disk(), gpu: a.gpu(), id: a.lead.id, user: &a.lead.user }
+    Key { name: &a.lead.name, cpu: a.cpu(), memory: a.private_bytes(), disk: a.disk(), net: a.net(), gpu: a.gpu(), id: a.lead.id, user: &a.lead.user }
 }
 
 fn matches(e: &Entry, query: &str) -> bool {

@@ -101,12 +101,47 @@ pub struct Service {
     proc_root: std::path::PathBuf,
     /// The recorder's journal directory, from its config.
     pub history: std::path::PathBuf,
+    /// The network counter, loaded on the first `NetUsage` and kept for
+    /// as long as the helper runs — or why it couldn't be.
+    #[cfg(feature = "netbpf")]
+    net: Mutex<Option<Result<crate::netbpf::Counter, String>>>,
 }
 
 impl Service {
+    #[cfg(feature = "netbpf")]
+    async fn net_counts(&self, processes: Vec<(i32, u64)>) -> zbus::fdo::Result<Vec<(i32, u64, u64, u64)>> {
+        let mut net = self.net.lock().await;
+        let counter = match net.get_or_insert_with(crate::netbpf::Counter::start) {
+            Ok(c) => c,
+            Err(e) => return Err(zbus::fdo::Error::NotSupported(e.clone())),
+        };
+        // Only the ids that still name the process asked about.
+        let wanted: Vec<(i32, u64)> = processes.into_iter().filter(|&(pid, start)| crate::proc::start_time(pid) == Some(start)).collect();
+        let running: std::collections::HashSet<u32> = std::fs::read_dir(&self.proc_root)
+            .map(|d| d.flatten().filter_map(|e| e.file_name().to_str()?.parse().ok()).collect())
+            .unwrap_or_default();
+        let counts = counter.read(&running);
+        Ok(wanted.into_iter().map(|(pid, start)| {
+            let n = counts.get(&(pid as u32)).copied().unwrap_or_default();
+            (pid, start, n.rx_bytes, n.tx_bytes)
+        }).collect())
+    }
+
+    #[cfg(not(feature = "netbpf"))]
+    async fn net_counts(&self, _processes: Vec<(i32, u64)>) -> zbus::fdo::Result<Vec<(i32, u64, u64, u64)>> {
+        Err(zbus::fdo::Error::NotSupported("this helper was built without network counting (netbpf)".into()))
+    }
+
     pub fn new(authority: Arc<dyn Authority>) -> Service {
         let history = crate::recorder::load_config(std::path::Path::new(crate::recorder::CONFIG_PATH)).map(|c| c.directory).unwrap_or_else(|_| crate::recorder::Config::default().directory);
-        Service { authority, last_call: Arc::new(Mutex::new(Instant::now())), proc_root: "/proc".into(), history }
+        Service {
+            authority,
+            last_call: Arc::new(Mutex::new(Instant::now())),
+            proc_root: "/proc".into(),
+            history,
+            #[cfg(feature = "netbpf")]
+            net: Mutex::new(None),
+        }
     }
 
     async fn allow(&self, header: &Header<'_>, action: &'static str, interactive: bool) -> zbus::fdo::Result<()> {
@@ -197,6 +232,17 @@ impl Service {
         self.allow(&header, action::READ_ALL, interactive).await?;
         Ok(processes.into_iter().filter_map(|(pid, start)| crate::proc::usage(&self.proc_root, Id { pid, start })).collect())
     }
+
+    /// Network bytes in and out for each of `processes` (pid, start), as
+    /// (pid, start, received, sent), counted since the helper first loaded
+    /// its eBPF counter. A process that ended, or a pid that now names
+    /// another, is left out. Its own method rather than more fields on
+    /// `Usage`, so a window newer than the running helper hears "unknown
+    /// method" and shows a dash, instead of failing to read `Usage` at all.
+    async fn net_usage(&self, processes: Vec<(i32, u64)>, interactive: bool, #[zbus(header)] header: Header<'_>) -> zbus::fdo::Result<Vec<(i32, u64, u64, u64)>> {
+        self.allow(&header, action::READ_ALL, interactive).await?;
+        self.net_counts(processes).await
+    }
 }
 
 /// The window's side.
@@ -205,6 +251,7 @@ pub trait ProcMan {
     fn signal(&self, pid: i32, start: u64, signal: i32, interactive: bool) -> zbus::Result<()>;
     fn set_nice(&self, pid: i32, start: u64, nice: i32, interactive: bool) -> zbus::Result<()>;
     fn usage(&self, processes: Vec<(i32, u64)>, interactive: bool) -> zbus::Result<Vec<Usage>>;
+    fn net_usage(&self, processes: Vec<(i32, u64)>, interactive: bool) -> zbus::Result<Vec<(i32, u64, u64, u64)>>;
     fn history_days(&self, interactive: bool) -> zbus::Result<Vec<(String, u64)>>;
     fn open_history(&self, day: &str, interactive: bool) -> zbus::Result<zbus::zvariant::OwnedFd>;
 }

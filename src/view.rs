@@ -153,19 +153,28 @@ impl App {
             (Tab::Services, "Services"),
         ]);
         let tabs = widgets::panel_tabs(&list, &self.tab, Message::Tab, s);
-        let mut bar = row![tabs, Space::new().width(Length::Fill)].spacing(spacing::MD).align_y(Alignment::Center);
+        let mut bar = row![tabs].spacing(spacing::MD).align_y(Alignment::Center);
+        // The space between the tabs and the controls: the search field's,
+        // on a tab that has one, so it takes all the room there is.
+        let searches = matches!(self.tab, Tab::Services | Tab::Processes | Tab::Details);
+        if !searches {
+            bar = bar.push(Space::new().width(Length::Fill));
+        }
         if self.tab == Tab::Services {
             bar = bar.push(
-                container(widgets::search_field("Search services", &self.services.query, Message::ServiceQuery, None, None, s))
-                    .width(Length::Fixed(s.apply(if self.advanced { 230.0 } else { 320.0 }))),
+                container(container(widgets::search_field("Search services", &self.services.query, Message::ServiceQuery, None, None, s)).max_width(s.apply(320.0)))
+                    .width(Length::Fill)
+                    .align_x(Alignment::End),
             );
         }
         if matches!(self.tab, Tab::Processes | Tab::Details) {
             bar = bar.push(
-                // Narrower when the Advanced switch shares the bar, so
-                // Pause is never pushed off its edge.
-                container(widgets::search_field("Search, or port:8080, file:~/notes.txt", &self.view.query, Message::Query, None, Some(crate::search_id()), s))
-                    .width(Length::Fixed(s.apply(if self.advanced { 230.0 } else { 320.0 }))),
+                // Whatever the bar has left, up to 320: the tabs and the
+                // controls are fixed, so the field is what gives — never
+                // Pause, pushed off the edge.
+                container(container(widgets::search_field("Search, or port:8080, file:~/notes.txt", &self.view.query, Message::Query, None, Some(crate::search_id()), s)).max_width(s.apply(320.0)))
+                    .width(Length::Fill)
+                    .align_x(Alignment::End),
             );
         }
         let speeds = widgets::segmented_choice(
@@ -214,6 +223,7 @@ impl App {
             self.column_head("CPU", Column::Cpu, Length::Fixed(s.apply(CPU_W)), true, s),
             self.column_head("Memory", Column::Memory, Length::Fixed(s.apply(MEM_W)), true, s),
             self.column_head("Disk", Column::Disk, Length::Fixed(s.apply(DISK_W)), true, s),
+            self.column_head("Network", Column::Network, Length::Fixed(s.apply(DISK_W)), true, s),
             self.column_head("GPU", Column::Gpu, Length::Fixed(s.apply(GPU_W)), true, s),
             self.column_head("PID", Column::Pid, Length::Fixed(s.apply(PID_W)), true, s),
             self.column_head("User", Column::User, Length::Fixed(s.apply(USER_W)), false, s),
@@ -254,15 +264,15 @@ impl App {
                 let name = row![chevron, name].spacing(spacing::XS).align_y(Alignment::Center);
                 let count = app.members.len();
                 let user = if count > 1 { format!("{} · {count}", app.lead.user) } else { app.lead.user.clone() };
-                self.row(id, name.into(), app.cpu(), app.private_bytes(), app.disk(), (app.gpu(), app.gpu_cards()), id.pid, user, s)
+                self.row(id, name.into(), app.cpu(), app.private_bytes(), (app.disk(), app.net()), (app.gpu(), app.gpu_cards()), id.pid, user, s)
             }
             Line::Member(e) => {
                 let name = row![Space::new().width(Length::Fixed(s.apply(16.0) + spacing::XS * 2.0)), self.entry_name(&e, s)].align_y(Alignment::Center);
-                self.row(e.id, name.into(), e.cpu, e.private_bytes, e.disk, (e.gpu, e.gpu_cards.clone()), e.id.pid, e.user.clone(), s)
+                self.row(e.id, name.into(), e.cpu, e.private_bytes, (e.disk, e.net), (e.gpu, e.gpu_cards.clone()), e.id.pid, e.user.clone(), s)
             }
             Line::Process(e) => {
                 let name = self.entry_name(&e, s);
-                self.row(e.id, name, e.cpu, e.private_bytes, e.disk, (e.gpu, e.gpu_cards.clone()), e.id.pid, e.user.clone(), s)
+                self.row(e.id, name, e.cpu, e.private_bytes, (e.disk, e.net), (e.gpu, e.gpu_cards.clone()), e.id.pid, e.user.clone(), s)
             }
         }
     }
@@ -282,7 +292,7 @@ impl App {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn row<'a>(&self, id: Id, name: Element<'a, Message>, cpu: Option<f32>, memory: u64, disk: Option<f64>, gpu: (Option<f32>, Vec<String>), pid: i32, user: String, s: FontScale) -> Element<'a, Message> {
+    fn row<'a>(&self, id: Id, name: Element<'a, Message>, cpu: Option<f32>, memory: u64, (disk, net): (Option<f64>, Option<f64>), gpu: (Option<f32>, Vec<String>), pid: i32, user: String, s: FontScale) -> Element<'a, Message> {
         let selected = self.selected == Some(id);
         let cell = |content: String, width: f32| {
             container(widgets::scaled_text(content, density::ROW_TEXT_BASE, s).font(theme::mono_font()))
@@ -295,6 +305,8 @@ impl App {
             cell(percent(cpu), CPU_W),
             cell(bytes(memory), MEM_W),
             cell(rate(disk), DISK_W),
+            // Only Show everything's helper counts it, for anyone's.
+            cell(rate(net), DISK_W),
             // Which cards, and the load where the driver says; no GPU
             // open is blank, not 0 %, as Task Manager draws it.
             cell(gpu_cell(&gpu), GPU_W),

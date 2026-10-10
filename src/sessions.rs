@@ -166,6 +166,7 @@ mod tests {
             own: false,
             cpu,
             disk: None,
+            net: None,
             gpu: None,
             gpu_cards: Vec::new(),
             private_bytes: bytes,

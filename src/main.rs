@@ -418,11 +418,23 @@ fn read(fs: ProcFs, helper: Option<zbus::Connection>, scan: GpuScan, ask_nvidia:
 /// Asks the helper for what this user could not read, without a prompt.
 /// `false` when polkit's yes has lapsed.
 async fn fill_in(system: &zbus::Connection, snapshot: &mut Snapshot) -> bool {
+    let Ok(proxy) = helper::ProcManProxy::new(system).await else { return false };
+    // Network for every process, this user's own included: only the
+    // helper counts it. A helper that can't (built without it, or older
+    // than this window) leaves the column at a dash; it isn't a lapse.
+    let everyone: Vec<(i32, u64)> = snapshot.procs.iter().filter(|p| !p.kernel).map(|p| (p.pid, p.start)).collect();
+    if let Ok(net) = proxy.net_usage(everyone, false).await {
+        let by_id: HashMap<(i32, u64), (u64, u64)> = net.into_iter().map(|(pid, start, rx, tx)| ((pid, start), (rx, tx))).collect();
+        for p in &mut snapshot.procs {
+            if let Some(&(rx, tx)) = by_id.get(&(p.pid, p.start)) {
+                p.net = Some(hyprforge_procman::proc::NetIo { rx_bytes: rx, tx_bytes: tx, ..Default::default() });
+            }
+        }
+    }
     let wanted: Vec<(i32, u64)> = snapshot.procs.iter().filter(|p| p.io.is_none() && !p.kernel).map(|p| (p.pid, p.start)).collect();
     if wanted.is_empty() {
         return true;
     }
-    let Ok(proxy) = helper::ProcManProxy::new(system).await else { return false };
     match proxy.usage(wanted, false).await {
         Ok(usage) => {
             let by_id: std::collections::HashMap<(i32, u64), (u64, u64)> =
@@ -1033,6 +1045,7 @@ impl App {
         if let Some(before) = &self.last {
             usage.cpu = sample::shares(before, &snapshot);
             usage.disk = sample::disk_rates(before, &snapshot, seconds);
+            usage.net = sample::net_rates(before, &snapshot, seconds);
             if self.advanced && seconds > 0.0 {
                 usage.detail = sample::details(before, &snapshot, seconds);
                 let rate = |now: u64, then: u64| now.saturating_sub(then) as f64 / seconds;

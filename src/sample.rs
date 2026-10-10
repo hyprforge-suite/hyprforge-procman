@@ -69,6 +69,24 @@ pub fn disk_rates(before: &Snapshot, now: &Snapshot, seconds: f64) -> HashMap<Id
     out
 }
 
+/// Each process's network traffic since `before`, in and out together,
+/// in bytes a second. As with storage, only a process counted in both
+/// readings has one — and only the helper's eBPF counter counts.
+pub fn net_rates(before: &Snapshot, now: &Snapshot, seconds: f64) -> HashMap<Id, f64> {
+    let earlier: HashMap<Id, crate::proc::NetIo> = before.procs.iter().filter_map(|p| Some((Id { pid: p.pid, start: p.start }, p.net?))).collect();
+    let mut out = HashMap::new();
+    if seconds <= 0.0 {
+        return out;
+    }
+    for p in &now.procs {
+        let id = Id { pid: p.pid, start: p.start };
+        if let (Some(n), Some(n0)) = (p.net, earlier.get(&id)) {
+            out.insert(id, (n.rx_bytes.saturating_sub(n0.rx_bytes) + n.tx_bytes.saturating_sub(n0.tx_bytes)) as f64 / seconds);
+        }
+    }
+    out
+}
+
 /// What two readings say about one process, for the Advanced view.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct Detail {
@@ -130,6 +148,8 @@ pub struct Use {
     pub cpu: HashMap<Id, f32>,
     /// Storage bytes a second.
     pub disk: HashMap<Id, f64>,
+    /// Network bytes a second, in and out.
+    pub net: HashMap<Id, f64>,
     /// Percent of the busiest GPU engine.
     pub gpu: HashMap<Id, f32>,
     /// Which cards it has open, by name ("AMD", "NVIDIA").
@@ -190,6 +210,17 @@ mod tests {
         let a = snap(1000, 900, vec![proc(10, 5, 5000)]);
         let b = snap(1400, 1100, vec![proc(10, 77, 3)]);
         assert!(shares(&a, &b).is_empty());
+    }
+
+    #[test]
+    fn a_network_rate_is_in_and_out_and_needs_both_readings() {
+        use crate::proc::NetIo;
+        let net = |rx, tx| Some(NetIo { rx_bytes: rx, tx_bytes: tx, ..NetIo::default() });
+        let a = snap(0, 0, vec![Proc { net: net(1000, 0), ..proc(1, 5, 0) }, proc(2, 5, 0)]);
+        let b = snap(0, 0, vec![Proc { net: net(3000, 1000), ..proc(1, 5, 0) }, Proc { net: net(50, 50), ..proc(2, 5, 0) }]);
+        let rates = net_rates(&a, &b, 2.0);
+        assert_eq!(rates.get(&Id { pid: 1, start: 5 }), Some(&1500.0));
+        assert_eq!(rates.get(&Id { pid: 2, start: 5 }), None, "uncounted before: no rate yet, not a burst");
     }
 
     #[test]

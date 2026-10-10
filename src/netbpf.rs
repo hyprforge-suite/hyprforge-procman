@@ -14,10 +14,10 @@
 //! `/proc`'s own counters are read through.
 
 use crate::proc::{NetIo, Proc};
-use aya::maps::{HashMap, MapData};
+use aya::maps::{HashMap as BpfMap, MapData};
 use aya::programs::BtfTracePoint;
 use aya::{Btf, Ebpf};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 /// The compiled program, embedded at build time.
 static OBJECT: &[u8] = aya::include_bytes_aligned!(concat!(env!("OUT_DIR"), "/net.bpf.o"));
@@ -41,7 +41,7 @@ unsafe impl aya::Pod for Counts {}
 pub struct Counter {
     /// Holds the programs and their links: they live as long as this.
     _ebpf: Ebpf,
-    map: HashMap<MapData, u32, Counts>,
+    map: BpfMap<MapData, u32, Counts>,
 }
 
 impl std::fmt::Debug for Counter {
@@ -66,26 +66,37 @@ impl Counter {
             p.attach().map_err(|e| format!("couldn't attach to {tracepoint}: {e}"))?;
         }
         let map = ebpf.take_map("NET_BY_PROCESS").ok_or("the network counter has no map")?;
-        let map = HashMap::try_from(map).map_err(|e| format!("the network counter's map: {e}"))?;
+        let map = BpfMap::try_from(map).map_err(|e| format!("the network counter's map: {e}"))?;
         Ok(Counter { _ebpf: ebpf, map })
+    }
+
+    /// Every process's counts by id, forgetting the ids not in
+    /// `running` — so a reused id starts again from nothing.
+    pub fn read(&mut self, running: &HashSet<u32>) -> HashMap<u32, NetIo> {
+        let mut seen = HashMap::new();
+        let mut gone = Vec::new();
+        for (pid, c) in self.map.iter().flatten() {
+            if running.contains(&pid) {
+                seen.insert(pid, NetIo { rx_bytes: c.rx_bytes, tx_bytes: c.tx_bytes, rx_calls: c.rx_calls, tx_calls: c.tx_calls });
+            } else {
+                gone.push(pid);
+            }
+        }
+        for pid in gone {
+            // Already gone (the LRU, or a race with the exit) is fine.
+            let _ = self.map.remove(&pid);
+        }
+        seen
     }
 
     /// Sets each process's [`NetIo`] — zero for one that has sent and
     /// received nothing since the counter started, which is a measurement
     /// rather than an absence — and forgets the ids no longer running.
     pub fn fill(&mut self, procs: &mut [Proc]) {
-        let mut seen: std::collections::HashMap<u32, Counts> = std::collections::HashMap::new();
-        for (pid, counts) in self.map.iter().flatten() {
-            seen.insert(pid, counts);
-        }
         let running: HashSet<u32> = procs.iter().map(|p| p.pid as u32).collect();
+        let seen = self.read(&running);
         for p in procs.iter_mut() {
-            let c = seen.get(&(p.pid as u32)).copied().unwrap_or_default();
-            p.net = Some(NetIo { rx_bytes: c.rx_bytes, tx_bytes: c.tx_bytes, rx_calls: c.rx_calls, tx_calls: c.tx_calls });
-        }
-        for pid in seen.keys().filter(|pid| !running.contains(pid)) {
-            // Already gone (the LRU, or a race with the exit) is fine.
-            let _ = self.map.remove(pid);
+            p.net = Some(seen.get(&(p.pid as u32)).copied().unwrap_or_default());
         }
     }
 }
