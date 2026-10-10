@@ -266,11 +266,17 @@ pub struct Machine {
 #[derive(Debug, Clone)]
 pub struct SysFs {
     root: PathBuf,
+    /// Read each drive's temperature. Off by default, because it is the
+    /// one sensor here that costs: an NVMe drive's thermometer is read by
+    /// sending the drive a command — 30 to 80 ms each on this machine,
+    /// and a drive asked every few seconds may never reach its deepest
+    /// power-saving state. Callers ask now and then, not every reading.
+    pub drive_temperatures: bool,
 }
 
 impl Default for SysFs {
     fn default() -> SysFs {
-        SysFs { root: PathBuf::from("/") }
+        SysFs { root: PathBuf::from("/"), drive_temperatures: false }
     }
 }
 
@@ -312,7 +318,7 @@ fn chip_on<'a>(chips: &'a [Chip], device: Option<&Path>) -> Option<&'a Chip> {
 
 impl SysFs {
     pub fn rooted_at(root: impl Into<PathBuf>) -> SysFs {
-        SysFs { root: root.into() }
+        SysFs { root: root.into(), drive_temperatures: true }
     }
 
     fn path(&self, rest: &str) -> PathBuf {
@@ -398,7 +404,11 @@ impl SysFs {
                 write_ms: n(10),
                 in_flight: n(11),
                 queue_ms: n(13),
-                celsius: chip_on(chips, device.as_deref()).and_then(|c| c.celsius(Some("Composite")).or_else(|| c.celsius(None))),
+                celsius: if self.drive_temperatures {
+                    chip_on(chips, device.as_deref()).and_then(|c| c.celsius(Some("Composite")).or_else(|| c.celsius(None)))
+                } else {
+                    None
+                },
             });
         }
         disks

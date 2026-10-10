@@ -58,11 +58,6 @@ fn limit(path: &Path) -> Option<u64> {
     }
 }
 
-/// `key value` lines (`cpu.stat`, `memory.events`).
-fn keyed(path: &Path, key: &str) -> Option<u64> {
-    fs::read_to_string(path).ok()?.lines().find_map(|l| l.strip_prefix(key)?.strip_prefix(' ')?.trim().parse().ok())
-}
-
 /// `some avg10=… ` / `full avg10=…`.
 pub fn parse_waits(text: &str) -> Option<Waits> {
     let avg10 = |kind: &str| -> Option<f32> {
@@ -76,22 +71,30 @@ fn waits(path: &Path) -> Option<Waits> {
     parse_waits(&fs::read_to_string(path).ok()?)
 }
 
-/// One cgroup's files.
+/// `key value` lines, already read.
+fn key_in(text: &Option<String>, key: &str) -> Option<u64> {
+    text.as_deref()?.lines().find_map(|l| l.strip_prefix(key)?.strip_prefix(' ')?.trim().parse().ok())
+}
+
+/// One cgroup's files — each opened once, since a recorder reads every
+/// cgroup every ten seconds and an open is most of what this costs.
 pub fn read(root: &Path, dir: &Path) -> Cgroup {
     let at = |name: &str| dir.join(name);
+    let cpu = fs::read_to_string(at("cpu.stat")).ok();
+    let events = fs::read_to_string(at("memory.events")).ok();
     Cgroup {
         path: dir.strip_prefix(root).unwrap_or(dir).to_string_lossy().into_owned(),
-        cpu_usec: keyed(&at("cpu.stat"), "usage_usec"),
-        user_usec: keyed(&at("cpu.stat"), "user_usec"),
-        system_usec: keyed(&at("cpu.stat"), "system_usec"),
+        cpu_usec: key_in(&cpu, "usage_usec"),
+        user_usec: key_in(&cpu, "user_usec"),
+        system_usec: key_in(&cpu, "system_usec"),
         memory: number(&at("memory.current")),
         memory_peak: number(&at("memory.peak")),
         memory_max: limit(&at("memory.max")),
         swap: number(&at("memory.swap.current")),
         pids: number(&at("pids.current")),
         pids_max: limit(&at("pids.max")),
-        memory_max_hits: keyed(&at("memory.events"), "max"),
-        oom_kills: keyed(&at("memory.events"), "oom_kill"),
+        memory_max_hits: key_in(&events, "max"),
+        oom_kills: key_in(&events, "oom_kill"),
         cpu_pressure: waits(&at("cpu.pressure")),
         memory_pressure: waits(&at("memory.pressure")),
         io_pressure: waits(&at("io.pressure")),

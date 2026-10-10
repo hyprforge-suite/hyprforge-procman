@@ -283,7 +283,13 @@ impl ProcFs {
             blkio_ticks: stat.blkio_ticks,
             priority: stat.priority,
             cancelled_write: fs::read_to_string(dir.join("io")).ok().and_then(|io| io_field(&io, "cancelled_write_bytes:")),
-            thread_states: if self.threads { thread_states(dir) } else { None },
+            // One thread is the process itself, whose state is known:
+            // only a process with more is worth a file per thread.
+            thread_states: match (self.threads, stat.threads) {
+                (false, _) => None,
+                (true, 1) => Some(ThreadStates::of_one(stat.state)),
+                (true, _) => thread_states(dir),
+            },
             pss: if self.pss { fs::read_to_string(dir.join("smaps_rollup")).ok().and_then(|s| parse_pss(&s)) } else { None },
         })
     }
@@ -413,17 +419,30 @@ fn parse_pss(text: &str) -> Option<u64> {
     text.lines().find_map(|l| l.strip_prefix("Pss:")?.split_whitespace().next()?.parse::<u64>().ok()).map(|k| k * 1024)
 }
 
+impl ThreadStates {
+    /// A single-threaded process: its one thread, in its state.
+    pub fn of_one(state: char) -> ThreadStates {
+        let mut t = ThreadStates::default();
+        t.count(state);
+        t
+    }
+
+    fn count(&mut self, state: char) {
+        match state {
+            'R' => self.running += 1,
+            'S' => self.sleeping += 1,
+            'D' => self.blocked += 1,
+            _ => self.other += 1,
+        }
+    }
+}
+
 /// Each thread's state from `task/<tid>/stat`, counted.
 fn thread_states(dir: &Path) -> Option<ThreadStates> {
     let mut states = ThreadStates::default();
     for entry in fs::read_dir(dir.join("task")).ok()?.flatten() {
         let Some(stat) = fs::read_to_string(entry.path().join("stat")).ok().and_then(|s| parse_stat(&s)) else { continue };
-        match stat.state {
-            'R' => states.running += 1,
-            'S' => states.sleeping += 1,
-            'D' => states.blocked += 1,
-            _ => states.other += 1,
-        }
+        states.count(stat.state);
     }
     Some(states)
 }

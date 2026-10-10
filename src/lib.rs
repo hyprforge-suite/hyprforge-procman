@@ -22,6 +22,7 @@ pub mod machine;
 pub mod model;
 pub mod nvidia;
 pub mod proc;
+pub mod recorder;
 pub mod sample;
 #[cfg(feature = "dbus")]
 pub mod services;
