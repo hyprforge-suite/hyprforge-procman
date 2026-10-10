@@ -249,8 +249,8 @@ impl Replay {
     }
 
     /// `hour:minute` on the journal's own day.
-    pub fn go_to_time(&mut self, hour: u32, minute: u32) {
-        if let Some(at) = crate::report::at_time(&self.reader, hour, minute) {
+    pub fn go_to_time(&mut self, time: chrono::NaiveTime) {
+        if let Some(at) = crate::report::at_time(&self.reader, time) {
             self.go_to(at);
         }
     }

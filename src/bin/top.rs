@@ -21,11 +21,11 @@ hyprforge-top — what the machine is doing, atop's way
 
 USAGE
     hyprforge-top [-i SECONDS]          live, refreshing every SECONDS (default 2)
-    hyprforge-top -r [DAY|FILE] [-b HH:MM]
+    hyprforge-top -r [DAY|FILE] [-b HH:MM[:SS]]
                                         replay the recorder's journal: a day
                                         (2026-10-10, default today) or a file,
                                         starting at a time of day
-    hyprforge-top report KIND [DAY|FILE] [--from HH:MM] [--to HH:MM]
+    hyprforge-top report KIND [DAY|FILE] [--from HH:MM[:SS]] [--to HH:MM[:SS]]
                          [--step 10m] [--top N] [--json]
                                         what a day added up to, atopsar's
                                         way. KIND is cpu, mem, disk, net,
@@ -86,7 +86,7 @@ fn report_main(args: &[String]) -> std::process::ExitCode {
     let time = |name: &str, default: i64| -> Result<i64, std::process::ExitCode> {
         match value(name) {
             None => Ok(default),
-            Some(t) => state::parse_time(&t).and_then(|(h, m)| report::at_time(&reader, h, m)).ok_or_else(|| fail(format!("{name} {t:?} isn't a time — HH:MM"))),
+            Some(t) => state::parse_time(&t).and_then(|at| report::at_time(&reader, at)).ok_or_else(|| fail(format!("{name} {t:?} isn't a time — HH:MM or HH:MM:SS"))),
         }
     };
     let from_ms = match time("--from", i64::MIN / 2) {
@@ -143,8 +143,8 @@ fn main() -> std::process::ExitCode {
             Ok(mut r) => {
                 if let Some(t) = value("-b") {
                     match state::parse_time(&t) {
-                        Some((h, m)) => r.go_to_time(h, m),
-                        None => return fail(format!("{t:?} isn't a time — HH:MM")),
+                        Some(at) => r.go_to_time(at),
+                        None => return fail(format!("{t:?} isn't a time — HH:MM or HH:MM:SS")),
                     }
                 }
                 Mode::Replay(r)
@@ -247,9 +247,9 @@ fn run(mut terminal: ratatui::DefaultTerminal, mut mode: Mode) -> std::io::Resul
                         screen = r.screen()?;
                     }
                 }
-                Action::Branch { hour, minute } => {
+                Action::Branch(at) => {
                     if let Mode::Replay(r) = &mut mode {
-                        r.go_to_time(hour, minute);
+                        r.go_to_time(at);
                         screen = r.screen()?;
                     }
                 }

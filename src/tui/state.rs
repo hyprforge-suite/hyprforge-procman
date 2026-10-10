@@ -79,7 +79,7 @@ pub enum Action {
     /// Replay: move by this many samples.
     Step(i64),
     /// Replay: go to the first sample at or after this time of day.
-    Branch { hour: u32, minute: u32 },
+    Branch(chrono::NaiveTime),
     /// Replay: back to the first sample.
     Rewind,
     Interval(u32),
@@ -234,7 +234,7 @@ impl State {
             (_, Key::Escape) => {}
             (Prompt::Filter(text), _) => typed(text, self, Prompt::Filter),
             (Prompt::Branch(text), Key::Enter) => match parse_time(&text) {
-                Some((hour, minute)) => return Action::Branch { hour, minute },
+                Some(at) => return Action::Branch(at),
                 None => self.message = Some(format!("{text:?} isn't a time — HH:MM")),
             },
             (Prompt::Branch(text), _) => typed(text, self, Prompt::Branch),
@@ -250,11 +250,11 @@ impl State {
     }
 }
 
-/// `HH:MM`.
-pub fn parse_time(text: &str) -> Option<(u32, u32)> {
-    let (h, m) = text.trim().split_once(':')?;
-    let (h, m) = (h.parse().ok()?, m.parse().ok()?);
-    (h < 24 && m < 60).then_some((h, m))
+/// `HH:MM`, or `HH:MM:SS` — to the second, so a window can be lined up
+/// with another tool's (atop's samples end at :37 past the minute here).
+pub fn parse_time(text: &str) -> Option<chrono::NaiveTime> {
+    let text = text.trim();
+    chrono::NaiveTime::parse_from_str(text, "%H:%M:%S").or_else(|_| chrono::NaiveTime::parse_from_str(text, "%H:%M")).ok()
 }
 
 /// What `A` sorts by: whichever the machine is spending most on — disk
@@ -334,7 +334,7 @@ mod tests {
         for k in [Key::Char('b'), Key::Char('0'), Key::Char('3'), Key::Char(':'), Key::Char('1'), Key::Char('5')] {
             s.key(k, None);
         }
-        assert_eq!(s.key(Key::Enter, None), Action::Branch { hour: 3, minute: 15 });
+        assert_eq!(s.key(Key::Enter, None), Action::Branch(chrono::NaiveTime::from_hms_opt(3, 15, 0).unwrap()));
         s.key(Key::Char('b'), None);
         s.key(Key::Char('x'), None);
         assert_eq!(s.key(Key::Enter, None), Action::None);
@@ -365,5 +365,12 @@ mod tests {
         }
         assert!(View::Generic.lists_processes() && View::Network.lists_processes());
         assert!(View::Threads.live_only() && View::Gpu.live_only() && !View::Generic.live_only());
+    }
+
+    #[test]
+    fn a_time_is_read_to_the_minute_or_the_second() {
+        let t = |h, m, s| chrono::NaiveTime::from_hms_opt(h, m, s);
+        assert_eq!([parse_time("03:15"), parse_time(" 19:06:37 "), parse_time("3:05")], [t(3, 15, 0), t(19, 6, 37), t(3, 5, 0)]);
+        assert_eq!([parse_time("25:00"), parse_time("12:60"), parse_time("noon")], [None, None, None]);
     }
 }

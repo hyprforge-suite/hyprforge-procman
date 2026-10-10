@@ -342,14 +342,13 @@ fn add(bucket: &mut Bucket, programs: &mut BTreeMap<String, ProgramSum>, m: &Mom
     }
 }
 
-/// `hour:minute` on the day the journal begins, local time — what
+/// A time of day on the day the journal begins, local time — what
 /// `--from`, `--to` and `-b` name.
-pub fn at_time(reader: &Reader, hour: u32, minute: u32) -> Option<i64> {
+pub fn at_time(reader: &Reader, time: chrono::NaiveTime) -> Option<i64> {
     use chrono::TimeZone;
     let first = reader.entries.first()?.at_ms;
     let day = chrono::Local.timestamp_millis_opt(first).single()?.date_naive();
-    let at = day.and_hms_opt(hour, minute, 0)?;
-    Some(chrono::Local.from_local_datetime(&at).earliest()?.timestamp_millis())
+    Some(chrono::Local.from_local_datetime(&day.and_time(time)).earliest()?.timestamp_millis())
 }
 
 /// Reads `reader` over the range and adds it up.
