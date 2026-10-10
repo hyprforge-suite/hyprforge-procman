@@ -37,6 +37,8 @@ pub struct Entry {
     /// Percent of its busiest GPU engine; `None` for a process that has
     /// no GPU open (or one this user may not read).
     pub gpu: Option<f32>,
+    /// The GPUs it has open, by maker: "AMD", "NVIDIA", "Intel".
+    pub gpu_cards: Vec<String>,
     pub private_bytes: u64,
     pub threads: u32,
     pub state: char,
@@ -71,6 +73,14 @@ impl App {
     pub fn gpu(&self) -> Option<f32> {
         let used: Vec<f32> = self.members.iter().filter_map(|m| m.gpu).collect();
         (!used.is_empty()).then(|| used.iter().sum::<f32>().min(100.0))
+    }
+
+    /// Every GPU any of its processes has open.
+    pub fn gpu_cards(&self) -> Vec<String> {
+        let mut cards: Vec<String> = self.members.iter().flat_map(|m| m.gpu_cards.iter().cloned()).collect();
+        cards.sort();
+        cards.dedup();
+        cards
     }
 
     /// Known only when every member's is.
@@ -114,6 +124,7 @@ pub fn table(
             cpu: usage.cpu.get(&id).copied(),
             disk: usage.disk.get(&id).copied(),
             gpu: usage.gpu.get(&id).copied(),
+            gpu_cards: usage.gpu_cards.get(&id).cloned().unwrap_or_default(),
             private_bytes: p.private_bytes,
             threads: p.threads,
             state: p.state,

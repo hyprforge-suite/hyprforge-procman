@@ -927,6 +927,30 @@ impl App {
             usage.disk = sample::disk_rates(before, &snapshot, seconds);
             let ids: HashMap<i32, Id> = snapshot.procs.iter().map(|p| (p.pid, Id { pid: p.pid, start: p.start })).collect();
             usage.gpu = hyprforge_procman::gpu::shares(&self.last_gpu, &gpu, &ids, seconds);
+            // A card's maker, from its driver; NVIDIA's own device files
+            // name no PCI address.
+            let maker = |card: &str| -> String {
+                let driver = if card == "nvidia" {
+                    "nvidia"
+                } else {
+                    self.machine.gpus.iter().find(|g| g.pci == card).map_or("", |g| g.driver.as_str())
+                };
+                match driver {
+                    "nvidia" | "nouveau" => "NVIDIA".to_string(),
+                    "amdgpu" | "radeon" => "AMD".to_string(),
+                    "i915" | "xe" => "Intel".to_string(),
+                    _ => "GPU".to_string(),
+                }
+            };
+            usage.gpu_cards = gpu
+                .iter()
+                .filter_map(|(pid, u)| {
+                    let mut names: Vec<String> = u.cards.iter().map(|c| maker(c)).collect();
+                    names.sort();
+                    names.dedup();
+                    Some((*ids.get(pid)?, names))
+                })
+                .collect();
         }
         self.last_at = Some(at);
         let windows = match windows {

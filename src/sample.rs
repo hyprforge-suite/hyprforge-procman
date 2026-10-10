@@ -78,6 +78,8 @@ pub struct Use {
     pub disk: HashMap<Id, f64>,
     /// Percent of the busiest GPU engine.
     pub gpu: HashMap<Id, f32>,
+    /// Which cards it has open, by name ("AMD", "NVIDIA").
+    pub gpu_cards: HashMap<Id, Vec<String>>,
 }
 
 #[cfg(test)]
