@@ -41,6 +41,10 @@ pub struct Proc {
     /// A kernel thread (`PF_KTHREAD`), which has no program, no memory of
     /// its own and nothing a person can end.
     pub kernel: bool,
+    /// Bytes it caused to be read from and written to storage, over its
+    /// life — `None` when this reader may not see them (another user's
+    /// process, without the helper).
+    pub io: Option<(u64, u64)>,
 }
 
 /// The CPU's cumulative time counters, from one `cpu` line of
@@ -149,6 +153,7 @@ impl ProcFs {
             private_bytes: private_pages * self.page_size,
             uid,
             kernel: stat.flags & PF_KTHREAD != 0,
+            io: fs::read_to_string(dir.join("io")).ok().and_then(|io| parse_io(&io)),
         })
     }
 }
@@ -173,16 +178,9 @@ pub fn usage(root: &Path, id: crate::sample::Id) -> Option<crate::helper::Usage>
     if stat.start != id.start {
         return None;
     }
-    let io = fs::read_to_string(dir.join("io")).ok()?;
-    let field = |key: &str| io.lines().find_map(|l| l.strip_prefix(key)?.trim().parse::<u64>().ok());
+    let (read_bytes, write_bytes) = parse_io(&fs::read_to_string(dir.join("io")).ok()?)?;
     let open_files = fs::read_dir(dir.join("fd")).map(|d| d.count() as u32).unwrap_or(0);
-    Some(crate::helper::Usage {
-        pid: id.pid,
-        start: id.start,
-        read_bytes: field("read_bytes:")?,
-        write_bytes: field("write_bytes:")?,
-        open_files,
-    })
+    Some(crate::helper::Usage { pid: id.pid, start: id.start, read_bytes, write_bytes, open_files })
 }
 
 /// `include/linux/sched.h`.
@@ -223,6 +221,14 @@ fn parse_stat(line: &str) -> Option<Stat> {
         threads: field(20)?.parse().ok()?,
         start: field(22)?.parse().ok()?,
     })
+}
+
+/// `read_bytes` and `write_bytes` from `/proc/<pid>/io`: storage the
+/// process caused to be touched, not `rchar`/`wchar` (which count reads
+/// served from cache, and every pipe and socket).
+fn parse_io(io: &str) -> Option<(u64, u64)> {
+    let field = |key: &str| io.lines().find_map(|l| l.strip_prefix(key)?.trim().parse::<u64>().ok());
+    Some((field("read_bytes:")?, field("write_bytes:")?))
 }
 
 /// `size resident shared text lib data dt`, in pages: resident minus
@@ -364,6 +370,13 @@ mod tests {
         let s = parse_stat(&line).unwrap();
         assert_eq!(s.comm, "we (ird) name");
         assert_eq!((s.ppid, s.start), (33855, 6202074));
+    }
+
+    /// Copied from this machine's `/proc/self/io` (a shell's).
+    #[test]
+    fn io_is_storage_bytes_not_characters() {
+        let io = "rchar: 2884\nwchar: 8\nsyscr: 6\nsyscw: 1\nread_bytes: 4096\nwrite_bytes: 0\ncancelled_write_bytes: 0\n";
+        assert_eq!(parse_io(io), Some((4096, 0)));
     }
 
     #[test]

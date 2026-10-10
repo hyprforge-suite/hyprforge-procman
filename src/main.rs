@@ -9,6 +9,7 @@
 mod view;
 
 use hyprforge_keys::{Key, KeyPress};
+use hyprforge_procman::helper;
 use hyprforge_procman::history::History;
 use hyprforge_procman::model::{self, Column, Table, View};
 use hyprforge_procman::proc::{ProcFs, Snapshot};
@@ -53,6 +54,20 @@ pub struct Confirm {
 pub struct Reading {
     snapshot: Snapshot,
     windows: Result<Vec<Window>, String>,
+    at: std::time::Instant,
+    /// Show everything was on and polkit said no this time: its few
+    /// minutes ran out. The window locks again rather than prompting
+    /// once a second.
+    everything_lapsed: bool,
+}
+
+/// Whether the helper is filling in what this user cannot read.
+#[derive(Debug, Clone)]
+pub enum Everything {
+    Locked,
+    Asking,
+    /// Unlocked, over this system bus connection.
+    Open(zbus::Connection),
 }
 
 #[derive(Debug, Clone)]
@@ -73,6 +88,12 @@ pub enum Message {
     Cancelled,
     /// Bring the selected app's window forward.
     SwitchTo,
+    /// Ask polkit, once, to see every process.
+    ShowEverything,
+    Unlocked(Result<zbus::Connection, String>),
+    /// End through the helper, after the window was refused.
+    EndAsAdmin,
+    EndedAsAdmin(Result<(), String>),
     /// Freeze the selected process, or let it run again.
     Freeze(bool),
     Key(KeyPress),
@@ -91,6 +112,10 @@ pub struct App {
     pub confirm: Option<Confirm>,
     /// What went wrong last, said in the status bar until dismissed.
     pub notice: Option<String>,
+    /// An end the window was refused, which the helper could do.
+    pub admin_offer: Option<Confirm>,
+    pub everything: Everything,
+    last_at: Option<std::time::Instant>,
     /// Why there are no apps, when Hyprland could not be asked.
     pub no_windows: Option<String>,
     pub paused: bool,
@@ -119,18 +144,67 @@ pub fn search_id() -> WidgetId {
     WidgetId::new("procman-search")
 }
 
-fn read(fs: ProcFs) -> Task<Message> {
+fn read(fs: ProcFs, helper: Option<zbus::Connection>) -> Task<Message> {
     Task::perform(
         async move {
-            tokio::task::spawn_blocking(move || {
+            let (mut snapshot, windows) = tokio::task::spawn_blocking(move || {
                 let snapshot = fs.snapshot().map_err(|e| format!("couldn't read /proc: {e}"))?;
-                Ok(Box::new(Reading { snapshot, windows: windows::read() }))
+                Ok::<_, String>((snapshot, windows::read()))
             })
             .await
-            .map_err(|e| e.to_string())?
+            .map_err(|e| e.to_string())??;
+            let at = std::time::Instant::now();
+            let mut everything_lapsed = false;
+            if let Some(system) = helper {
+                everything_lapsed = !fill_in(&system, &mut snapshot).await;
+            }
+            Ok(Box::new(Reading { snapshot, windows, at, everything_lapsed }))
         },
         Message::Read,
     )
+}
+
+/// Asks the helper for what this user could not read, without a prompt.
+/// `false` when polkit's yes has lapsed.
+async fn fill_in(system: &zbus::Connection, snapshot: &mut Snapshot) -> bool {
+    let wanted: Vec<(i32, u64)> = snapshot.procs.iter().filter(|p| p.io.is_none() && !p.kernel).map(|p| (p.pid, p.start)).collect();
+    if wanted.is_empty() {
+        return true;
+    }
+    let Ok(proxy) = helper::ProcManProxy::new(system).await else { return false };
+    match proxy.usage(wanted, false).await {
+        Ok(usage) => {
+            let by_id: std::collections::HashMap<(i32, u64), (u64, u64)> =
+                usage.into_iter().map(|u| ((u.pid, u.start), (u.read_bytes, u.write_bytes))).collect();
+            for p in &mut snapshot.procs {
+                if let Some(io) = by_id.get(&(p.pid, p.start)) {
+                    p.io = Some(*io);
+                }
+            }
+            true
+        }
+        Err(_) => false,
+    }
+}
+
+/// The helper over the system bus, prompting if polkit wants a password.
+async fn unlock() -> Result<zbus::Connection, String> {
+    let system = zbus::Connection::system().await.map_err(|e| format!("couldn't reach the system bus: {e}"))?;
+    let proxy = helper::ProcManProxy::new(&system).await.map_err(|e| e.to_string())?;
+    proxy.usage(Vec::new(), true).await.map_err(helper_error)?;
+    Ok(system)
+}
+
+/// The helper's refusals in words.
+fn helper_error(e: zbus::Error) -> String {
+    let text = e.to_string();
+    if text.contains("ServiceUnknown") || text.contains("was not provided") {
+        "the privileged helper isn't installed".into()
+    } else if text.contains("not authorized") || text.contains("AccessDenied") {
+        "administrator access wasn't given".into()
+    } else {
+        text
+    }
 }
 
 impl App {
@@ -148,6 +222,9 @@ impl App {
             selected: None,
             confirm: None,
             notice: None,
+            admin_offer: None,
+            everything: Everything::Locked,
+            last_at: None,
             no_windows: None,
             paused: false,
             interval: INTERVALS[1],
@@ -156,7 +233,14 @@ impl App {
             critical: Default::default(),
             reading: true,
         };
-        (app, read(fs))
+        (app, read(fs, None))
+    }
+
+    fn helper(&self) -> Option<zbus::Connection> {
+        match &self.everything {
+            Everything::Open(system) => Some(system.clone()),
+            _ => None,
+        }
     }
 
     fn title(&self) -> String {
@@ -179,7 +263,7 @@ impl App {
                 // machine gets fewer refreshes, not a queue of them.
                 if !self.reading {
                     self.reading = true;
-                    return read(self.fs.clone());
+                    return read(self.fs.clone(), self.helper());
                 }
             }
             Message::Read(result) => {
@@ -213,8 +297,12 @@ impl App {
                             // the next tick would.
                             if !self.reading {
                                 self.reading = true;
-                                return read(self.fs.clone());
+                                return read(self.fs.clone(), self.helper());
                             }
+                        }
+                        Err(signal::Refused::NotAllowed) => {
+                            self.notice = Some(format!("{} belongs to another user.", c.name));
+                            self.admin_offer = Some(c);
                         }
                         Err(e) => self.notice = Some(format!("Couldn't end {}: {e}", c.name)),
                     }
@@ -235,12 +323,55 @@ impl App {
                         self.notice = Some(format!("Couldn't {} it: {e}", if frozen { "freeze" } else { "resume" }));
                     } else if !self.reading {
                         self.reading = true;
-                        return read(self.fs.clone());
+                        return read(self.fs.clone(), self.helper());
                     }
                 }
             }
+            Message::ShowEverything => {
+                self.everything = Everything::Asking;
+                return Task::perform(unlock(), Message::Unlocked);
+            }
+            Message::Unlocked(result) => match result {
+                Ok(system) => {
+                    self.everything = Everything::Open(system);
+                    self.notice = None;
+                }
+                Err(e) => {
+                    self.everything = Everything::Locked;
+                    self.notice = Some(format!("Couldn't show everything: {e}."));
+                }
+            },
+            Message::EndAsAdmin => {
+                if let Some(c) = self.admin_offer.take() {
+                    let signal = match c.how {
+                        How::Ask => libc::SIGTERM,
+                        How::Force => libc::SIGKILL,
+                    };
+                    return Task::perform(
+                        async move {
+                            let system = zbus::Connection::system().await.map_err(|e| e.to_string())?;
+                            let proxy = helper::ProcManProxy::new(&system).await.map_err(|e| e.to_string())?;
+                            proxy.signal(c.id.pid, c.id.start, signal, true).await.map_err(helper_error)
+                        },
+                        Message::EndedAsAdmin,
+                    );
+                }
+            }
+            Message::EndedAsAdmin(result) => match result {
+                Ok(()) => {
+                    self.notice = None;
+                    if !self.reading {
+                        self.reading = true;
+                        return read(self.fs.clone(), self.helper());
+                    }
+                }
+                Err(e) => self.notice = Some(format!("Couldn't end it: {e}.")),
+            },
             Message::Key(press) => return self.key(press),
-            Message::Dismiss => self.notice = None,
+            Message::Dismiss => {
+                self.notice = None;
+                self.admin_offer = None;
+            }
         }
         Task::none()
     }
@@ -275,8 +406,18 @@ impl App {
     }
 
     fn take(&mut self, reading: Reading) {
-        let Reading { snapshot, windows } = reading;
-        let shares = self.last.as_ref().map(|before| sample::shares(before, &snapshot)).unwrap_or_default();
+        let Reading { snapshot, windows, at, everything_lapsed } = reading;
+        if everything_lapsed && matches!(self.everything, Everything::Open(_)) {
+            self.everything = Everything::Locked;
+            self.notice = Some("Show everything has ended: administrator access timed out.".into());
+        }
+        let mut usage = sample::Use::default();
+        if let Some(before) = &self.last {
+            usage.cpu = sample::shares(before, &snapshot);
+            let seconds = self.last_at.map_or(0.0, |t| at.duration_since(t).as_secs_f64());
+            usage.disk = sample::disk_rates(before, &snapshot, seconds);
+        }
+        self.last_at = Some(at);
         let windows = match windows {
             Ok(w) => {
                 self.no_windows = None;
@@ -288,7 +429,7 @@ impl App {
             }
         };
         let users = &mut self.users;
-        self.table = model::table(&snapshot, &shares, &windows, self.me, &mut |uid| users.name(uid));
+        self.table = model::table(&snapshot, &usage, &windows, self.me, &mut |uid| users.name(uid));
 
         let m = snapshot.memory;
         let cpu = self.last.as_ref().map(|before| sample::busy(before.cpu, snapshot.cpu));

@@ -20,6 +20,7 @@ use iced::{Alignment, Background, Border, Element, Length};
 const NAME_PORTION: u16 = 6;
 const CPU_W: f32 = 84.0;
 const MEM_W: f32 = 104.0;
+const DISK_W: f32 = 104.0;
 const PID_W: f32 = 84.0;
 const USER_W: f32 = 120.0;
 
@@ -43,6 +44,16 @@ pub fn bytes(n: u64) -> String {
         format!("{value:.0} {}", UNITS[unit])
     } else {
         format!("{value:.1} {}", UNITS[unit])
+    }
+}
+
+/// Bytes a second, or a dash for what is not known yet — or not this
+/// user's to see, until Show everything.
+pub fn rate(per_second: Option<f64>) -> String {
+    match per_second {
+        Some(r) if r < 1.0 => "0 B/s".into(),
+        Some(r) => format!("{}/s", bytes(r as u64)),
+        None => "—".into(),
     }
 }
 
@@ -94,7 +105,12 @@ impl App {
         } else {
             widgets::secondary_button("Pause").on_press(Message::Pause(true))
         };
-        bar = bar.push(speeds).push(pause);
+        let everything = match self.everything {
+            crate::Everything::Locked => widgets::secondary_button("Show everything").on_press(Message::ShowEverything),
+            crate::Everything::Asking => widgets::secondary_button("Asking…"),
+            crate::Everything::Open(_) => widgets::primary_button("Showing everything"),
+        };
+        bar = bar.push(everything).push(speeds).push(pause);
         container(bar)
             .padding([0.0, spacing::MD])
             .height(Length::Fixed(density::bar_height(s)))
@@ -121,6 +137,7 @@ impl App {
             self.column_head("Name", Column::Name, Length::FillPortion(NAME_PORTION), false, s),
             self.column_head("CPU", Column::Cpu, Length::Fixed(s.apply(CPU_W)), true, s),
             self.column_head("Memory", Column::Memory, Length::Fixed(s.apply(MEM_W)), true, s),
+            self.column_head("Disk", Column::Disk, Length::Fixed(s.apply(DISK_W)), true, s),
             self.column_head("PID", Column::Pid, Length::Fixed(s.apply(PID_W)), true, s),
             self.column_head("User", Column::User, Length::Fixed(s.apply(USER_W)), false, s),
         ]
@@ -159,15 +176,15 @@ impl App {
                 let name = row![chevron, name].spacing(spacing::XS).align_y(Alignment::Center);
                 let count = app.members.len();
                 let user = if count > 1 { format!("{} · {count}", app.lead.user) } else { app.lead.user.clone() };
-                self.row(id, name.into(), app.cpu(), app.private_bytes(), id.pid, user, s)
+                self.row(id, name.into(), app.cpu(), app.private_bytes(), app.disk(), id.pid, user, s)
             }
             Line::Member(e) => {
                 let name = row![Space::new().width(Length::Fixed(s.apply(16.0) + spacing::XS * 2.0)), self.entry_name(&e, s)].align_y(Alignment::Center);
-                self.row(e.id, name.into(), e.cpu, e.private_bytes, e.id.pid, e.user.clone(), s)
+                self.row(e.id, name.into(), e.cpu, e.private_bytes, e.disk, e.id.pid, e.user.clone(), s)
             }
             Line::Process(e) => {
                 let name = self.entry_name(&e, s);
-                self.row(e.id, name, e.cpu, e.private_bytes, e.id.pid, e.user.clone(), s)
+                self.row(e.id, name, e.cpu, e.private_bytes, e.disk, e.id.pid, e.user.clone(), s)
             }
         }
     }
@@ -187,7 +204,7 @@ impl App {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn row<'a>(&self, id: Id, name: Element<'a, Message>, cpu: Option<f32>, memory: u64, pid: i32, user: String, s: FontScale) -> Element<'a, Message> {
+    fn row<'a>(&self, id: Id, name: Element<'a, Message>, cpu: Option<f32>, memory: u64, disk: Option<f64>, pid: i32, user: String, s: FontScale) -> Element<'a, Message> {
         let selected = self.selected == Some(id);
         let cell = |content: String, width: f32| {
             container(widgets::scaled_text(content, density::ROW_TEXT_BASE, s).font(theme::mono_font()))
@@ -199,6 +216,7 @@ impl App {
             container(name).width(Length::FillPortion(NAME_PORTION)).padding([0.0, spacing::SM]),
             cell(percent(cpu), CPU_W),
             cell(bytes(memory), MEM_W),
+            cell(rate(disk), DISK_W),
             cell(pid.to_string(), PID_W),
             container(widgets::meta_text(user, density::ROW_TEXT_BASE, s)).width(Length::Fixed(s.apply(USER_W))).padding([0.0, spacing::SM]),
         ]
@@ -225,6 +243,10 @@ impl App {
         let mut bar = row![widgets::meta_text(summary, density::META_TEXT_BASE, s)].spacing(spacing::MD).align_y(Alignment::Center);
         if let Some(notice) = &self.notice {
             bar = bar.push(container(text(notice.clone()).size(s.apply(density::META_TEXT_BASE)).color(theme::error())).width(Length::Fill));
+            if let Some(c) = &self.admin_offer {
+                let verb = if c.how == How::Force { "Kill as administrator" } else { "End as administrator" };
+                bar = bar.push(widgets::primary_button(verb).on_press(Message::EndAsAdmin));
+            }
             bar = bar.push(widgets::secondary_button("Dismiss").on_press(Message::Dismiss));
         } else {
             bar = bar.push(Space::new().width(Length::Fill));

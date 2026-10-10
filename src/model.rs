@@ -13,7 +13,7 @@
 //! are tested without a window, `/proc` or Hyprland.
 
 use crate::proc::{Proc, Snapshot};
-use crate::sample::Id;
+use crate::sample::{Id, Use};
 use crate::windows::Window;
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
@@ -30,6 +30,10 @@ pub struct Entry {
     pub own: bool,
     /// Percent of the whole machine; `None` until a second reading.
     pub cpu: Option<f32>,
+    /// Storage bytes a second; `None` until a second reading, or when
+    /// this window may not see it (another user's, without Show
+    /// everything).
+    pub disk: Option<f64>,
     pub private_bytes: u64,
     pub threads: u32,
     pub state: char,
@@ -55,6 +59,11 @@ impl App {
         self.members.iter().map(|m| m.cpu).sum()
     }
 
+    /// Known only when every member's is.
+    pub fn disk(&self) -> Option<f64> {
+        self.members.iter().map(|m| m.disk).sum()
+    }
+
     pub fn private_bytes(&self) -> u64 {
         self.members.iter().map(|m| m.private_bytes).sum()
     }
@@ -70,7 +79,7 @@ pub struct Table {
 /// name; `me` is the uid running this.
 pub fn table(
     snapshot: &Snapshot,
-    shares: &HashMap<Id, f32>,
+    usage: &Use,
     windows: &[Window],
     me: u32,
     user_name: &mut dyn FnMut(u32) -> String,
@@ -88,7 +97,8 @@ pub fn table(
             command: p.command.clone(),
             user: user_name(p.uid),
             own: p.uid == me,
-            cpu: shares.get(&id).copied(),
+            cpu: usage.cpu.get(&id).copied(),
+            disk: usage.disk.get(&id).copied(),
             private_bytes: p.private_bytes,
             threads: p.threads,
             state: p.state,
@@ -157,6 +167,7 @@ pub enum Column {
     Name,
     Cpu,
     Memory,
+    Disk,
     Pid,
     User,
 }
@@ -182,7 +193,7 @@ impl Sort {
         if self.column == column {
             Sort { descending: !self.descending, ..self }
         } else {
-            Sort { column, descending: matches!(column, Column::Cpu | Column::Memory) }
+            Sort { column, descending: matches!(column, Column::Cpu | Column::Memory | Column::Disk) }
         }
     }
 }
@@ -207,17 +218,28 @@ pub enum Line {
     Process(Entry),
 }
 
-fn compare(sort: Sort, a: (&str, Option<f32>, u64, Id, &str), b: (&str, Option<f32>, u64, Id, &str)) -> Ordering {
+/// What a row is sorted by.
+struct Key<'a> {
+    name: &'a str,
+    cpu: Option<f32>,
+    memory: u64,
+    disk: Option<f64>,
+    id: Id,
+    user: &'a str,
+}
+
+fn compare(sort: Sort, a: Key, b: Key) -> Ordering {
     let order = match sort.column {
-        Column::Name => a.0.to_lowercase().cmp(&b.0.to_lowercase()),
+        Column::Name => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
         // No reading yet sorts as the least busy.
-        Column::Cpu => a.1.unwrap_or(-1.0).total_cmp(&b.1.unwrap_or(-1.0)),
-        Column::Memory => a.2.cmp(&b.2),
-        Column::Pid => a.3.pid.cmp(&b.3.pid),
-        Column::User => a.4.cmp(b.4),
+        Column::Cpu => a.cpu.unwrap_or(-1.0).total_cmp(&b.cpu.unwrap_or(-1.0)),
+        Column::Memory => a.memory.cmp(&b.memory),
+        Column::Disk => a.disk.unwrap_or(-1.0).total_cmp(&b.disk.unwrap_or(-1.0)),
+        Column::Pid => a.id.pid.cmp(&b.id.pid),
+        Column::User => a.user.cmp(b.user),
     };
     // Ties fall back to the pid, so equal rows keep still between frames.
-    let order = order.then(a.3.pid.cmp(&b.3.pid));
+    let order = order.then(a.id.pid.cmp(&b.id.pid));
     if sort.descending {
         order.reverse()
     } else {
@@ -225,8 +247,12 @@ fn compare(sort: Sort, a: (&str, Option<f32>, u64, Id, &str), b: (&str, Option<f
     }
 }
 
-fn key(e: &Entry) -> (&str, Option<f32>, u64, Id, &str) {
-    (&e.name, e.cpu, e.private_bytes, e.id, &e.user)
+fn key(e: &Entry) -> Key<'_> {
+    Key { name: &e.name, cpu: e.cpu, memory: e.private_bytes, disk: e.disk, id: e.id, user: &e.user }
+}
+
+fn app_key(a: &App) -> Key<'_> {
+    Key { name: &a.lead.name, cpu: a.cpu(), memory: a.private_bytes(), disk: a.disk(), id: a.lead.id, user: &a.lead.user }
 }
 
 fn matches(e: &Entry, query: &str) -> bool {
@@ -256,9 +282,7 @@ pub fn lines(table: &Table, view: &View) -> Vec<Line> {
             apps.push((App { members: found, ..app.clone() }, true));
         }
     }
-    apps.sort_by(|(a, _), (b, _)| {
-        compare(view.sort, (&a.lead.name, a.cpu(), a.private_bytes(), a.lead.id, &a.lead.user), (&b.lead.name, b.cpu(), b.private_bytes(), b.lead.id, &b.lead.user))
-    });
+    apps.sort_by(|(a, _), (b, _)| compare(view.sort, app_key(a), app_key(b)));
     let mut background: Vec<&Entry> =
         table.background.iter().filter(|e| (view.show_kernel || !e.kernel) && matches(e, &query)).collect();
     background.sort_by(|a, b| compare(view.sort, key(a), key(b)));
@@ -300,6 +324,7 @@ mod tests {
             private_bytes: pid as u64 * 1000,
             uid,
             kernel: false,
+            io: None,
         }
     }
 
@@ -311,6 +336,7 @@ mod tests {
     /// shell that launched an editor with a window of its own, and a
     /// daemon.
     fn table_of(shares: &HashMap<Id, f32>) -> Table {
+        let usage = Use { cpu: shares.clone(), ..Use::default() };
         let snapshot = Snapshot {
             procs: vec![
                 proc(1, 0, "systemd", 0),
@@ -326,7 +352,7 @@ mod tests {
             ..Snapshot::default()
         };
         let windows = [window(100, "firefox", "The Daily Prophet"), window(200, "kitty", "~"), window(202, "gedit", "spells.txt"), window(100, "firefox", "Owl Post")];
-        table(&snapshot, shares, &windows, 1000, &mut |uid| if uid == 0 { "root".into() } else { "voldemort".into() })
+        table(&snapshot, &usage, &windows, 1000, &mut |uid| if uid == 0 { "root".into() } else { "voldemort".into() })
     }
 
     fn pids(app: &App) -> Vec<i32> {

@@ -50,6 +50,34 @@ pub fn shares(before: &Snapshot, now: &Snapshot) -> HashMap<Id, f32> {
     out
 }
 
+/// Each process's storage traffic since `before`, read and written
+/// together, in bytes a second over `seconds`. Only a process with I/O
+/// figures in both readings has one: no figure is not "no traffic".
+pub fn disk_rates(before: &Snapshot, now: &Snapshot, seconds: f64) -> HashMap<Id, f64> {
+    let earlier: HashMap<Id, (u64, u64)> =
+        before.procs.iter().filter_map(|p| Some((Id { pid: p.pid, start: p.start }, p.io?))).collect();
+    let mut out = HashMap::new();
+    if seconds <= 0.0 {
+        return out;
+    }
+    for p in &now.procs {
+        let id = Id { pid: p.pid, start: p.start };
+        if let (Some((r, w)), Some(&(r0, w0))) = (p.io, earlier.get(&id)) {
+            out.insert(id, (r.saturating_sub(r0) + w.saturating_sub(w0)) as f64 / seconds);
+        }
+    }
+    out
+}
+
+/// What two readings say about each process.
+#[derive(Debug, Clone, Default)]
+pub struct Use {
+    /// Percent of the whole machine.
+    pub cpu: HashMap<Id, f32>,
+    /// Storage bytes a second.
+    pub disk: HashMap<Id, f64>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -68,6 +96,7 @@ mod tests {
             private_bytes: 0,
             uid: 1000,
             kernel: false,
+            io: None,
         }
     }
 
@@ -90,6 +119,18 @@ mod tests {
         let a = snap(1000, 900, vec![proc(10, 5, 5000)]);
         let b = snap(1400, 1100, vec![proc(10, 77, 3)]);
         assert!(shares(&a, &b).is_empty());
+    }
+
+    #[test]
+    fn a_disk_rate_needs_figures_in_both_readings() {
+        let mut a = proc(10, 5, 0);
+        a.io = Some((1000, 0));
+        let mut b = proc(10, 5, 0);
+        b.io = Some((5000, 2000));
+        let hidden = proc(11, 6, 0);
+        let rates = disk_rates(&snap(0, 0, vec![a, hidden.clone()]), &snap(0, 0, vec![b, hidden]), 2.0);
+        assert_eq!(rates[&Id { pid: 10, start: 5 }], 3000.0);
+        assert!(!rates.contains_key(&Id { pid: 11, start: 6 }), "unknown is not zero");
     }
 
     #[test]
