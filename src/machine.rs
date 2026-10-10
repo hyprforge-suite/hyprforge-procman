@@ -29,6 +29,16 @@ pub struct Disk {
     pub write_sectors: u64,
     /// Milliseconds the device has had I/O in flight — "active time".
     pub busy_ms: u64,
+    pub reads: u64,
+    pub writes: u64,
+    /// Milliseconds spent on reads and writes, summed over requests —
+    /// over a count of requests, the average wait.
+    pub read_ms: u64,
+    pub write_ms: u64,
+    pub in_flight: u64,
+    /// Busy time weighted by how many were waiting: over elapsed time,
+    /// the average queue.
+    pub queue_ms: u64,
     pub celsius: Option<f32>,
 }
 
@@ -37,6 +47,11 @@ pub struct Net {
     pub name: String,
     pub rx_bytes: u64,
     pub tx_bytes: u64,
+    pub rx_packets: u64,
+    pub tx_packets: u64,
+    /// Errors and drops, both ways, since the interface came up.
+    pub errors: u64,
+    pub drops: u64,
     /// `/sys/class/net/<name>/wireless` exists.
     pub wireless: bool,
 }
@@ -84,6 +99,67 @@ pub struct Battery {
     pub watts: Option<f32>,
 }
 
+/// One pressure line's three windows: the last 10 s, 60 s and 5 min.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct Windows {
+    pub avg10: f32,
+    pub avg60: f32,
+    pub avg300: f32,
+}
+
+/// Every pressure line, with all three windows, for the Advanced view.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct PressureDetail {
+    pub cpu_some: Windows,
+    pub memory_some: Windows,
+    pub memory_full: Windows,
+    pub io_some: Windows,
+    pub io_full: Windows,
+}
+
+/// Where memory went, in bytes, from `/proc/meminfo`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct MemoryDetail {
+    pub free: u64,
+    /// Programs' own memory, not backed by any file.
+    pub anon: u64,
+    pub buffers: u64,
+    pub cached: u64,
+    pub shmem: u64,
+    pub slab: u64,
+    /// Of the slab, what the kernel can give back.
+    pub slab_reclaimable: u64,
+    pub page_tables: u64,
+    pub kernel_stack: u64,
+    /// Written to, not yet on disk; being written out.
+    pub dirty: u64,
+    pub writeback: u64,
+    pub swap_cached: u64,
+}
+
+/// Paging totals since boot, from `/proc/vmstat`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Paging {
+    pub faults: u64,
+    pub major_faults: u64,
+    /// Pages swapped in and out.
+    pub swap_in: u64,
+    pub swap_out: u64,
+}
+
+/// One mounted filesystem, by device: btrfs mounts one device at several
+/// places (`/`, `/home`, …), and it is one filesystem, listed once.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Filesystem {
+    pub device: String,
+    /// Where it is mounted — the shortest of its mount points.
+    pub mount: String,
+    pub kind: String,
+    pub total: u64,
+    /// What an ordinary user can still write.
+    pub available: u64,
+}
+
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Machine {
     pub disks: Vec<Disk>,
@@ -94,6 +170,15 @@ pub struct Machine {
     pub fans: Vec<Fan>,
     pub pressure: Option<Pressure>,
     pub battery: Option<Battery>,
+    /// Load average over 1, 5 and 15 minutes.
+    pub load: Option<[f32; 3]>,
+    pub uptime_seconds: Option<u64>,
+    /// Each core's clock now, in MHz, and its most.
+    pub clocks: Vec<(Option<u32>, Option<u32>)>,
+    pub memory: MemoryDetail,
+    pub paging: Paging,
+    pub filesystems: Vec<Filesystem>,
+    pub pressure_detail: Option<PressureDetail>,
 }
 
 /// `/`, or a directory laid out like it.
@@ -192,6 +277,16 @@ impl SysFs {
             fans,
             pressure: self.pressure(),
             battery: self.battery(),
+            load: read(self.path("proc/loadavg")).and_then(|l| {
+                let f: Vec<f32> = l.split_whitespace().take(3).filter_map(|v| v.parse().ok()).collect();
+                Some([*f.first()?, *f.get(1)?, *f.get(2)?])
+            }),
+            uptime_seconds: read(self.path("proc/uptime")).and_then(|u| u.split_whitespace().next()?.parse::<f64>().ok()).map(|s| s as u64),
+            clocks: self.clocks(),
+            memory: self.memory_detail(),
+            paging: self.paging(),
+            filesystems: self.filesystems(),
+            pressure_detail: self.pressure_detail(),
         }
     }
 
@@ -215,6 +310,12 @@ impl SysFs {
                 read_sectors: n(5),
                 write_sectors: n(9),
                 busy_ms: n(12),
+                reads: n(3),
+                writes: n(7),
+                read_ms: n(6),
+                write_ms: n(10),
+                in_flight: n(11),
+                queue_ms: n(13),
                 celsius: chip_on(chips, device.as_deref()).and_then(|c| c.celsius(Some("Composite")).or_else(|| c.celsius(None))),
             });
         }
@@ -236,6 +337,10 @@ impl SysFs {
                     name: name.to_owned(),
                     rx_bytes: *f.first()?,
                     tx_bytes: *f.get(8)?,
+                    rx_packets: *f.get(1)?,
+                    tx_packets: *f.get(9)?,
+                    errors: f.get(2)? + f.get(10)?,
+                    drops: f.get(3)? + f.get(11)?,
                     wireless: self.path(&format!("sys/class/net/{name}/wireless")).exists(),
                 })
             })
@@ -287,6 +392,88 @@ impl SysFs {
         })
     }
 
+    fn clocks(&self) -> Vec<(Option<u32>, Option<u32>)> {
+        let mut out = Vec::new();
+        for i in 0.. {
+            let dir = self.path(&format!("sys/devices/system/cpu/cpu{i}"));
+            if !dir.exists() {
+                break;
+            }
+            let khz = |f: &str| number::<u32>(dir.join("cpufreq").join(f)).map(|k| k / 1000);
+            out.push((khz("scaling_cur_freq"), khz("cpuinfo_max_freq")));
+        }
+        out
+    }
+
+    fn memory_detail(&self) -> MemoryDetail {
+        let text = read(self.path("proc/meminfo")).unwrap_or_default();
+        let kib = |key: &str| {
+            text.lines().find_map(|l| l.strip_prefix(key)?.strip_prefix(':')?.split_whitespace().next()?.parse::<u64>().ok()).unwrap_or(0) * 1024
+        };
+        MemoryDetail {
+            free: kib("MemFree"),
+            anon: kib("AnonPages"),
+            buffers: kib("Buffers"),
+            cached: kib("Cached"),
+            shmem: kib("Shmem"),
+            slab: kib("Slab"),
+            slab_reclaimable: kib("SReclaimable"),
+            page_tables: kib("PageTables"),
+            kernel_stack: kib("KernelStack"),
+            dirty: kib("Dirty"),
+            writeback: kib("Writeback"),
+            swap_cached: kib("SwapCached"),
+        }
+    }
+
+    fn paging(&self) -> Paging {
+        let text = read(self.path("proc/vmstat")).unwrap_or_default();
+        let n = |key: &str| text.lines().find_map(|l| l.strip_prefix(key)?.strip_prefix(' ')?.trim().parse().ok()).unwrap_or(0);
+        Paging { faults: n("pgfault"), major_faults: n("pgmajfault"), swap_in: n("pswpin"), swap_out: n("pswpout") }
+    }
+
+    /// Real filesystems only — those on a block device — once each.
+    fn filesystems(&self) -> Vec<Filesystem> {
+        let mounts = read(self.path("proc/mounts")).unwrap_or_default();
+        let mut by_device: std::collections::BTreeMap<String, (String, String)> = std::collections::BTreeMap::new();
+        for line in mounts.lines() {
+            let f: Vec<&str> = line.split_whitespace().collect();
+            let (Some(&device), Some(&mount), Some(&kind)) = (f.first(), f.get(1), f.get(2)) else { continue };
+            if !device.starts_with("/dev/") {
+                continue;
+            }
+            // `\040` is a space in a mount point.
+            let mount = mount.replace("\\040", " ");
+            let keep = by_device.get(device).is_none_or(|(m, _)| mount.len() < m.len());
+            if keep {
+                by_device.insert(device.to_owned(), (mount, kind.to_owned()));
+            }
+        }
+        by_device
+            .into_iter()
+            .filter_map(|(device, (mount, kind))| {
+                let (total, available) = space(&self.root.join(mount.trim_start_matches('/')))?;
+                Some(Filesystem { device, mount, kind, total, available })
+            })
+            .collect()
+    }
+
+    fn pressure_detail(&self) -> Option<PressureDetail> {
+        let windows = |file: &str, kind: &str| -> Option<Windows> {
+            let text = read(self.path(&format!("proc/pressure/{file}")))?;
+            let line = text.lines().find(|l| l.starts_with(kind))?;
+            let get = |key: &str| line.split_whitespace().find_map(|w| w.strip_prefix(key)).and_then(|v| v.parse().ok());
+            Some(Windows { avg10: get("avg10=")?, avg60: get("avg60=")?, avg300: get("avg300=")? })
+        };
+        Some(PressureDetail {
+            cpu_some: windows("cpu", "some")?,
+            memory_some: windows("memory", "some")?,
+            memory_full: windows("memory", "full")?,
+            io_some: windows("io", "some")?,
+            io_full: windows("io", "full")?,
+        })
+    }
+
     fn battery(&self) -> Option<Battery> {
         let dir = fs::read_dir(self.path("sys/class/power_supply")).ok()?;
         let bat = dir.flatten().map(|e| e.path()).find(|p| read(p.join("type")).as_deref() == Some("Battery"))?;
@@ -299,6 +486,19 @@ impl SysFs {
     }
 }
 
+/// `statvfs`: total size, and what an ordinary user may still write.
+fn space(path: &Path) -> Option<(u64, u64)> {
+    use std::os::unix::ffi::OsStrExt;
+    let c = std::ffi::CString::new(path.as_os_str().as_bytes()).ok()?;
+    // SAFETY: zeroed statvfs is a valid out-parameter; `c` is a valid path.
+    let mut s: libc::statvfs = unsafe { std::mem::zeroed() };
+    if unsafe { libc::statvfs(c.as_ptr(), &mut s) } != 0 {
+        return None;
+    }
+    let block = s.f_frsize as u64;
+    Some((s.f_blocks as u64 * block, s.f_bavail as u64 * block))
+}
+
 /// What two readings say: bytes a second, and active time.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct DiskRate {
@@ -306,12 +506,26 @@ pub struct DiskRate {
     pub write: f64,
     /// 0 to 1: the share of the time the drive had work in flight.
     pub active: f32,
+    /// Requests a second.
+    pub read_ops: f64,
+    pub write_ops: f64,
+    /// How long a request took, on average, in milliseconds — what a
+    /// slow disk feels like, where throughput only says how much moved.
+    pub wait_ms: Option<f64>,
+    /// How many requests were waiting, on average.
+    pub queue: f64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct NetRate {
     pub rx: f64,
     pub tx: f64,
+    pub rx_packets: f64,
+    pub tx_packets: f64,
+    /// Errors and drops in this interval — anything above 0 is worth
+    /// seeing.
+    pub errors: u64,
+    pub drops: u64,
 }
 
 /// Each disk's or network's rate, by name.
@@ -330,10 +544,18 @@ pub fn rates(before: &Machine, now: &Machine, seconds: f64) -> (Named<DiskRate>,
             // The kernel counts 512-byte sectors whatever the drive's own.
             Some((
                 d.name.clone(),
-                DiskRate {
-                    read: d.read_sectors.saturating_sub(b.read_sectors) as f64 * 512.0 / seconds,
-                    write: d.write_sectors.saturating_sub(b.write_sectors) as f64 * 512.0 / seconds,
-                    active: (d.busy_ms.saturating_sub(b.busy_ms) as f64 / (seconds * 1000.0)).min(1.0) as f32,
+                {
+                    let ops = d.reads.saturating_sub(b.reads) + d.writes.saturating_sub(b.writes);
+                    let ms = d.read_ms.saturating_sub(b.read_ms) + d.write_ms.saturating_sub(b.write_ms);
+                    DiskRate {
+                        read: d.read_sectors.saturating_sub(b.read_sectors) as f64 * 512.0 / seconds,
+                        write: d.write_sectors.saturating_sub(b.write_sectors) as f64 * 512.0 / seconds,
+                        active: (d.busy_ms.saturating_sub(b.busy_ms) as f64 / (seconds * 1000.0)).min(1.0) as f32,
+                        read_ops: d.reads.saturating_sub(b.reads) as f64 / seconds,
+                        write_ops: d.writes.saturating_sub(b.writes) as f64 / seconds,
+                        wait_ms: (ops > 0).then(|| ms as f64 / ops as f64),
+                        queue: d.queue_ms.saturating_sub(b.queue_ms) as f64 / (seconds * 1000.0),
+                    }
                 },
             ))
         })
@@ -348,6 +570,10 @@ pub fn rates(before: &Machine, now: &Machine, seconds: f64) -> (Named<DiskRate>,
                 NetRate {
                     rx: n.rx_bytes.saturating_sub(b.rx_bytes) as f64 / seconds,
                     tx: n.tx_bytes.saturating_sub(b.tx_bytes) as f64 / seconds,
+                    rx_packets: n.rx_packets.saturating_sub(b.rx_packets) as f64 / seconds,
+                    tx_packets: n.tx_packets.saturating_sub(b.tx_packets) as f64 / seconds,
+                    errors: n.errors.saturating_sub(b.errors),
+                    drops: n.drops.saturating_sub(b.drops),
                 },
             ))
         })
@@ -427,6 +653,9 @@ mod tests {
         w("sys/class/power_supply/BAT1/capacity", "90\n");
         w("sys/class/power_supply/BAT1/current_now", "0\n");
         w("sys/class/power_supply/BAT1/voltage_now", "17204000\n");
+        w("proc/loadavg", "2.21 2.16 2.54 2/1124 1239420\n");
+        w("proc/uptime", "66567.25 688206.95\n");
+        w("proc/vmstat", "pgpgin 29853745\npgpgout 120545912\npswpin 1132\npswpout 358547\npgfault 705063422\npgmajfault 76805\n");
         t
     }
 
@@ -461,30 +690,73 @@ mod tests {
         let m = SysFs::rooted_at(t.path()).read();
         assert_eq!(m.cpu_celsius, Some(60.25));
         assert_eq!(m.fans.iter().map(|f| f.rpm).collect::<Vec<_>>(), [1797, 1807]);
-        assert_eq!(m.nets, [Net { name: "wlan0".into(), rx_bytes: 27977946370, tx_bytes: 444592519, wireless: true }]);
+        assert_eq!(m.nets, [Net { name: "wlan0".into(), rx_bytes: 27977946370, tx_bytes: 444592519, rx_packets: 25346701, tx_packets: 1678119, errors: 0, drops: 0, wireless: true }]);
         let p = m.pressure.unwrap();
         assert_eq!((p.io_some, p.io_full, p.cpu_some), (87.44, 83.36, 0.14));
+        let d = m.pressure_detail.unwrap();
+        assert_eq!((d.io_some.avg60, d.io_some.avg300), (87.96, 85.98));
+        assert_eq!(m.load, Some([2.21, 2.16, 2.54]));
+        assert_eq!(m.uptime_seconds, Some(66567));
+        assert_eq!(m.paging, Paging { faults: 705063422, major_faults: 76805, swap_in: 1132, swap_out: 358547 });
         assert_eq!(m.battery, Some(Battery { status: "Not charging".into(), percent: 90, watts: Some(0.0) }));
     }
 
     #[test]
     fn rates_come_from_two_readings_in_bytes_and_active_time() {
         let mut a = Machine::default();
-        a.disks.push(Disk { name: "d".into(), model: None, read_sectors: 0, write_sectors: 0, busy_ms: 0, celsius: None });
-        a.nets.push(Net { name: "n".into(), rx_bytes: 0, tx_bytes: 0, wireless: false });
+        a.disks.push(Disk {
+            name: "d".into(),
+            model: None,
+            read_sectors: 0,
+            write_sectors: 0,
+            busy_ms: 0,
+            reads: 0,
+            writes: 0,
+            read_ms: 0,
+            write_ms: 0,
+            in_flight: 0,
+            queue_ms: 0,
+            celsius: None,
+        });
+        a.nets.push(Net { name: "n".into(), rx_bytes: 0, tx_bytes: 0, rx_packets: 0, tx_packets: 0, errors: 0, drops: 0, wireless: false });
         let mut b = a.clone();
         b.disks[0].read_sectors = 2048;
         b.disks[0].busy_ms = 500;
+        b.disks[0].reads = 40;
+        b.disks[0].read_ms = 200;
+        b.disks[0].queue_ms = 1500;
         b.nets[0].rx_bytes = 3000;
+        b.nets[0].drops = 2;
         let (disks, nets) = rates(&a, &b, 1.0);
-        assert_eq!(disks[0].1, DiskRate { read: 1048576.0, write: 0.0, active: 0.5 });
-        assert_eq!(nets[0].1, NetRate { rx: 3000.0, tx: 0.0 });
+        let d = disks[0].1;
+        assert_eq!((d.read, d.write, d.active), (1048576.0, 0.0, 0.5));
+        assert_eq!((d.read_ops, d.wait_ms, d.queue), (40.0, Some(5.0), 1.5), "200 ms over 40 requests; 1.5 waiting on average");
+        assert_eq!((nets[0].1.rx, nets[0].1.drops), (3000.0, 2));
     }
 
     /// And the real machine reads without failing, whatever it has.
+    /// btrfs mounts one device at /, /home, /var/log…: one filesystem.
+    #[test]
+    fn a_device_mounted_several_times_is_one_filesystem_at_its_shortest_mount() {
+        let t = tempfile::tempdir().unwrap();
+        // This machine's /proc/mounts lines, trimmed.
+        std::fs::create_dir_all(t.path().join("proc")).unwrap();
+        std::fs::create_dir_all(t.path().join("home")).unwrap();
+        std::fs::write(
+            t.path().join("proc/mounts"),
+            "/dev/nvme1n1p2 /home btrfs rw,relatime 0 0\n/dev/nvme1n1p2 / btrfs rw,relatime 0 0\nproc /proc proc rw 0 0\n",
+        )
+        .unwrap();
+        let fs = SysFs::rooted_at(t.path()).read().filesystems;
+        assert_eq!(fs.len(), 1);
+        assert_eq!((fs[0].device.as_str(), fs[0].mount.as_str(), fs[0].kind.as_str()), ("/dev/nvme1n1p2", "/", "btrfs"));
+        assert!(fs[0].total > 0);
+    }
+
     #[test]
     fn the_real_machine_reads() {
         let m = SysFs::default().read();
         assert!(m.pressure.is_some() || !Path::new("/proc/pressure").exists());
+        assert!(!m.filesystems.is_empty() && !m.clocks.is_empty() && m.load.is_some());
     }
 }

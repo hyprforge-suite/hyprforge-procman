@@ -49,6 +49,66 @@ pub struct Proc {
     pub nice: i32,
     /// Everything resident, shared pages included: what `top` calls RES.
     pub resident_bytes: u64,
+    /// CPU time split: in its own code, and in the kernel on its behalf.
+    pub user_ticks: u64,
+    pub system_ticks: u64,
+    /// Page faults over its life: minor (memory already there) and major
+    /// (had to wait for the disk).
+    pub minflt: u64,
+    pub majflt: u64,
+    /// Address space reserved, in bytes — mostly never touched.
+    pub vsize: u64,
+    /// The CPU it last ran on, or -1 when the kernel does not say.
+    pub processor: i32,
+    /// `SCHED_OTHER` 0, `FIFO` 1, `RR` 2, `BATCH` 3, `IDLE` 5, `DEADLINE` 6.
+    pub policy: u32,
+    /// From `status`, read only in the Advanced view: one more file per
+    /// process per refresh is not worth paying for when nothing shows it.
+    pub verbose: Option<Verbose>,
+}
+
+/// What `/proc/<pid>/status` adds for the Advanced view.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Verbose {
+    pub swap_bytes: u64,
+    /// Times it gave up the CPU to wait for something.
+    pub voluntary_switches: u64,
+    /// Times the scheduler took the CPU away from it.
+    pub forced_switches: u64,
+}
+
+/// The `status` lines [`Verbose`] holds.
+pub fn parse_status(text: &str) -> Option<Verbose> {
+    let field = |key: &str| text.lines().find_map(|l| l.strip_prefix(key)?.trim().split_whitespace().next()?.parse::<u64>().ok());
+    Some(Verbose {
+        // Kernel threads have no VmSwap line at all.
+        swap_bytes: field("VmSwap:").unwrap_or(0) * 1024,
+        voluntary_switches: field("voluntary_ctxt_switches:")?,
+        forced_switches: field("nonvoluntary_ctxt_switches:")?,
+    })
+}
+
+/// The kernel's running totals for the whole machine, from `/proc/stat`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Counters {
+    pub context_switches: u64,
+    pub interrupts: u64,
+    /// Processes started since boot.
+    pub forks: u64,
+    pub running: u64,
+    /// Waiting on I/O right now, unable to run.
+    pub blocked: u64,
+}
+
+fn parse_counters(stat: &str) -> Counters {
+    let first = |key: &str| stat.lines().find_map(|l| l.strip_prefix(key)?.split_whitespace().next()?.parse::<u64>().ok()).unwrap_or(0);
+    Counters {
+        context_switches: first("ctxt "),
+        interrupts: first("intr "),
+        forks: first("processes "),
+        running: first("procs_running "),
+        blocked: first("procs_blocked "),
+    }
 }
 
 /// The CPU's cumulative time counters, from one `cpu` line of
@@ -60,7 +120,14 @@ pub struct CpuTimes {
     pub total: u64,
     /// Idle plus waiting for I/O: time nothing was running.
     pub idle: u64,
+    /// The eight states as `/proc/stat` gives them, in its order: user,
+    /// nice, system, idle, iowait, irq, softirq, steal. For the Advanced
+    /// view's split of where the time went.
+    pub split: [u64; 8],
 }
+
+/// The names of [`CpuTimes::split`]'s states, in order.
+pub const CPU_STATES: [&str; 8] = ["user", "nice", "system", "idle", "iowait", "irq", "softirq", "steal"];
 
 /// Memory and swap, in bytes, from `/proc/meminfo`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -96,6 +163,7 @@ pub struct Snapshot {
     /// When the machine booted, in seconds since the epoch (`btime`):
     /// with a process's start ticks, when the process started.
     pub boot: u64,
+    pub counters: Counters,
 }
 
 /// `/proc`, or a directory standing in for it.
@@ -103,20 +171,22 @@ pub struct Snapshot {
 pub struct ProcFs {
     root: PathBuf,
     page_size: u64,
+    /// Read each process's `status` too, for the Advanced view.
+    pub verbose: bool,
 }
 
 impl Default for ProcFs {
     fn default() -> ProcFs {
         // SAFETY: sysconf has no preconditions; it reads a constant.
         let page = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
-        ProcFs { root: PathBuf::from("/proc"), page_size: u64::try_from(page).unwrap_or(4096) }
+        ProcFs { root: PathBuf::from("/proc"), page_size: u64::try_from(page).unwrap_or(4096), verbose: false }
     }
 }
 
 impl ProcFs {
     /// A directory laid out like `/proc`, with this page size.
     pub fn rooted_at(root: impl Into<PathBuf>, page_size: u64) -> ProcFs {
-        ProcFs { root: root.into(), page_size }
+        ProcFs { root: root.into(), page_size, verbose: false }
     }
 
     pub fn snapshot(&self) -> io::Result<Snapshot> {
@@ -133,7 +203,7 @@ impl ProcFs {
             }
         }
         procs.sort_by_key(|p| p.pid);
-        Ok(Snapshot { procs, cpu, cores, memory, boot })
+        Ok(Snapshot { procs, cpu, cores, memory, boot, counters: parse_counters(&stat) })
     }
 
     /// One process, or `None` if it ended while being read.
@@ -166,6 +236,14 @@ impl ProcFs {
             io: fs::read_to_string(dir.join("io")).ok().and_then(|io| parse_io(&io)),
             nice: stat.nice,
             resident_bytes: resident_pages * self.page_size,
+            user_ticks: stat.utime,
+            system_ticks: stat.stime,
+            minflt: stat.minflt,
+            majflt: stat.majflt,
+            vsize: stat.vsize,
+            processor: stat.processor,
+            policy: stat.policy,
+            verbose: if self.verbose { fs::read_to_string(dir.join("status")).ok().and_then(|s| parse_status(&s)) } else { None },
         })
     }
 }
@@ -217,6 +295,11 @@ struct Stat {
     threads: u32,
     nice: i32,
     start: u64,
+    minflt: u64,
+    majflt: u64,
+    vsize: u64,
+    processor: i32,
+    policy: u32,
 }
 
 /// `pid (comm) state ppid …`. The name is between the *first* `(` and the
@@ -241,6 +324,12 @@ fn parse_stat(line: &str) -> Option<Stat> {
         threads: field(20)?.parse().ok()?,
         nice: field(19)?.parse().ok()?,
         start: field(22)?.parse().ok()?,
+        minflt: field(10)?.parse().ok()?,
+        majflt: field(12)?.parse().ok()?,
+        vsize: field(23)?.parse().ok()?,
+        // Added in later kernels than the rest; absent reads as unknown.
+        processor: field(39).and_then(|f| f.parse().ok()).unwrap_or(-1),
+        policy: field(41).and_then(|f| f.parse().ok()).unwrap_or(0),
     })
 }
 
@@ -296,7 +385,8 @@ fn parse_cpu(stat: &str) -> io::Result<(CpuTimes, Vec<CpuTimes>)> {
         let n: Vec<u64> = words.map(|w| w.parse().unwrap_or(0)).collect();
         // user nice system idle iowait irq softirq steal [guest guest_nice]
         let get = |i: usize| n.get(i).copied().unwrap_or(0);
-        let times = CpuTimes { total: (0..8).map(get).sum(), idle: get(3) + get(4) };
+        let split = std::array::from_fn(get);
+        let times = CpuTimes { total: (0..8).map(get).sum(), idle: get(3) + get(4), split };
         if label == "cpu" {
             all = Some(times);
         } else {
@@ -381,6 +471,7 @@ mod tests {
         assert_eq!(s.ppid, 33855);
         assert_eq!((s.utime, s.stime, s.threads, s.start), (0, 0, 1, 6202074));
         assert_eq!(s.nice, 0);
+        assert_eq!((s.minflt, s.majflt, s.vsize, s.processor, s.policy), (362, 0, 9388032, 8, 0));
         assert_eq!(s.flags & PF_KTHREAD, 0);
     }
 
@@ -399,6 +490,18 @@ mod tests {
     fn io_is_storage_bytes_not_characters() {
         let io = "rchar: 2884\nwchar: 8\nsyscr: 6\nsyscw: 1\nread_bytes: 4096\nwrite_bytes: 0\ncancelled_write_bytes: 0\n";
         assert_eq!(parse_io(io), Some((4096, 0)));
+    }
+
+    /// `status` lines from this machine (a shell; a kernel thread has no
+    /// VmSwap) and `/proc/stat`'s counters.
+    #[test]
+    fn status_and_counters_read_what_the_advanced_view_shows() {
+        let v = parse_status("Name:\tzsh\nVmSwap:\t      12 kB\nvoluntary_ctxt_switches:\t41\nnonvoluntary_ctxt_switches:\t3\n").unwrap();
+        assert_eq!(v, Verbose { swap_bytes: 12 * 1024, voluntary_switches: 41, forced_switches: 3 });
+        let c = parse_counters("cpu  1 2 3\nintr 375827975 133 0 0\nctxt 330627480\nbtime 1\nprocesses 1239419\nprocs_running 1\nprocs_blocked 6\n");
+        assert_eq!(c, Counters { context_switches: 330627480, interrupts: 375827975, forks: 1239419, running: 1, blocked: 6 });
+        let (all, _) = parse_cpu(STAT).unwrap();
+        assert_eq!(all.split[4], 30835332, "iowait, in /proc/stat's order");
     }
 
     #[test]

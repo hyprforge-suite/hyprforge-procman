@@ -452,6 +452,14 @@ mod tests {
             io: None,
             nice: 0,
             resident_bytes: 0,
+            user_ticks: 0,
+            system_ticks: 0,
+            minflt: 0,
+            majflt: 0,
+            vsize: 0,
+            processor: 0,
+            policy: 0,
+            verbose: None,
         }
     }
 
