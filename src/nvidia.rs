@@ -83,6 +83,13 @@ pub fn explain(stdout: &str, stderr: &str) -> String {
     text.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("nvidia-smi gave no answer").to_string()
 }
 
+/// Whether a refusal will last until the machine restarts — the
+/// version mismatch. Each failed ask writes an "API mismatch" line to the
+/// kernel log, so asking again every few seconds only fills the journal.
+pub fn lasts_until_restart(said: &str) -> bool {
+    said.contains("Restart to finish the driver update") || said.contains("isn't installed")
+}
+
 /// Asks the card, bounded. Never call this for a card that is asleep.
 pub fn query() -> Result<Reading, String> {
     let mut command = Command::new("nvidia-smi");
@@ -119,5 +126,6 @@ mod tests {
         let said = explain("Failed to initialize NVML: Driver/library version mismatch\nNVML library version: 615.78\n", "");
         assert!(said.contains("Restart to finish the driver update"), "{said}");
         assert!(said.contains("615.78"), "{said}");
+        assert!(lasts_until_restart(&said), "and is not asked again this session");
     }
 }

@@ -109,6 +109,7 @@ impl App {
     pub fn view(&self) -> Element<'_, Message> {
         let s = scale();
         let body = match self.tab {
+            Tab::Overview => self.overview_view(s),
             Tab::Processes => self.processes(s),
             Tab::Performance => self.performance(s),
             Tab::Details => self.details_view(s),
@@ -134,14 +135,20 @@ impl App {
     }
 
     fn header(&self, s: FontScale) -> Element<'_, Message> {
-        let tabs = widgets::panel_tabs(&[
-                (Tab::Processes, "Processes"),
-                (Tab::Performance, "Performance"),
-                (Tab::Startup, "Startup"),
-                (Tab::Users, "Users"),
-                (Tab::Details, "Details"),
-                (Tab::Services, "Services"),
-            ], &self.tab, Message::Tab, s);
+        // The Overview is the Advanced view's own tab, first when shown.
+        let mut list: Vec<(Tab, &str)> = Vec::new();
+        if self.advanced {
+            list.push((Tab::Overview, "Overview"));
+        }
+        list.extend([
+            (Tab::Processes, "Processes"),
+            (Tab::Performance, "Performance"),
+            (Tab::Startup, "Startup"),
+            (Tab::Users, "Users"),
+            (Tab::Details, "Details"),
+            (Tab::Services, "Services"),
+        ]);
+        let tabs = widgets::panel_tabs(&list, &self.tab, Message::Tab, s);
         let mut bar = row![tabs, Space::new().width(Length::Fill)].spacing(spacing::MD).align_y(Alignment::Center);
         if self.tab == Tab::Services {
             bar = bar.push(
@@ -172,7 +179,8 @@ impl App {
             crate::Everything::Asking => widgets::secondary_button("Asking…"),
             crate::Everything::Open(_) => widgets::primary_button("Showing everything"),
         };
-        bar = bar.push(everything).push(speeds).push(pause);
+        let advanced = widgets::toggle(self.advanced, s).label("Advanced").on_toggle(Message::Advanced);
+        bar = bar.push(advanced).push(everything).push(speeds).push(pause);
         container(bar)
             .padding([0.0, spacing::MD])
             .height(Length::Fixed(density::bar_height(s)))

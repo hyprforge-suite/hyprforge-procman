@@ -69,6 +69,60 @@ pub fn disk_rates(before: &Snapshot, now: &Snapshot, seconds: f64) -> HashMap<Id
     out
 }
 
+/// What two readings say about one process, for the Advanced view.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct Detail {
+    /// Of the whole machine, in its own code and in the kernel for it.
+    pub user_pct: f32,
+    pub system_pct: f32,
+    /// Page faults a second: minor, and major (each a wait on the disk).
+    pub minor_faults: f64,
+    pub major_faults: f64,
+    /// Context switches a second, when `status` was read: given up to
+    /// wait, and taken away by the scheduler.
+    pub voluntary: Option<f64>,
+    pub forced: Option<f64>,
+}
+
+/// [`Detail`] for every process in both readings.
+pub fn details(before: &Snapshot, now: &Snapshot, seconds: f64) -> HashMap<Id, Detail> {
+    let total = now.cpu.total.saturating_sub(before.cpu.total);
+    let earlier: HashMap<Id, &crate::proc::Proc> = before.procs.iter().map(|p| (Id { pid: p.pid, start: p.start }, p)).collect();
+    let mut out = HashMap::new();
+    if total == 0 || seconds <= 0.0 {
+        return out;
+    }
+    let pct = |d: u64| (d as f32 / total as f32 * 100.0).min(100.0);
+    for p in &now.procs {
+        let id = Id { pid: p.pid, start: p.start };
+        let Some(b) = earlier.get(&id) else { continue };
+        let rate = |now: u64, then: u64| now.saturating_sub(then) as f64 / seconds;
+        let (voluntary, forced) = match (p.verbose, b.verbose) {
+            (Some(v), Some(w)) => (Some(rate(v.voluntary_switches, w.voluntary_switches)), Some(rate(v.forced_switches, w.forced_switches))),
+            _ => (None, None),
+        };
+        out.insert(
+            id,
+            Detail {
+                user_pct: pct(p.user_ticks.saturating_sub(b.user_ticks)),
+                system_pct: pct(p.system_ticks.saturating_sub(b.system_ticks)),
+                minor_faults: rate(p.minflt, b.minflt),
+                major_faults: rate(p.majflt, b.majflt),
+                voluntary,
+                forced,
+            },
+        );
+    }
+    out
+}
+
+/// Where the whole machine's CPU time went between two readings, as
+/// fractions in [`crate::proc::CPU_STATES`]' order.
+pub fn split(before: crate::proc::CpuTimes, now: crate::proc::CpuTimes) -> [f32; 8] {
+    let total = now.total.saturating_sub(before.total);
+    std::array::from_fn(|i| if total == 0 { 0.0 } else { now.split[i].saturating_sub(before.split[i]) as f32 / total as f32 })
+}
+
 /// What two readings say about each process.
 #[derive(Debug, Clone, Default)]
 pub struct Use {
@@ -80,6 +134,8 @@ pub struct Use {
     pub gpu: HashMap<Id, f32>,
     /// Which cards it has open, by name ("AMD", "NVIDIA").
     pub gpu_cards: HashMap<Id, Vec<String>>,
+    /// The Advanced view's rates; empty when it is off.
+    pub detail: HashMap<Id, Detail>,
 }
 
 #[cfg(test)]
@@ -145,6 +201,32 @@ mod tests {
         let rates = disk_rates(&snap(0, 0, vec![a, hidden.clone()]), &snap(0, 0, vec![b, hidden]), 2.0);
         assert_eq!(rates[&Id { pid: 10, start: 5 }], 3000.0);
         assert!(!rates.contains_key(&Id { pid: 11, start: 6 }), "unknown is not zero");
+    }
+
+    #[test]
+    fn a_detail_splits_cpu_and_counts_faults_and_switches_a_second() {
+        let mut a = proc(10, 5, 0);
+        a.user_ticks = 100;
+        a.system_ticks = 10;
+        a.majflt = 3;
+        a.verbose = Some(crate::proc::Verbose { swap_bytes: 0, voluntary_switches: 50, forced_switches: 1 });
+        let mut b = a.clone();
+        b.user_ticks = 160;
+        b.system_ticks = 30;
+        b.majflt = 7;
+        b.verbose = Some(crate::proc::Verbose { swap_bytes: 0, voluntary_switches: 250, forced_switches: 5 });
+        let d = details(&snap(1000, 0, vec![a]), &snap(1400, 0, vec![b]), 2.0)[&Id { pid: 10, start: 5 }];
+        assert!((d.user_pct - 15.0).abs() < 1e-4 && (d.system_pct - 5.0).abs() < 1e-4);
+        assert_eq!((d.major_faults, d.voluntary, d.forced), (2.0, Some(100.0), Some(2.0)));
+    }
+
+    #[test]
+    fn the_machines_split_adds_up_to_its_whole() {
+        let before = CpuTimes { total: 0, idle: 0, split: [0; 8] };
+        let now = CpuTimes { total: 100, idle: 70, split: [20, 0, 10, 60, 10, 0, 0, 0] };
+        let s = split(before, now);
+        assert!((s.iter().sum::<f32>() - 1.0).abs() < 1e-6);
+        assert_eq!(s[4], 0.1, "iowait");
     }
 
     #[test]

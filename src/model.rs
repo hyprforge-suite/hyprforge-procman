@@ -48,6 +48,12 @@ pub struct Entry {
     /// CPU time over its whole life, in clock ticks.
     pub ticks: u64,
     pub resident_bytes: u64,
+    /// The Advanced view's figures.
+    pub detail: Option<crate::sample::Detail>,
+    pub swap_bytes: Option<u64>,
+    pub vsize: u64,
+    pub processor: i32,
+    pub policy: u32,
 }
 
 /// A window's process and the processes it started.
@@ -133,6 +139,11 @@ pub fn table(
             nice: p.nice,
             ticks: p.ticks,
             resident_bytes: p.resident_bytes,
+            detail: usage.detail.get(&id).copied(),
+            swap_bytes: p.verbose.map(|v| v.swap_bytes),
+            vsize: p.vsize,
+            processor: p.processor,
+            policy: p.policy,
         }
     };
 

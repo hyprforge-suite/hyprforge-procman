@@ -7,6 +7,7 @@
 //! this?".
 
 mod details;
+mod overview;
 mod people;
 mod view;
 
@@ -44,6 +45,8 @@ pub enum Resource {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tab {
+    /// The Advanced view's dashboard: everything at once, btop-style.
+    Overview,
     Processes,
     Performance,
     Startup,
@@ -223,6 +226,7 @@ pub enum Message {
     ServicesLoaded(Scope, Result<Vec<Unit>, String>),
     ServiceScope(Scope),
     Tree(bool),
+    Advanced(bool),
     StartupLoaded(Box<StartupData>),
     /// An autostart entry on or off, by id.
     Autostart(String, bool),
@@ -293,6 +297,9 @@ pub struct App {
     /// The NVIDIA card's last answer, and when it was asked.
     pub nvidia: Option<Result<hyprforge_procman::nvidia::Reading, String>>,
     nvidia_asked: Option<std::time::Instant>,
+    /// The card refused in a way that lasts until a restart; asking again
+    /// would only add a line to the kernel log each time.
+    nvidia_given_up: bool,
     last_gpu: HashMap<i32, hyprforge_procman::gpu::DrmUse>,
     /// Why there are no apps, when Hyprland could not be asked.
     pub no_windows: Option<String>,
@@ -300,6 +307,14 @@ pub struct App {
     pub interval: Duration,
     pub history: History,
     pub resource: Resource,
+    /// The btop/atop-verbose view: the Overview tab and the extra columns.
+    pub advanced: bool,
+    /// Machine-wide rates the Overview shows.
+    pub overview: Overview,
+    /// The last reading's running and blocked counts.
+    pub counters: hyprforge_procman::proc::Counters,
+    /// A minute of each process's CPU, for the Overview's sparklines.
+    pub process_history: HashMap<Id, hyprforge_procman::history::Series>,
     pub services: ServicesTab,
     pub details: DetailsTab,
     pub startup: Option<StartupData>,
@@ -317,6 +332,21 @@ pub struct App {
     /// frozen, and named in an End confirmation.
     pub critical: std::collections::HashSet<i32>,
     reading: bool,
+}
+
+/// What two readings say about the whole machine, for the Overview.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Overview {
+    /// Where CPU time went, in `proc::CPU_STATES` order.
+    pub split: [f32; 8],
+    pub context_switches: f64,
+    pub interrupts: f64,
+    pub forks: f64,
+    pub faults: f64,
+    pub major_faults: f64,
+    /// Bytes a second swapped in and out.
+    pub swap_in: f64,
+    pub swap_out: f64,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -428,12 +458,17 @@ impl App {
             gpu_scan: GpuScan::default(),
             nvidia: None,
             nvidia_asked: None,
+            nvidia_given_up: false,
             last_gpu: HashMap::new(),
             no_windows: None,
             paused: false,
             interval: INTERVALS[1],
             history: History::default(),
             resource: Resource::Cpu,
+            advanced: false,
+            overview: Overview::default(),
+            counters: Default::default(),
+            process_history: HashMap::new(),
             services: ServicesTab::default(),
             details: DetailsTab { tree: true, ..DetailsTab::default() },
             startup: None,
@@ -507,7 +542,7 @@ impl App {
     /// is open, at most every three seconds — see `nvidia.rs`.
     fn ask_nvidia(&mut self) -> bool {
         let due = self.nvidia_asked.is_none_or(|t| t.elapsed() >= Duration::from_secs(3));
-        let ask = self.tab == Tab::Performance && due;
+        let ask = self.tab == Tab::Performance && due && !self.nvidia_given_up;
         if ask {
             self.nvidia_asked = Some(std::time::Instant::now());
         }
@@ -571,6 +606,18 @@ impl App {
                 }
             }
             Message::Tree(on) => self.details.tree = on,
+            Message::Advanced(on) => {
+                self.advanced = on;
+                // `status` is one more file per process: read only while
+                // something shows what it holds.
+                self.fs.verbose = on;
+                if !on && self.tab == Tab::Overview {
+                    self.tab = Tab::Processes;
+                }
+                if on {
+                    self.tab = Tab::Overview;
+                }
+            }
             Message::StartupLoaded(data) => self.startup = Some(*data),
             Message::Autostart(id, on) => {
                 let Some(entry) = self.startup.as_ref().and_then(|d| d.autostarts.iter().find(|a| a.id == id)).cloned() else {
@@ -864,6 +911,7 @@ impl App {
             Key::Char('5') if ctrl => self.tab = Tab::Details,
             Key::Char('6') if ctrl => return self.update(Message::Tab(Tab::Services)),
             Key::Char('p') if ctrl => self.paused = !self.paused,
+            Key::Char('.') if ctrl => return self.update(Message::Advanced(!self.advanced)),
             _ => {}
         }
         Task::none()
@@ -884,6 +932,9 @@ impl App {
     fn take(&mut self, reading: Reading) {
         let Reading { snapshot, gpu, machine, windows, at, nvidia, everything_lapsed } = reading;
         if let Some(answer) = nvidia {
+            if let Err(why) = &answer {
+                self.nvidia_given_up = hyprforge_procman::nvidia::lasts_until_restart(why);
+            }
             self.nvidia = Some(answer);
         }
         // A card that went to sleep has no figures; its old ones would lie.
@@ -916,6 +967,7 @@ impl App {
         if let Some(b) = &machine.battery {
             self.history.battery.push(f32::from(b.percent) / 100.0);
         }
+        let paging_before = self.machine.paging;
         self.machine = machine;
         if everything_lapsed && matches!(self.everything, Everything::Open(_)) {
             self.everything = Everything::Locked;
@@ -925,6 +977,23 @@ impl App {
         if let Some(before) = &self.last {
             usage.cpu = sample::shares(before, &snapshot);
             usage.disk = sample::disk_rates(before, &snapshot, seconds);
+            if self.advanced && seconds > 0.0 {
+                usage.detail = sample::details(before, &snapshot, seconds);
+                let rate = |now: u64, then: u64| now.saturating_sub(then) as f64 / seconds;
+                let (c, b) = (snapshot.counters, before.counters);
+                let (pg, pb) = (self.machine.paging, paging_before);
+                // Pages are 4 KiB on every machine this targets.
+                self.overview = Overview {
+                    split: sample::split(before.cpu, snapshot.cpu),
+                    context_switches: rate(c.context_switches, b.context_switches),
+                    interrupts: rate(c.interrupts, b.interrupts),
+                    forks: rate(c.forks, b.forks),
+                    faults: rate(pg.faults, pb.faults),
+                    major_faults: rate(pg.major_faults, pb.major_faults),
+                    swap_in: rate(pg.swap_in, pb.swap_in) * 4096.0,
+                    swap_out: rate(pg.swap_out, pb.swap_out) * 4096.0,
+                };
+            }
             let ids: HashMap<i32, Id> = snapshot.procs.iter().map(|p| (p.pid, Id { pid: p.pid, start: p.start })).collect();
             usage.gpu = hyprforge_procman::gpu::shares(&self.last_gpu, &gpu, &ids, seconds);
             // A card's maker, from its driver; NVIDIA's own device files
@@ -990,6 +1059,17 @@ impl App {
             processes: snapshot.procs.iter().filter(|p| !p.kernel).count(),
             threads: snapshot.procs.iter().map(|p| u64::from(p.threads)).sum(),
         };
+        // A minute of CPU per process, for the Overview's sparklines; a
+        // process that ended takes its history with it.
+        if self.advanced {
+            let live: std::collections::HashSet<Id> = model::entries(&self.table).map(|e| e.id).collect();
+            self.process_history.retain(|id, _| live.contains(id));
+            for e in model::entries(&self.table) {
+                if let Some(cpu) = e.cpu {
+                    self.process_history.entry(e.id).or_default().push(cpu / 100.0);
+                }
+            }
+        }
         // This process and what it runs under, plus the compositor by
         // name, in case this window was started some other way.
         self.critical = model::ancestry(&snapshot, std::process::id() as i32);
@@ -1024,6 +1104,7 @@ impl App {
         }
         self.last_gpu = gpu;
         self.boot = snapshot.boot;
+        self.counters = snapshot.counters;
         self.last = Some(snapshot);
     }
 }
@@ -1110,11 +1191,17 @@ mod render {
         let snapshot = fs.snapshot().unwrap();
         let pids: Vec<i32> = snapshot.procs.iter().filter(|p| !p.kernel).map(|p| p.pid).collect();
         let gpu = scan.lock().unwrap().read(std::path::Path::new("/proc"), &pids);
-        Reading { snapshot, gpu, machine: SysFs::default().read(), windows: windows::read(), at: std::time::Instant::now(), nvidia: Some(hyprforge_procman::nvidia::query()), everything_lapsed: false }
+        // The NVIDIA card is not asked here: each failed ask is a kernel
+        // log line, and a dozen readings would be a dozen lines.
+        Reading { snapshot, gpu, machine: SysFs::default().read(), windows: windows::read(), at: std::time::Instant::now(), nvidia: None, everything_lapsed: false }
     }
 
     fn draw(app: &App, name: &str, dir: &std::path::Path) {
-        let (w, h, scale) = (1280.0f32, 800.0f32, 1.6f32);
+        draw_sized(app, name, dir, 800.0);
+    }
+
+    fn draw_sized(app: &App, name: &str, dir: &std::path::Path, h: f32) {
+        let (w, scale) = (1280.0f32, 1.6f32);
         let (pw, ph) = ((w * scale) as u32, (h * scale) as u32);
         let theme = hyprforge_ui::theme::active();
         let font = iced::Font::with_name(Box::leak(theme.font.clone().into_boxed_str()));
@@ -1148,7 +1235,10 @@ mod render {
         hyprforge_ui::theme::init(hyprforge_appearance::look::resolve());
         let runtime = tokio::runtime::Runtime::new().unwrap();
         let (mut app, _) = App::new();
-        let fs = ProcFs::default();
+        app.nvidia = Some(hyprforge_procman::nvidia::query());
+        let _ = app.update(Message::Advanced(true));
+        let mut fs = ProcFs::default();
+        fs.verbose = true;
         // A dozen readings half a second apart: the graphs get a line,
         // and every share has its second reading.
         for _ in 0..12 {
@@ -1156,6 +1246,8 @@ mod render {
             app.take(r);
             std::thread::sleep(Duration::from_millis(500));
         }
+        draw_sized(&app, "overview", &dir, 1420.0);
+        app.tab = Tab::Processes;
         draw(&app, "processes", &dir);
 
         app.tab = Tab::Performance;

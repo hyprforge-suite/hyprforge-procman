@@ -176,6 +176,11 @@ mod tests {
             nice: 0,
             ticks: 0,
             resident_bytes: 0,
+            detail: None,
+            swap_bytes: None,
+            vsize: 0,
+            processor: 0,
+            policy: 0,
         }
     }
 
