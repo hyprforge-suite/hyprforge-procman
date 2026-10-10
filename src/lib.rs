@@ -20,6 +20,7 @@ pub mod journal;
 pub mod history;
 pub mod machine;
 pub mod model;
+pub mod moment;
 pub mod nvidia;
 pub mod proc;
 pub mod recorder;

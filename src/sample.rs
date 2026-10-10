@@ -13,7 +13,7 @@ use std::collections::HashMap;
 /// A process's identity: its pid and when it started. A pid alone is
 /// reused; comparing two snapshots by pid would charge a new process with
 /// the ticks of the one that had the number before it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Default)]
 pub struct Id {
     pub pid: i32,
     pub start: u64,

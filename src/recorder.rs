@@ -109,6 +109,21 @@ impl Recorder {
     /// written to `now`'s day file. A new day opens a new file and prunes
     /// the old ones.
     pub fn tick(&mut self, now: chrono::DateTime<chrono::Local>, exits: Vec<Exit>) -> io::Result<()> {
+        let frame = self.collect(now, exits)?;
+        let path = journal::day_file(&self.config.directory, now);
+        if self.writer.as_ref().is_none_or(|(p, _)| *p != path) {
+            self.writer = Some((path.clone(), Writer::open(&path, &self.header)?));
+            if let Err(e) = journal::prune(&self.config.directory, self.config.keep_days, self.config.max_bytes, &path) {
+                tracing::warn!("couldn't prune old journals: {e}");
+            }
+        }
+        let (_, writer) = self.writer.as_mut().expect("opened above");
+        writer.write(&frame)
+    }
+
+    /// One sample, not written — what the TUI's live view shows, read
+    /// exactly as the recorder reads it.
+    pub fn collect(&mut self, now: chrono::DateTime<chrono::Local>, exits: Vec<Exit>) -> io::Result<Frame> {
         let mut snapshot = self.fs.snapshot()?;
         if !self.config.record_cmdlines {
             for p in &mut snapshot.procs {
@@ -119,23 +134,14 @@ impl Recorder {
         // drive (see `SysFs::drive_temperatures`).
         self.sys.drive_temperatures = self.ticks.is_multiple_of((60 / u64::from(self.config.interval.clamp(1, 60))).max(1));
         self.ticks += 1;
-        let frame = Frame {
+        Ok(Frame {
             at_ms: now.timestamp_millis(),
             boot_id: boot_id(),
             snapshot,
             machine: self.sys.read(),
             cgroups: crate::cgroups::all(Path::new("/sys/fs/cgroup"), 6),
             exits,
-        };
-        let path = journal::day_file(&self.config.directory, now);
-        if self.writer.as_ref().is_none_or(|(p, _)| *p != path) {
-            self.writer = Some((path.clone(), Writer::open(&path, &self.header)?));
-            if let Err(e) = journal::prune(&self.config.directory, self.config.keep_days, self.config.max_bytes, &path) {
-                tracing::warn!("couldn't prune old journals: {e}");
-            }
-        }
-        let (_, writer) = self.writer.as_mut().expect("opened above");
-        writer.write(&frame)
+        })
     }
 }
 
