@@ -13,6 +13,8 @@ pub enum View {
     Memory,
     /// `d`: reads, writes, cancelled writes.
     Disk,
+    /// `n`: network received and sent, from the eBPF counter (root).
+    Network,
     /// `s`: threads by state, policy, nice, priority, CPU, delays.
     Scheduling,
     /// `v`: parent, start time, owner.
@@ -27,13 +29,14 @@ pub enum View {
     Cgroups,
 }
 
-/// atop's sort keys: `C` CPU, `M` memory, `D` disk, `A` whichever the
-/// machine is busiest with.
+/// atop's sort keys: `C` CPU, `M` memory, `D` disk, `N` network, `A`
+/// whichever the machine is busiest with.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SortKey {
     Cpu,
     Memory,
     Disk,
+    Network,
     Auto,
 }
 
@@ -122,6 +125,7 @@ impl State {
         rows.sort_by(|a, b| match key {
             SortKey::Memory => b.resident_bytes.cmp(&a.resident_bytes),
             SortKey::Disk => (b.read.unwrap_or(0) + b.written.unwrap_or(0)).cmp(&(a.read.unwrap_or(0) + a.written.unwrap_or(0))),
+            SortKey::Network => (b.net_rx.unwrap_or(0) + b.net_tx.unwrap_or(0)).cmp(&(a.net_rx.unwrap_or(0) + a.net_tx.unwrap_or(0))),
             _ => b.cpu_pct.total_cmp(&a.cpu_pct),
         }
         .then(a.id.pid.cmp(&b.id.pid)));
@@ -143,6 +147,7 @@ impl State {
             Key::Char('g') => self.view = View::Generic,
             Key::Char('m') => self.view = View::Memory,
             Key::Char('d') => self.view = View::Disk,
+            Key::Char('n') => self.view = View::Network,
             Key::Char('s') => self.view = View::Scheduling,
             Key::Char('v') => self.view = View::Various,
             Key::Char('c') => self.view = View::Command,
@@ -152,6 +157,7 @@ impl State {
             Key::Char('C') => self.sort = SortKey::Cpu,
             Key::Char('M') => self.sort = SortKey::Memory,
             Key::Char('D') => self.sort = SortKey::Disk,
+            Key::Char('N') => self.sort = SortKey::Network,
             Key::Char('A') => self.sort = SortKey::Auto,
             Key::Char('/') => self.prompt = Some(Prompt::Filter(self.filter.clone())),
             Key::Char('z') if !self.replay => self.paused = !self.paused,

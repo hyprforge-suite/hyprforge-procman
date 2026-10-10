@@ -11,6 +11,7 @@ categories = ["os::linux-apis", "gui"]
 # A component, not a library: nothing here is meant to be depended on,
 # and crates.io is where the suite's libraries live.
 publish = false
+build = "build.rs"
 
 # Four programs, one crate (a package's binaries must live in one crate
 # directory: the suite's CLAUDE.md, "a binary cannot be fetched"), and
@@ -30,6 +31,11 @@ desktop = ["dep:hyprforge-session", "dep:hyprforge-mime"]
 # disagree on its version; dbus for opening the journal through the
 # helper when not run as root.)
 tui = ["dep:ratatui", "dbus"]
+# Network bytes per process, counted in the kernel by a small eBPF
+# program (bpf/net.bpf.c, compiled by clang in build.rs) — for the root
+# recorder, the helper, and hyprforge-top under sudo. aya loads it; no
+# libbpf, no C at run time.
+netbpf = ["dep:aya"]
 
 [[bin]]
 name = "hyprforge-procman"
@@ -105,6 +111,7 @@ zstd = "0.13"
 crc32fast = "1.5"
 # The terminal UI.
 ratatui = { version = "0.30", optional = true }
+aya = { version = "0.14", optional = true }
 
 [dev-dependencies]
 tempfile = "3"

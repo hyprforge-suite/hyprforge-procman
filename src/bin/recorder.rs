@@ -80,6 +80,9 @@ fn run(config: Config) -> std::process::ExitCode {
 
     let interval = Duration::from_secs(u64::from(config.interval));
     let mut recorder = Recorder::new(config);
+    if let Some(why) = &recorder.net_missing {
+        tracing::warn!("not counting network per process: {why}");
+    }
     tracing::info!("recording every {}s into {}", interval.as_secs(), recorder.config.directory.display());
     while !STOP.load(Ordering::SeqCst) {
         wait_for_next(interval);

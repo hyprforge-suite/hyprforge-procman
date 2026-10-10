@@ -142,6 +142,9 @@ pub struct Consumer {
     pub peak_resident: u64,
     pub read: u64,
     pub written: u64,
+    /// Network bytes, where something was counting them (`netbpf`).
+    pub received: Option<u64>,
+    pub sent: Option<u64>,
 }
 
 #[derive(Debug, Clone, Default, Serialize)]
@@ -248,6 +251,16 @@ struct ProgramSum {
     peak_resident: u64,
     read: u64,
     written: u64,
+    received: Option<u64>,
+    sent: Option<u64>,
+}
+
+/// Adds a figure that may not have been measured: unmeasured stays
+/// unmeasured until something is.
+fn add_opt(sum: &mut Option<u64>, v: Option<u64>) {
+    if let Some(v) = v {
+        *sum = Some(sum.unwrap_or(0) + v);
+    }
 }
 
 /// Folds one interval into its bucket and the range's programs.
@@ -314,6 +327,8 @@ fn add(bucket: &mut Bucket, programs: &mut BTreeMap<String, ProgramSum>, m: &Mom
         p.cpu_seconds += f64::from(r.cpu_pct) / 100.0 * s.seconds * f64::from(cpus);
         p.read += r.read.unwrap_or(0);
         p.written += r.written.unwrap_or(0);
+        add_opt(&mut p.received, r.net_rx);
+        add_opt(&mut p.sent, r.net_tx);
         // An exited row's resident figure is its peak, not memory still
         // in use alongside the others.
         if r.exit.is_none() {
@@ -401,7 +416,7 @@ pub fn build(reader: &mut Reader, options: &Options) -> io::Result<Report> {
     }
     let mut top: Vec<Consumer> = programs
         .into_iter()
-        .map(|(name, p)| Consumer { name, processes: p.ids.len(), cpu_seconds: p.cpu_seconds, peak_resident: p.peak_resident, read: p.read, written: p.written })
+        .map(|(name, p)| Consumer { name, processes: p.ids.len(), cpu_seconds: p.cpu_seconds, peak_resident: p.peak_resident, read: p.read, written: p.written, received: p.received, sent: p.sent })
         .collect();
     top.sort_by(|a, b| b.cpu_seconds.total_cmp(&a.cpu_seconds).then_with(|| a.name.cmp(&b.name)));
     top.truncate(options.top);
@@ -503,11 +518,24 @@ pub fn text(report: &Report, kind: Kind) -> String {
         Kind::Top => {
             // The range's own length, for "on average this much CPU".
             let seconds: f64 = report.cpu.iter().map(|l| l.seconds).sum::<f64>().max(0.001);
-            let _ = writeln!(out, "{:<20} {:>5} {:>8} {:>6} {:>8} {:>8} {:>8}", "program", "procs", "cpu time", "cpu", "peak mem", "read", "written");
+            let _ = writeln!(out, "{:<20} {:>5} {:>8} {:>6} {:>8} {:>8} {:>8} {:>8} {:>8}", "program", "procs", "cpu time", "cpu", "peak mem", "read", "written", "net in", "net out");
+            let net = |v: Option<u64>| v.map_or_else(|| "-".into(), bytes);
             for c in &report.top {
                 // Kernel workers name what they are doing and run long.
                 let name = if c.name.chars().count() > 20 { format!("{}…", c.name.chars().take(19).collect::<String>()) } else { c.name.clone() };
-                let _ = writeln!(out, "{:<20} {:>5} {:>8} {:>6} {:>8} {:>8} {:>8}", name, c.processes, duration(c.cpu_seconds), pct((c.cpu_seconds / seconds * 100.0) as f32), bytes(c.peak_resident), bytes(c.read), bytes(c.written));
+                let _ = writeln!(
+                    out,
+                    "{:<20} {:>5} {:>8} {:>6} {:>8} {:>8} {:>8} {:>8} {:>8}",
+                    name,
+                    c.processes,
+                    duration(c.cpu_seconds),
+                    pct((c.cpu_seconds / seconds * 100.0) as f32),
+                    bytes(c.peak_resident),
+                    bytes(c.read),
+                    bytes(c.written),
+                    net(c.received),
+                    net(c.sent)
+                );
             }
         }
     }

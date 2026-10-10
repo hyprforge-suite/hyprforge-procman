@@ -32,6 +32,9 @@ pub struct Config {
     /// I/O delay per process is measured; the previous setting is put
     /// back when the recorder stops.
     pub delay_accounting: bool,
+    /// Count each process's network bytes with the eBPF counter (built
+    /// with `netbpf`, and only as root).
+    pub network: bool,
     pub directory: PathBuf,
 }
 
@@ -45,6 +48,7 @@ impl Default for Config {
             threads: true,
             pss: false,
             delay_accounting: true,
+            network: true,
             directory: PathBuf::from("/var/log/hyprforge/procman"),
         }
     }
@@ -76,6 +80,11 @@ pub struct Recorder {
     header: Header,
     writer: Option<(PathBuf, Writer)>,
     ticks: u64,
+    #[cfg(feature = "netbpf")]
+    net: Option<crate::netbpf::Counter>,
+    /// Why processes' network isn't being counted, when it isn't — for
+    /// the caller to say once.
+    pub net_missing: Option<String>,
 }
 
 fn boot_id() -> String {
@@ -84,6 +93,28 @@ fn boot_id() -> String {
 
 fn hostname() -> String {
     std::fs::read_to_string("/proc/sys/kernel/hostname").map(|s| s.trim().to_owned()).unwrap_or_default()
+}
+
+/// The eBPF network counter, if this build has one, the config wants it,
+/// and this process may load it — or why not.
+#[cfg(feature = "netbpf")]
+fn network_counter(config: &Config) -> (Option<crate::netbpf::Counter>, Option<String>) {
+    if !config.network {
+        return (None, None);
+    }
+    // SAFETY: geteuid cannot fail.
+    if unsafe { libc::geteuid() } != 0 {
+        return (None, Some("counting network per process needs root".into()));
+    }
+    match crate::netbpf::Counter::start() {
+        Ok(c) => (Some(c), None),
+        Err(e) => (None, Some(e)),
+    }
+}
+
+#[cfg(not(feature = "netbpf"))]
+fn network_counter(config: &Config) -> (Option<()>, Option<String>) {
+    (None, config.network.then(|| "this build counts no network per process (built without netbpf)".into()))
 }
 
 impl Recorder {
@@ -102,7 +133,20 @@ impl Recorder {
             interval_seconds: config.interval,
             command_lines: config.record_cmdlines,
         };
-        Recorder { config, fs, sys: SysFs::default(), header, writer: None, ticks: 0 }
+        let (net, net_missing) = network_counter(&config);
+        #[cfg(not(feature = "netbpf"))]
+        let _ = net;
+        Recorder {
+            config,
+            fs,
+            sys: SysFs::default(),
+            header,
+            writer: None,
+            ticks: 0,
+            #[cfg(feature = "netbpf")]
+            net,
+            net_missing,
+        }
     }
 
     /// One sample at `now`, with the exits heard since the last one,
@@ -125,6 +169,10 @@ impl Recorder {
     /// exactly as the recorder reads it.
     pub fn collect(&mut self, now: chrono::DateTime<chrono::Local>, exits: Vec<Exit>) -> io::Result<Frame> {
         let mut snapshot = self.fs.snapshot()?;
+        #[cfg(feature = "netbpf")]
+        if let Some(counter) = &mut self.net {
+            counter.fill(&mut snapshot.procs);
+        }
         if !self.config.record_cmdlines {
             for p in &mut snapshot.procs {
                 p.command.clear();

@@ -51,6 +51,10 @@ pub struct Row {
     pub read: Option<u64>,
     pub written: Option<u64>,
     pub cancelled: Option<u64>,
+    /// Network bytes in the interval, on Internet sockets — `None` where
+    /// nothing was counting (see `netbpf`).
+    pub net_rx: Option<u64>,
+    pub net_tx: Option<u64>,
     pub voluntary: Option<u64>,
     pub forced: Option<u64>,
     pub nice: i32,
@@ -196,6 +200,8 @@ pub fn between(prev: &Frame, now: &Frame, ticks_per_second: u64, users: &mut Use
                 read: opt(p.io.map(|i| i.0), b0.io.map(|i| i.0)),
                 written: opt(p.io.map(|i| i.1), b0.io.map(|i| i.1)),
                 cancelled: opt(p.cancelled_write, b0.cancelled_write),
+                net_rx: opt(p.net.map(|n| n.rx_bytes), b0.net.map(|n| n.rx_bytes)),
+                net_tx: opt(p.net.map(|n| n.tx_bytes), b0.net.map(|n| n.tx_bytes)),
                 voluntary: opt(p.verbose.map(|v| v.voluntary_switches), b0.verbose.map(|v| v.voluntary_switches)),
                 forced: opt(p.verbose.map(|v| v.forced_switches), b0.verbose.map(|v| v.forced_switches)),
                 nice: p.nice,
@@ -333,6 +339,20 @@ mod tests {
         let m = between(&a, &b, 100, &mut Users::default());
         assert_eq!(m.rows[0].cpu_pct, 25.0);
         assert_eq!(m.system.seconds, 10.0);
+    }
+
+    #[test]
+    fn network_is_the_growth_and_unmeasured_stays_unmeasured() {
+        use crate::proc::NetIo;
+        let net = |rx, tx| Some(NetIo { rx_bytes: rx, tx_bytes: tx, ..NetIo::default() });
+        let a = frame(0, 1000, vec![Proc { net: net(100, 10), ..proc(1, 5, 0) }, proc(2, 5, 0)], vec![]);
+        let b = frame(10_000, 2000, vec![Proc { net: net(900, 30), ..proc(1, 5, 0) }, Proc { net: net(7, 7), ..proc(2, 5, 0) }], vec![]);
+        let m = between(&a, &b, 100, &mut Users::default());
+        let row = |pid| m.rows.iter().find(|r| r.id.pid == pid).unwrap();
+        assert_eq!((row(1).net_rx, row(1).net_tx), (Some(800), Some(20)));
+        // Counted now but not before: the counter started this interval,
+        // and its figure is since then, not this interval's.
+        assert_eq!((row(2).net_rx, row(2).net_tx), (None, None));
     }
 
     #[test]

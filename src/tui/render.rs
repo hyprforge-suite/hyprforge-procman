@@ -372,6 +372,7 @@ fn columns(view: View) -> (&'static [&'static str], Vec<Constraint>) {
             vec![Length(7), Length(6), Length(6), Length(6), Length(6), Length(6), Length(6), Length(6), Length(6), Length(6), Length(5), Min(10)],
         ),
         View::Disk => (&["PID", "RDDSK", "WRDSK", "WCANCL", "DSK", "CMD"], vec![Length(7), Length(7), Length(7), Length(7), Length(5), Min(10)]),
+        View::Network => (&["PID", "RNET", "SNET", "BANDWI", "BANDWO", "NET", "CMD"], vec![Length(7), Length(7), Length(7), Length(10), Length(10), Length(5), Min(10)]),
         View::Scheduling => (
             &["PID", "THR", "TRUN", "TSLPI", "TSLPU", "POLI", "NICE", "PRI", "CPUNR", "RDELAY", "BDELAY", "NVCSW", "NIVCSW", "S", "CPU", "CMD"],
             vec![Length(7), Length(4), Length(4), Length(5), Length(5), Length(4), Length(4), Length(4), Length(5), Length(7), Length(7), Length(6), Length(6), Length(1), Length(6), Min(10)],
@@ -387,7 +388,27 @@ fn columns(view: View) -> (&'static [&'static str], Vec<Constraint>) {
     }
 }
 
-fn process_cells(view: View, r: &Row, total_memory: u64, disk_total: u64) -> Vec<Cell<'static>> {
+/// What every listed process's figures are shares of, and the interval's
+/// length for rates.
+struct Totals {
+    memory: u64,
+    disk: u64,
+    net: u64,
+    seconds: f64,
+}
+
+/// `12 Kbps`, `3.4 Mbps`: a rate in bits, atop's BANDWI/BANDWO.
+fn bits(bytes: u64, seconds: f64) -> String {
+    let b = bytes as f64 * 8.0 / seconds.max(0.001);
+    match b {
+        b if b < 1e6 => format!("{:.0} Kbps", b / 1e3),
+        b if b < 1e9 => format!("{:.1} Mbps", b / 1e6),
+        b => format!("{:.1} Gbps", b / 1e9),
+    }
+}
+
+fn process_cells(view: View, r: &Row, totals: &Totals) -> Vec<Cell<'static>> {
+    let (total_memory, disk_total) = (totals.memory, totals.disk);
     let pid = right(r.id.pid.to_string());
     let ms = |v: f64| right(format!("{v:.0}ms"));
     match view {
@@ -429,6 +450,19 @@ fn process_cells(view: View, r: &Row, total_memory: u64, disk_total: u64) -> Vec
                 right(opt_bytes(r.written)),
                 right(opt_bytes(r.cancelled)),
                 right(format!("{:.0}%", mine as f64 / disk_total.max(1) as f64 * 100.0)),
+                Cell::from(name_of(r)),
+            ]
+        }
+        View::Network => {
+            let mine = r.net_rx.unwrap_or(0) + r.net_tx.unwrap_or(0);
+            let rate = |v: Option<u64>| right(v.map_or_else(|| "-".into(), |b| bits(b, totals.seconds)));
+            vec![
+                pid,
+                right(opt_bytes(r.net_rx)),
+                right(opt_bytes(r.net_tx)),
+                rate(r.net_rx),
+                rate(r.net_tx),
+                right(if r.net_rx.is_some() { format!("{:.0}%", mine as f64 / totals.net.max(1) as f64 * 100.0) } else { "-".into() }),
                 Cell::from(name_of(r)),
             ]
         }
@@ -520,6 +554,7 @@ fn view_name(view: View) -> &'static str {
         View::Generic => "generic",
         View::Memory => "memory",
         View::Disk => "disk",
+        View::Network => "network",
         View::Scheduling => "scheduling",
         View::Various => "various",
         View::Command => "command line",
@@ -537,9 +572,11 @@ fn sort_name(state: &State, screen: &Screen) -> &'static str {
     match (state.sort, key) {
         (SortKey::Auto, SortKey::Memory) => "auto: memory",
         (SortKey::Auto, SortKey::Disk) => "auto: disk",
+        (SortKey::Auto, SortKey::Network) => "auto: network",
         (SortKey::Auto, _) => "auto: cpu",
         (_, SortKey::Memory) => "memory",
         (_, SortKey::Disk) => "disk",
+        (_, SortKey::Network) => "network",
         _ => "cpu",
     }
 }
@@ -561,6 +598,11 @@ fn status(state: &State, screen: &Screen) -> Line<'static> {
     if !state.filter.is_empty() {
         spans.push(Span::styled(format!("  showing {:?}", state.filter), Style::new().fg(Color::Magenta)));
     }
+    // The view says it is empty because nothing was counting, not
+    // because nothing used the network.
+    if state.view == View::Network && screen.moment.rows.iter().all(|r| r.net_rx.is_none()) {
+        spans.push(Span::styled("  network per process is counted only under sudo", Style::new().fg(Color::Yellow)));
+    }
     if state.paused {
         spans.push(Span::styled("  paused", Style::new().fg(Color::Yellow).bold()));
     }
@@ -569,9 +611,9 @@ fn status(state: &State, screen: &Screen) -> Line<'static> {
 }
 
 const HELP: &[(&str, &str)] = &[
-    ("g m d s v c", "process views: generic, memory, disk, scheduling, various, command line"),
+    ("g m d n s v c", "process views: generic, memory, disk, network (under sudo), scheduling, various, command line"),
     ("u p j", "added up: per user, per program, per cgroup"),
-    ("C M D A", "sort by CPU, memory, disk, or whatever is busiest"),
+    ("C M D N A", "sort by CPU, memory, disk, network, or whatever is busiest"),
     ("/", "show only processes matching a name, command, user or pid; Esc clears"),
     ("↑ ↓ PgUp PgDn Home", "move through the list"),
     ("k", "end the chosen process (asks first; live only)"),
@@ -605,11 +647,15 @@ pub fn draw(frame: &mut Frame, state: &State, screen: &Screen) {
         View::Cgroups => cgroup_lines(screen).iter().map(|c| TableRow::new(cgroup_cells(c))).collect(),
         view => {
             let rows = state.rows(&screen.moment);
-            let disk_total = rows.iter().map(|r| r.read.unwrap_or(0) + r.written.unwrap_or(0)).sum();
-            let memory = screen.now.snapshot.memory.total;
+            let totals = Totals {
+                memory: screen.now.snapshot.memory.total,
+                disk: rows.iter().map(|r| r.read.unwrap_or(0) + r.written.unwrap_or(0)).sum(),
+                net: rows.iter().map(|r| r.net_rx.unwrap_or(0) + r.net_tx.unwrap_or(0)).sum(),
+                seconds: screen.moment.system.seconds,
+            };
             rows.iter()
                 .map(|r| {
-                    let row = TableRow::new(process_cells(view, r, memory, disk_total));
+                    let row = TableRow::new(process_cells(view, r, &totals));
                     // An exited process reads like atop's: dimmed, in brackets.
                     if r.exit.is_some() {
                         row.style(Style::new().dim())
@@ -667,7 +713,7 @@ mod tests {
     #[test]
     fn every_view_draws_its_own_columns() {
         let s = screen();
-        for (key, heading) in [('g', "RDELAY"), ('m', "MAJFLT"), ('d', "WCANCL"), ('s', "BDELAY"), ('v', "PPID"), ('c', "COMMAND-LINE"), ('u', "NPROCS"), ('p', "PROGRAM"), ('j', "CGROUP")] {
+        for (key, heading) in [('g', "RDELAY"), ('m', "MAJFLT"), ('d', "WCANCL"), ('n', "BANDWI"), ('s', "BDELAY"), ('v', "PPID"), ('c', "COMMAND-LINE"), ('u', "NPROCS"), ('p', "PROGRAM"), ('j', "CGROUP")] {
             let mut state = State::new(false);
             state.key(super::super::state::Key::Char(key), None);
             let out = text(&state, &s);

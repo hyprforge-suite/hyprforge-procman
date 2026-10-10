@@ -25,4 +25,8 @@ pss = false
 # The previous setting is put back when the recorder stops.
 delay_accounting = true
 
+# Count each process's network bytes (TCP and UDP, so QUIC too) with a
+# small eBPF program attached to the kernel's socket tracepoints.
+network = true
+
 directory = "/var/log/hyprforge/procman"

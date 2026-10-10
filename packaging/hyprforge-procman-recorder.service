@@ -5,7 +5,8 @@
 #
 # Root, because every process's I/O and open files, and every exit, are
 # root's to read — and then fenced in: it reads /proc and /sys, writes
-# its own directory, speaks netlink for exits and nothing else.
+# its own directory, speaks netlink for exits, loads its one eBPF
+# program, and nothing else.
 [Unit]
 Description=Hyprforge system history recorder
 Documentation=https://github.com/hyprforge-suite/hyprforge-procman
@@ -20,9 +21,10 @@ Nice=10
 IOSchedulingClass=idle
 
 # Reading every process (CAP_SYS_PTRACE, CAP_DAC_READ_SEARCH), hearing
-# every exit (CAP_NET_ADMIN), and switching delay accounting on and back
-# off (CAP_SYS_ADMIN, for /proc/sys/kernel/task_delayacct).
-CapabilityBoundingSet=CAP_SYS_PTRACE CAP_DAC_READ_SEARCH CAP_NET_ADMIN CAP_SYS_ADMIN
+# every exit (CAP_NET_ADMIN), switching delay accounting on and back
+# off (CAP_SYS_ADMIN, for /proc/sys/kernel/task_delayacct), and loading
+# the network counter — a tracing eBPF program (CAP_BPF, CAP_PERFMON).
+CapabilityBoundingSet=CAP_SYS_PTRACE CAP_DAC_READ_SEARCH CAP_NET_ADMIN CAP_SYS_ADMIN CAP_BPF CAP_PERFMON
 NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=read-only
@@ -42,6 +44,8 @@ LockPersonality=yes
 MemoryDenyWriteExecute=yes
 SystemCallArchitectures=native
 SystemCallFilter=@system-service
+# @system-service leaves bpf() out; the network counter is loaded with it.
+SystemCallFilter=bpf
 UMask=0077
 
 [Install]

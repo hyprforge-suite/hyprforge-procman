@@ -329,11 +329,11 @@ impl App {
         headline.push_str(&format!(" · {} processes, {} ended", m.system.processes, m.system.exited));
         let mut rows: Vec<&Row> = m.rows.iter().filter(|r| r.cpu_pct > 0.0 || r.read.unwrap_or(0) + r.written.unwrap_or(0) > 0 || r.exit.is_some()).collect();
         rows.sort_by(|a, b| b.cpu_pct.total_cmp(&a.cpu_pct).then(b.resident_bytes.cmp(&a.resident_bytes)));
-        let mut table = column![header(&["Process", "PID", "User", "CPU", "Memory", "Read", "Written"], s)].spacing(spacing::SM);
+        let mut table = column![header(&["Process", "PID", "User", "CPU", "Memory", "Read", "Written", "Network"], s)].spacing(spacing::SM);
         for r in rows.into_iter().take(12) {
             table = table.push(cells(
                 row_name(r),
-                &[r.id.pid.to_string(), r.user.clone(), format!("{:.1} %", r.cpu_pct), bytes(r.resident_bytes), r.read.map_or_else(|| "—".into(), bytes), r.written.map_or_else(|| "—".into(), bytes)],
+                &[r.id.pid.to_string(), r.user.clone(), format!("{:.1} %", r.cpu_pct), bytes(r.resident_bytes), r.read.map_or_else(|| "—".into(), bytes), r.written.map_or_else(|| "—".into(), bytes), network(r.net_rx, r.net_tx)],
                 s,
             ));
         }
@@ -365,13 +365,13 @@ impl App {
         if let Some(m) = report.mem.first().filter(|m| m.oom_kills > 0) {
             said.push(format!("{} process{} killed for memory", m.oom_kills, if m.oom_kills == 1 { " was" } else { "es were" }));
         }
-        let mut table = column![header(&["Program", "Processes", "CPU time", "Average", "Peak memory", "Read", "Written"], s)].spacing(spacing::SM);
+        let mut table = column![header(&["Program", "Processes", "CPU time", "Average", "Peak memory", "Read", "Written", "Network"], s)].spacing(spacing::SM);
         // A program that used nothing worth a digit is filler, not news.
-        for c in report.top.iter().filter(|c| c.cpu_seconds >= 0.5 || c.read + c.written > 0) {
+        for c in report.top.iter().filter(|c| c.cpu_seconds >= 0.5 || c.read + c.written + c.received.unwrap_or(0) + c.sent.unwrap_or(0) > 0) {
             let average = c.cpu_seconds / (seconds * f64::from(report.cpus.max(1))) * 100.0;
             table = table.push(cells(
                 c.name.clone(),
-                &[c.processes.to_string(), duration(c.cpu_seconds.round() as u64), format!("{average:.1} %"), bytes(c.peak_resident), bytes(c.read), bytes(c.written)],
+                &[c.processes.to_string(), duration(c.cpu_seconds.round() as u64), format!("{average:.1} %"), bytes(c.peak_resident), bytes(c.read), bytes(c.written), network(c.received, c.sent)],
                 s,
             ));
         }
@@ -406,7 +406,16 @@ fn day_graph<'a>(t: &'a Timeline, label: &'static str, points: &'a [(i64, f32)],
 }
 
 /// The figure columns' widths, after a name that takes the rest.
-const WIDTHS: [f32; 6] = [90.0, 100.0, 90.0, 100.0, 90.0, 90.0];
+const WIDTHS: [f32; 7] = [90.0, 100.0, 90.0, 100.0, 90.0, 90.0, 110.0];
+
+/// In and out together — the column has room for one figure. A dash where
+/// nothing was counting, which is not the same as nothing sent.
+fn network(rx: Option<u64>, tx: Option<u64>) -> String {
+    match (rx, tx) {
+        (None, None) => "—".into(),
+        (rx, tx) => bytes(rx.unwrap_or(0) + tx.unwrap_or(0)),
+    }
+}
 
 fn header<'a>(titles: &[&'static str], s: FontScale) -> Element<'a, Message> {
     let mut r = row![widgets::meta_text(titles[0], density::META_TEXT_BASE, s).width(Length::Fill)].spacing(spacing::SM);

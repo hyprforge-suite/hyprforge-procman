@@ -32,7 +32,12 @@ use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
-pub const MAGIC: &[u8; 8] = b"HFPROCJ1";
+/// The format's name and version. A frame is postcard, which has no field
+/// names, so any change to what a frame holds is a new version — 2 added
+/// each process's network.
+pub const MAGIC: &[u8; 8] = b"HFPROCJ2";
+/// Every version's magic starts with this.
+const FAMILY: &[u8; 7] = b"HFPROCJ";
 /// A keyframe every this many frames.
 pub const KEYFRAME_EVERY: u32 = 60;
 const LEVEL: i32 = 9;
@@ -99,9 +104,22 @@ impl Writer {
             file.write_all(&head)?;
             file.sync_data()?;
         } else {
-            // Cut a torn tail so new records follow a whole one.
-            let end = Reader::open(path)?.end;
-            file.set_len(end)?;
+            match Reader::open(path) {
+                // Cut a torn tail so new records follow a whole one.
+                Ok(r) => file.set_len(r.end)?,
+                // A day begun by a recorder of another format: kept, under
+                // a name of its own, and the day starts a fresh file — a
+                // recorder that refused to write until midnight would
+                // lose the day to an upgrade.
+                Err(e) if e.kind() == io::ErrorKind::InvalidData => {
+                    drop(file);
+                    let mut aside = path.as_os_str().to_owned();
+                    aside.push(".old");
+                    std::fs::rename(path, &aside)?;
+                    return Writer::open(path, header);
+                }
+                Err(e) => return Err(e),
+            }
         }
         file.seek(SeekFrom::End(0))?;
         Ok(Writer { file, keyframe: None, since_key: 0 })
@@ -173,7 +191,8 @@ impl Reader {
         let mut magic = [0u8; 8];
         file.read_exact(&mut magic)?;
         if &magic != MAGIC {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "not a procman journal"));
+            let why = if magic.starts_with(FAMILY) { format!("a journal of format {}, and this reads {}", magic[7] as char, MAGIC[7] as char) } else { "not a procman journal".into() };
+            return Err(io::Error::new(io::ErrorKind::InvalidData, why));
         }
         let mut len = [0u8; 4];
         file.read_exact(&mut len)?;
@@ -388,6 +407,27 @@ mod tests {
         assert_eq!(r.entries.len(), 4);
         assert!(r.entries[3].keyframe, "a new writer starts with a keyframe");
         assert_eq!(r.frame(3).unwrap().at_ms, 40_000);
+    }
+
+    #[test]
+    fn a_day_begun_in_an_older_format_is_kept_aside_and_the_day_goes_on() {
+        let t = tempfile::tempdir().unwrap();
+        let path = t.path().join("2026-10-10.hfr");
+        let mut w = Writer::open(&path, &header()).unwrap();
+        w.write(&frame(0, 0)).unwrap();
+        drop(w);
+        // The same file as a version-1 recorder would have left it.
+        let mut bytes = std::fs::read(&path).unwrap();
+        bytes[7] = b'1';
+        std::fs::write(&path, &bytes).unwrap();
+        let refused = Reader::open(&path).err().expect("a reader of format 2 cannot read format 1");
+        assert!(refused.to_string().contains("format 1"), "{refused}");
+
+        let mut w = Writer::open(&path, &header()).unwrap();
+        w.write(&frame(10_000, 0)).unwrap();
+        assert_eq!(Reader::open(&path).unwrap().entries.len(), 1, "a fresh file");
+        assert_eq!(std::fs::read(t.path().join("2026-10-10.hfr.old")).unwrap(), bytes, "the old one untouched");
+        assert_eq!(days(t.path()).unwrap().len(), 1, "and not listed as a day");
     }
 
     #[test]

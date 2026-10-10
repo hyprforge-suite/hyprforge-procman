@@ -82,9 +82,23 @@ pub struct Proc {
     /// share of every shared one. Costly (the kernel walks its page
     /// tables), so read only when a view or the recorder asks.
     pub pss: Option<u64>,
+    /// Network bytes and calls since the eBPF counter was loaded — only
+    /// where something running as root loaded it (`netbpf`). `None` is
+    /// "not measured", never "nothing sent".
+    pub net: Option<NetIo>,
 }
 
 /// Threads by state, atop's TRUN / TSLPI / TSLPU.
+/// A process's traffic on Internet sockets (TCP and UDP, v4 and v6),
+/// counted where the data passes between it and the kernel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+pub struct NetIo {
+    pub rx_bytes: u64,
+    pub tx_bytes: u64,
+    pub rx_calls: u64,
+    pub tx_calls: u64,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub struct ThreadStates {
     pub running: u32,
@@ -291,6 +305,8 @@ impl ProcFs {
                 (true, _) => thread_states(dir),
             },
             pss: if self.pss { fs::read_to_string(dir.join("smaps_rollup")).ok().and_then(|s| parse_pss(&s)) } else { None },
+            // Filled in by whoever holds the eBPF counter, if anyone does.
+            net: None,
         })
     }
 }
