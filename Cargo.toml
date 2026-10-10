@@ -1,0 +1,51 @@
+[package]
+name = "hyprforge-procman"
+version = "0.1.12"
+edition = "2021"
+license = "MIT"
+description = "A process manager for Hyprland: what is running, what it costs, and which window it belongs to — read from /proc, drawn in the suite's look."
+repository = "https://github.com/hyprforge-suite/hyprforge-procman"
+readme = "README.md"
+keywords = ["hyprland", "process", "task-manager", "iced", "linux"]
+categories = ["os::linux-apis", "gui"]
+# A component, not a library: nothing here is meant to be depended on,
+# and crates.io is where the suite's libraries live.
+publish = false
+
+[[bin]]
+name = "hyprforge-procman"
+path = "src/main.rs"
+
+[dependencies]
+# By crates.io version, as every component names its siblings — see the
+# suite's CLAUDE.md on `[patch.crates-io]`.
+hyprforge-ui = "0.1"
+hyprforge-look = "0.1"
+hyprforge-appearance = "0.1"
+# `hyprctl clients -j`, which names the process behind each window, with
+# the suite's bound on how long another program may take to answer.
+hyprforge-process = "0.1"
+# `canvas` for the history graphs, on top of the suite's base set.
+iced = { version = "0.14", default-features = false, features = [
+    "wgpu",
+    "tiny-skia",
+    "crisp",
+    "thread-pool",
+    "linux-theme-detection",
+    "x11",
+    "wayland",
+    "tokio",
+    "canvas",
+] }
+tokio = { version = "1.53", features = ["rt-multi-thread", "macros", "sync", "time"] }
+# getpwuid_r for user names, and pidfd_open / pidfd_send_signal, so a
+# signal reaches the process that was chosen and never one that reused
+# its number.
+libc = "0.2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[dev-dependencies]
+tempfile = "3"
