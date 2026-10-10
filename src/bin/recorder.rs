@@ -9,10 +9,9 @@
 //! `--once [--dir PATH]` takes one sample and exits — for checking by
 //! hand, as any user (it then sees what that user may read).
 
-use hyprforge_procman::exits::{self, Exit, Taskstats};
+use hyprforge_procman::exits::Listener;
 use hyprforge_procman::recorder::{self, Config, Recorder};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 static STOP: AtomicBool = AtomicBool::new(false);
@@ -71,14 +70,13 @@ fn run(config: Config) -> std::process::ExitCode {
         None
     };
 
-    let exits: Arc<Mutex<Vec<Exit>>> = Arc::default();
-    let listener = {
-        let exits = exits.clone();
-        std::thread::Builder::new().name("exits".into()).spawn(move || listen(exits))
+    let exits = match Listener::start() {
+        Ok(l) => Some(l),
+        Err(e) => {
+            tracing::warn!("not listening for exits, so processes that end between samples are missed: {e}");
+            None
+        }
     };
-    if let Err(e) = listener {
-        tracing::warn!("couldn't start listening for exits: {e}");
-    }
 
     let interval = Duration::from_secs(u64::from(config.interval));
     let mut recorder = Recorder::new(config);
@@ -88,7 +86,7 @@ fn run(config: Config) -> std::process::ExitCode {
         if STOP.load(Ordering::SeqCst) {
             break;
         }
-        let heard = std::mem::take(&mut *exits.lock().unwrap_or_else(|e| e.into_inner()));
+        let heard = exits.as_ref().map(Listener::take).unwrap_or_default();
         if let Err(e) = recorder.tick(chrono::Local::now(), heard) {
             // One failed sample is a gap in the journal, not a reason to
             // stop recording.
@@ -118,30 +116,5 @@ fn wait_for_next(interval: Duration) {
             break;
         }
         std::thread::sleep(left.min(Duration::from_millis(250)));
-    }
-}
-
-/// Hears every process exit, for as long as the recorder runs. Needs
-/// `CAP_NET_ADMIN`; without it, short-lived processes are missed and the
-/// log says so once.
-fn listen(exits: Arc<Mutex<Vec<Exit>>>) {
-    let socket = match Taskstats::open().and_then(|s| s.listen(&exits::all_cpus()).map(|()| s)) {
-        Ok(s) => s,
-        Err(e) => {
-            tracing::warn!("not listening for exits, so processes that end between samples are missed: {e}");
-            return;
-        }
-    };
-    while !STOP.load(Ordering::SeqCst) {
-        match socket.exits() {
-            Ok(heard) if !heard.is_empty() => exits.lock().unwrap_or_else(|e| e.into_inner()).extend(heard),
-            Ok(_) => {}
-            // The socket's five-second timeout, so the stop flag is seen.
-            Err(e) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => {}
-            Err(e) => {
-                tracing::warn!("listening for exits failed: {e}");
-                std::thread::sleep(Duration::from_secs(1));
-            }
-        }
     }
 }

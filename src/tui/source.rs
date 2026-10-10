@@ -50,6 +50,9 @@ fn hostname() -> String {
 
 pub struct Live {
     recorder: Recorder,
+    /// As root: every exit heard, so a process that lived and died
+    /// between two refreshes still shows, as `<name>`.
+    exits: Option<crate::exits::Listener>,
     prev: Option<Frame>,
     users: Users,
     tps: u64,
@@ -60,11 +63,15 @@ impl Live {
         // The recorder's own reading, minus its journal: threads counted,
         // PSS left out (a page-table walk per process, per refresh).
         let config = Config { threads: true, pss: false, ..Config::default() };
-        Live { recorder: Recorder::new(config), prev: None, users: Users::default(), tps: crate::proc::ticks_per_second() }
+        // SAFETY: geteuid cannot fail.
+        let root = unsafe { libc::geteuid() } == 0;
+        let exits = if root { crate::exits::Listener::start().ok() } else { None };
+        Live { recorder: Recorder::new(config), exits, prev: None, users: Users::default(), tps: crate::proc::ticks_per_second() }
     }
 
     pub fn screen(&mut self) -> io::Result<Screen> {
-        let now = self.recorder.collect(chrono::Local::now(), Vec::new())?;
+        let heard = self.exits.as_ref().map(crate::exits::Listener::take).unwrap_or_default();
+        let now = self.recorder.collect(chrono::Local::now(), heard)?;
         let since_boot = self.prev.is_none();
         let prev = self.prev.take().unwrap_or_else(|| at_boot(&now));
         let moment = moment::between(&prev, &now, self.tps, &mut self.users);

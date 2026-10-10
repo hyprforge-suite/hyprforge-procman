@@ -346,6 +346,79 @@ pub fn all_cpus() -> String {
     format!("0-{}", n - 1)
 }
 
+/// Every exit heard, on a thread of its own, kept until taken — what the
+/// recorder and `hyprforge-top` (as root) both run between samples.
+pub struct Listener {
+    heard: std::sync::Arc<std::sync::Mutex<Vec<Exit>>>,
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl Listener {
+    /// Starts listening. Registering is not refused without
+    /// `CAP_NET_ADMIN` — the first receive is — so this waits for that
+    /// first answer's verdict, a moment at most, rather than hand back a
+    /// listener that will never hear anything.
+    pub fn start() -> io::Result<Listener> {
+        use std::sync::atomic::Ordering;
+        let socket = Taskstats::open()?;
+        socket.listen(&all_cpus())?;
+        let listener = Listener { heard: Default::default(), stop: Default::default() };
+        let (heard, stop) = (listener.heard.clone(), listener.stop.clone());
+        let (verdict, wait) = std::sync::mpsc::channel::<io::Result<()>>();
+        std::thread::Builder::new().name("exits".into()).spawn(move || {
+            let mut verdict = Some(verdict);
+            while !stop.load(Ordering::SeqCst) {
+                match socket.exits() {
+                    Ok(exits) => {
+                        if let Some(v) = verdict.take() {
+                            let _ = v.send(Ok(()));
+                        }
+                        if !exits.is_empty() {
+                            heard.lock().unwrap_or_else(|e| e.into_inner()).extend(exits);
+                        }
+                    }
+                    // The socket's five-second bound: nothing ended, and
+                    // nothing refused either.
+                    Err(e) if matches!(e.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut) => {
+                        if let Some(v) = verdict.take() {
+                            let _ = v.send(Ok(()));
+                        }
+                    }
+                    Err(e) => {
+                        match verdict.take() {
+                            Some(v) => {
+                                let _ = v.send(Err(e));
+                                return;
+                            }
+                            None => tracing::warn!("listening for exits failed: {e}"),
+                        }
+                        std::thread::sleep(std::time::Duration::from_secs(1));
+                    }
+                }
+            }
+        })?;
+        // On a busy machine something ends within milliseconds; on an idle
+        // one the receive's own bound answers.
+        match wait.recv_timeout(std::time::Duration::from_secs(6)) {
+            Ok(Ok(())) | Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Ok(listener),
+            Ok(Err(e)) => Err(e),
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => Err(io::Error::other("the exits listener stopped")),
+        }
+    }
+
+    /// What was heard since the last call.
+    pub fn take(&self) -> Vec<Exit> {
+        std::mem::take(&mut *self.heard.lock().unwrap_or_else(|e| e.into_inner()))
+    }
+}
+
+impl Drop for Listener {
+    /// The thread sees this within the socket's five-second bound.
+    fn drop(&mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -450,5 +523,18 @@ mod tests {
         }
         child.wait().unwrap();
         panic!("never heard the exit");
+    }
+
+    #[test]
+    fn without_root_the_listener_says_so_rather_than_hearing_nothing() {
+        // SAFETY: geteuid cannot fail.
+        if unsafe { libc::geteuid() } == 0 {
+            eprintln!("HYPRFORGE-SKIP: run as root, where listening is allowed");
+            return;
+        }
+        let started = std::time::Instant::now();
+        let refused = Listener::start().err().expect("an ordinary user may not listen for every exit");
+        assert_eq!(refused.kind(), io::ErrorKind::PermissionDenied, "{refused}");
+        assert!(started.elapsed() < std::time::Duration::from_secs(2), "refused at once, not after a timeout: {:?}", started.elapsed());
     }
 }
