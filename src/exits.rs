@@ -438,15 +438,17 @@ mod tests {
             eprintln!("HYPRFORGE-SKIP: can't listen for exits: {e}");
             return;
         }
-        let child = std::process::Command::new("sh").args(["-c", "sleep 0.1; exit 3"]).spawn().unwrap();
+        let mut child = std::process::Command::new("sh").args(["-c", "sleep 0.1; exit 3"]).spawn().unwrap();
         let pid = child.id();
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         while std::time::Instant::now() < deadline {
             if let Some(e) = socket.exits().unwrap_or_default().into_iter().find(|e| e.pid == pid) {
                 assert_eq!(e.code(), Some(3));
+                child.wait().unwrap();
                 return;
             }
         }
+        child.wait().unwrap();
         panic!("never heard the exit");
     }
 }
