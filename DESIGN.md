@@ -244,8 +244,12 @@ as administrator through pkexec.
 - **Advanced mode** (Ctrl+.): the Overview tab, btop's layout with atop's detail, and the extra columns in Details.
 - **App history:** per app, per day, for 30 days. It records only while the window is open, and says so.
 - **GPUs:** every one is listed, NVIDIA's included, read without waking it. Each process shows which GPU it uses.
+- **The recorder** (`hyprforge-procman-recorder`): a sandboxed root unit that samples the whole machine every 10 s into a root-only journal, one file a day. It writes about 30 MB a day and costs 0.41% of a core. The helper's `OpenHistory` hands a day's journal over as an open file after a polkit check. atop keeps running beside it.
+- **`hyprforge-top`:** atop's screen in a terminal. It shows the header lines (PRC, CPU, cpu, CPL, MEM, SWP, PAG, PSI, DSK, NET) and the views g m d s v c u p j, with atop's keys and sorts (A picks the busiest resource), `/` to filter, k to kill (pidfd, after a confirmation), z to pause and i to set the interval. `-r DAY -b HH:MM` replays the journal with t/T/b/r. Run as yourself, it says it is showing only what you may read. Live and replay both draw `moment::between` two frames, so they cannot disagree about what a figure means.
 
 **Not yet:**
+- `hyprforge-top report` (atopsar's summaries) and `--json`; exited processes in live mode, which needs the taskstats listener and so root.
+- History in the window: a time slider over Overview, Processes and Performance.
 - Per-process network. TCP alone is available without root, but a TCP-only figure undercounts QUIC, so it waits for the helper's eBPF.
 - Other users' processes in `port:` and `file:` lookups, through the helper.
 - Choosing a GPU per app. That moved to the GPU broker idea in the suite's vision.md.

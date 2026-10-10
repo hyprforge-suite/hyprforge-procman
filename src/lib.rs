@@ -32,5 +32,7 @@ pub mod sessions;
 pub mod signal;
 #[cfg(feature = "desktop")]
 pub mod startup;
+#[cfg(feature = "tui")]
+pub mod tui;
 pub mod users;
 pub mod windows;

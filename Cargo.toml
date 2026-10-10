@@ -26,7 +26,10 @@ dbus = ["dep:zbus", "dep:tokio"]
 # What only a desktop session has: Hyprland's startup programs, app names.
 desktop = ["dep:hyprforge-session", "dep:hyprforge-mime"]
 # The terminal UI.
-tui = ["dep:ratatui", "dep:crossterm"]
+# (crossterm comes through ratatui's own re-export, so the two can never
+# disagree on its version; dbus for opening the journal through the
+# helper when not run as root.)
+tui = ["dep:ratatui", "dbus"]
 
 [[bin]]
 name = "hyprforge-procman"
@@ -39,6 +42,12 @@ required-features = ["gui"]
 name = "hyprforge-procman-helper"
 path = "src/bin/helper.rs"
 required-features = ["dbus"]
+
+# atop for this suite: live, or replaying the recorder's journal.
+[[bin]]
+name = "hyprforge-top"
+path = "src/bin/top.rs"
+required-features = ["tui"]
 
 # Samples the machine every ten seconds into a private journal, as root.
 # No features: it links neither iced nor zbus.
@@ -96,7 +105,6 @@ zstd = "0.13"
 crc32fast = "1.5"
 # The terminal UI.
 ratatui = { version = "0.30", optional = true }
-crossterm = { version = "0.29", optional = true }
 
 [dev-dependencies]
 tempfile = "3"
