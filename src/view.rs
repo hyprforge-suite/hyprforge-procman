@@ -36,6 +36,16 @@ pub fn scale_now() -> FontScale {
     scale()
 }
 
+/// Secondary text's colour: dim on an ordinary row, the body colour on
+/// the selected one, where dim text over the accent cannot be read.
+pub fn ink(selected: bool) -> iced::Color {
+    if selected {
+        theme::text()
+    } else {
+        theme::text_dim()
+    }
+}
+
 /// `12.5 MB`, in the units people read: powers of 1024, named the way
 /// every task manager names them.
 pub fn bytes(n: u64) -> String {
@@ -196,6 +206,7 @@ impl App {
                 .into(),
             Line::App { app, open } => {
                 let id = app.lead.id;
+                let selected = self.selected == Some(id);
                 let chevron = button(glyph::nav(if open { glyph::Nav::Down } else { glyph::Nav::Forward }, s.apply(16.0), theme::text_dim()))
                     .padding(0)
                     .on_press(Message::Toggle(id))
@@ -203,7 +214,7 @@ impl App {
                 let mut name = column![widgets::scaled_text(app.lead.name.clone(), density::ROW_TEXT_BASE, s)];
                 if !app.title.is_empty() {
                     let windows = if app.windows > 1 { format!(" · {} windows", app.windows) } else { String::new() };
-                    name = name.push(widgets::clamped_text(format!("{}{windows}", app.title), 1).size(s.apply(density::META_TEXT_BASE)).width(Length::Fill).color(theme::text_dim()));
+                    name = name.push(widgets::clamped_text(format!("{}{windows}", app.title), 1).size(s.apply(density::META_TEXT_BASE)).width(Length::Fill).color(ink(selected)));
                 }
                 let name = row![chevron, name].spacing(spacing::XS).align_y(Alignment::Center);
                 let count = app.members.len();
@@ -252,7 +263,7 @@ impl App {
             // No GPU open is not 0 %: blank, as Task Manager draws it.
             cell(gpu.map_or(String::new(), |g| percent(Some(g))), GPU_W),
             cell(pid.to_string(), PID_W),
-            container(widgets::meta_text(user, density::ROW_TEXT_BASE, s)).width(Length::Fixed(s.apply(USER_W))).padding([0.0, spacing::SM]),
+            container(widgets::meta_text(user, density::ROW_TEXT_BASE, s).color(ink(selected))).width(Length::Fixed(s.apply(USER_W))).padding([0.0, spacing::SM]),
         ]
         .align_y(Alignment::Center);
         button(line)
@@ -398,7 +409,7 @@ impl App {
         let heads = row![
             head("Service", Length::FillPortion(4), false),
             head("Status", Length::Fixed(s.apply(130.0)), false),
-            head("At boot", Length::Fixed(s.apply(110.0)), false),
+            head("At boot", Length::Fixed(s.apply(130.0)), false),
             head("CPU", Length::Fixed(s.apply(CPU_W)), true),
             head("Memory", Length::Fixed(s.apply(MEM_W)), true),
             head("Description", Length::FillPortion(5), false),
@@ -445,10 +456,12 @@ impl App {
                 container(row![widgets::status_dot(tint, s), widgets::scaled_text(status, density::ROW_TEXT_BASE, s)].spacing(spacing::SM).align_y(Alignment::Center))
                     .width(Length::Fixed(s.apply(130.0)))
                     .padding([0.0, spacing::SM]),
-                container(widgets::meta_text(boot, density::ROW_TEXT_BASE, s)).width(Length::Fixed(s.apply(110.0))).padding([0.0, spacing::SM]),
+                container(widgets::meta_text(boot, density::ROW_TEXT_BASE, s).color(ink(selected)).wrapping(iced::widget::text::Wrapping::None))
+                    .width(Length::Fixed(s.apply(130.0)))
+                    .padding([0.0, spacing::SM]),
                 mono(if u.active == "active" { percent(cpu) } else { String::new() }, CPU_W),
                 mono(memory.filter(|_| u.active == "active").map(bytes).unwrap_or_default(), MEM_W),
-                container(widgets::clamped_text(u.description.clone(), 1).size(s.apply(density::META_TEXT_BASE)).width(Length::Fill).color(theme::text_dim()))
+                container(widgets::clamped_text(u.description.clone(), 1).size(s.apply(density::META_TEXT_BASE)).width(Length::Fill).color(ink(selected)))
                     .width(Length::FillPortion(5))
                     .padding([0.0, spacing::SM]),
             ]
@@ -550,7 +563,7 @@ impl App {
                 row![
                     widgets::scaled_text(title, density::ROW_TEXT_BASE, s),
                     Space::new().width(Length::Fill),
-                    widgets::meta_text(figure, density::META_TEXT_BASE, s).font(theme::mono_font()),
+                    widgets::meta_text(figure, density::META_TEXT_BASE, s).font(theme::mono_font()).color(ink(selected)),
                 ]
                 .align_y(Alignment::Center),
                 self.graph(series, ceiling, s.apply(34.0)),

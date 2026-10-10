@@ -66,5 +66,9 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [dev-dependencies]
 tempfile = "3"
+# The ignored render test only: draws each tab to a PNG to look at.
+iced_tiny_skia = { version = "0.14.1", default-features = false }
+iced_runtime = "0.14"
+tiny-skia = "0.11"
 # The helper's tests talk to it over a socket pair, no bus needed.
 zbus = { version = "5.18", default-features = false, features = ["tokio", "p2p"] }

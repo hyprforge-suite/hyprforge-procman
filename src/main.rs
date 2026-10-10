@@ -995,13 +995,16 @@ fn show_in_folder(path: std::path::PathBuf) {
 }
 
 /// Focuses the window of process `pid` — Files' `hl.dsp.focus` call,
-/// checked live there. Off the UI thread and bounded; a refusal leaves
+/// checked live there. Through `hyprctl dispatch`: `hyprctl eval` only
+/// builds the dispatcher and answers "ok" without running it, which is
+/// how this first shipped (found 2026-10-10, trying to maximize this
+/// window for a screenshot). Off the UI thread and bounded; a refusal leaves
 /// focus where it was, which is all a person would see either way.
 fn switch_to(pid: i32) {
     let lua = format!("hl.dsp.focus({{ window = \"pid:{pid}\" }})");
     std::thread::spawn(move || {
         let mut command = std::process::Command::new("hyprctl");
-        command.args(["eval", &lua]);
+        command.args(["dispatch", &lua]);
         if let Err(e) = hyprforge_process::output(&mut command, hyprforge_process::TIMEOUT) {
             tracing::warn!("couldn't switch to the window: {e}");
         }
@@ -1029,4 +1032,106 @@ fn main() -> iced::Result {
             ..window::Settings::default()
         })
         .run()
+}
+
+#[cfg(test)]
+mod render {
+    //! Draws every tab, from real readings of this machine, to
+    //! `$SHOTS/<tab>.png`. Ignored: it renders, it asserts nothing — and
+    //! it shows this machine's own processes, so its output is for
+    //! looking at, not for publishing.
+
+    use super::*;
+    use iced::{Color, Rectangle};
+    use iced_runtime::core::renderer::Style;
+    use iced_runtime::user_interface::{Cache, UserInterface};
+
+    fn reading(fs: &ProcFs, scan: &GpuScan) -> Reading {
+        let snapshot = fs.snapshot().unwrap();
+        let pids: Vec<i32> = snapshot.procs.iter().filter(|p| !p.kernel).map(|p| p.pid).collect();
+        let gpu = scan.lock().unwrap().read(std::path::Path::new("/proc"), &pids);
+        Reading { snapshot, gpu, machine: SysFs::default().read(), windows: windows::read(), at: std::time::Instant::now(), everything_lapsed: false }
+    }
+
+    fn draw(app: &App, name: &str, dir: &std::path::Path) {
+        let (w, h, scale) = (1280.0f32, 800.0f32, 1.6f32);
+        let (pw, ph) = ((w * scale) as u32, (h * scale) as u32);
+        let theme = hyprforge_ui::theme::active();
+        let font = iced::Font::with_name(Box::leak(theme.font.clone().into_boxed_str()));
+        let mut renderer = iced::Renderer::Secondary(iced_tiny_skia::Renderer::new(font, iced::Pixels(theme.font_size)));
+        let size = Size::new(w, h);
+        let mut ui = UserInterface::build(app.view(), size, Cache::default(), &mut renderer);
+        ui.draw(&mut renderer, &app.theme(), &Style { text_color: Color::WHITE }, iced::mouse::Cursor::Unavailable);
+        let iced::Renderer::Secondary(mut skia) = renderer else { unreachable!() };
+        let mut pixmap = tiny_skia::Pixmap::new(pw, ph).unwrap();
+        let mut mask = tiny_skia::Mask::new(pw, ph).unwrap();
+        skia.draw(
+            &mut pixmap.as_mut(),
+            &mut mask,
+            &iced_tiny_skia::graphics::Viewport::with_physical_size(Size::new(pw, ph), scale),
+            &[Rectangle::with_size(size)],
+            Color::BLACK,
+        );
+        // Drawn text borrows from the tree: only now may it go.
+        drop(ui);
+        // BGRA for Wayland; a PNG wants RGBA.
+        for px in pixmap.data_mut().chunks_exact_mut(4) {
+            px.swap(0, 2);
+        }
+        pixmap.save_png(dir.join(format!("{name}.png"))).unwrap();
+    }
+
+    #[test]
+    #[ignore = "draws this machine's processes to $SHOTS"]
+    fn render_every_tab() {
+        let dir = std::path::PathBuf::from(std::env::var("SHOTS").expect("SHOTS"));
+        hyprforge_ui::theme::init(hyprforge_appearance::look::resolve());
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let (mut app, _) = App::new();
+        let fs = ProcFs::default();
+        // A dozen readings half a second apart: the graphs get a line,
+        // and every share has its second reading.
+        for _ in 0..12 {
+            let r = reading(&fs, &app.gpu_scan);
+            app.take(r);
+            std::thread::sleep(Duration::from_millis(500));
+        }
+        draw(&app, "processes", &dir);
+
+        app.tab = Tab::Performance;
+        draw(&app, "performance", &dir);
+        if let Some(disk) = app.machine.disks.first() {
+            app.resource = Resource::Disk(disk.name.clone());
+            draw(&app, "performance-disk", &dir);
+        }
+        if let Some(gpu) = app.machine.gpus.iter().find(|g| g.busy_percent.is_some()) {
+            app.resource = Resource::Gpu(gpu.card.clone());
+            draw(&app, "performance-gpu", &dir);
+        }
+
+        app.tab = Tab::Startup;
+        app.startup = Some(runtime.block_on(load_startup()));
+        draw(&app, "startup", &dir);
+
+        app.tab = Tab::Users;
+        app.sessions = runtime.block_on(sessions::list());
+        draw(&app, "users", &dir);
+
+        // Details on the compositor, the process with the most to show.
+        app.tab = Tab::Details;
+        app.selected = app.table.apps.first().map(|a| a.lead.id).or_else(|| app.table.background.first().map(|e| e.id));
+        let r = reading(&fs, &app.gpu_scan);
+        app.take(r);
+        draw(&app, "details", &dir);
+
+        app.tab = Tab::Services;
+        app.services.units.insert(Scope::System, runtime.block_on(Dbus.list(Scope::System)).unwrap_or_default());
+        app.services.cgroups = services::cgroups(std::path::Path::new("/sys/fs/cgroup"));
+        app.service_counters();
+        std::thread::sleep(Duration::from_millis(500));
+        app.service_counters();
+        app.services.selected = Some("NetworkManager.service".into());
+        app.services.journal = services::journal(Scope::System, "NetworkManager.service", 30);
+        draw(&app, "services", &dir);
+    }
 }
