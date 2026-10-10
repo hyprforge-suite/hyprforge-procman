@@ -228,3 +228,22 @@ as administrator through pkexec.
    polkit policy go in the package; a source install puts them in
    place with sudo, as the lock's PAM file is), the site page, the
    twelfth component.
+
+## Where it stands (2026-10-10)
+
+**Built and tested:**
+- **Processes:** apps by window, then background. Columns: CPU, memory, disk, GPU. End, Kill, Freeze and Resume, with warnings for session-critical processes; Switch to.
+- **Performance:** a rail with details for CPU and each core, memory and swap, every disk, every network, the GPU, the battery. Shown beside them: temperatures, fans, APU package power, pressure.
+- **Startup:** XDG autostart, user units and Hyprland's programs, with measured start times.
+- **Users:** logind sign-ins, Lock, Sign out.
+- **Details:** a tree or flat list, properties, Open file location, priority, End process tree, and `port:` / `file:` lookups.
+- **Services:** system and user units, with cgroup CPU and memory, the actions, and the journal.
+- **The helper:** polkit-checked and typed. Show everything, End as administrator, Raise priority.
+
+**Not yet:**
+- App history.
+- Per-process network. TCP alone is available without root, but a TCP-only figure undercounts QUIC, so it waits for the helper's eBPF.
+- Other users' processes in `port:` and `file:` lookups, through the helper.
+- The packaging step: PKGBUILD, installer, Set up's Ctrl+Shift+Escape bind, the site page, becoming the twelfth component.
+
+**Never seen running.** It was built while no one was at the machine. The suite's rule against unattended live compositor work kept the window closed, so its first look is still to come.
