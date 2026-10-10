@@ -482,6 +482,7 @@ mod tests {
             processor: 0,
             policy: 0,
             verbose: None,
+            ..Proc::default()
         }
     }
 

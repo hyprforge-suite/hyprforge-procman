@@ -140,6 +140,16 @@ pub struct MemoryDetail {
     pub dirty: u64,
     pub writeback: u64,
     pub swap_cached: u64,
+    /// Memory promised to programs, and the most the kernel will promise.
+    pub committed: u64,
+    pub commit_limit: u64,
+    /// zswap's compressed pool, and what it holds uncompressed.
+    pub zswap: u64,
+    pub zswapped: u64,
+    /// Transparent huge pages in programs' memory; reserved huge pages.
+    pub anon_huge: u64,
+    pub huge_total: u64,
+    pub huge_free: u64,
 }
 
 /// Paging totals since boot, from `/proc/vmstat`.
@@ -150,6 +160,14 @@ pub struct Paging {
     /// Pages swapped in and out.
     pub swap_in: u64,
     pub swap_out: u64,
+    /// Pages looked at, and taken back, to free memory — by kswapd and
+    /// by programs that had to stop and reclaim it themselves.
+    pub scanned: u64,
+    pub stolen: u64,
+    /// Times a program stalled to free memory, or to compact it.
+    pub alloc_stalls: u64,
+    pub compact_stalls: u64,
+    pub oom_kills: u64,
 }
 
 /// One mounted filesystem, by device: btrfs mounts one device at several
@@ -163,6 +181,63 @@ pub struct Filesystem {
     pub total: u64,
     /// What an ordinary user can still write.
     pub available: u64,
+}
+
+/// The network stack's totals since boot, from `/proc/net/snmp`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Transport {
+    pub ip_in: u64,
+    pub ip_out: u64,
+    pub ip_forwarded: u64,
+    pub ip_delivered: u64,
+    pub tcp_in: u64,
+    pub tcp_out: u64,
+    pub tcp_retransmitted: u64,
+    pub tcp_active_opens: u64,
+    pub tcp_passive_opens: u64,
+    pub tcp_in_errors: u64,
+    pub tcp_resets_sent: u64,
+    pub tcp_established: u64,
+    pub udp_in: u64,
+    pub udp_out: u64,
+    pub udp_in_errors: u64,
+    pub udp_no_port: u64,
+}
+
+/// `/proc/net/snmp` is pairs of lines: `Tcp: Name Name …` then
+/// `Tcp: 1 2 …`. Read by name, never by position, because the kernel
+/// adds columns.
+pub fn parse_snmp(text: &str) -> Transport {
+    let mut values: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
+    let lines: Vec<&str> = text.lines().collect();
+    for pair in lines.chunks(2) {
+        let [names, numbers] = pair else { continue };
+        let (Some((group, names)), Some((_, numbers))) = (names.split_once(':'), numbers.split_once(':')) else { continue };
+        for (name, number) in names.split_whitespace().zip(numbers.split_whitespace()) {
+            if let Ok(n) = number.parse::<i64>() {
+                values.insert(format!("{group}.{name}"), n.max(0) as u64);
+            }
+        }
+    }
+    let v = |k: &str| values.get(k).copied().unwrap_or(0);
+    Transport {
+        ip_in: v("Ip.InReceives"),
+        ip_out: v("Ip.OutRequests"),
+        ip_forwarded: v("Ip.ForwDatagrams"),
+        ip_delivered: v("Ip.InDelivers"),
+        tcp_in: v("Tcp.InSegs"),
+        tcp_out: v("Tcp.OutSegs"),
+        tcp_retransmitted: v("Tcp.RetransSegs"),
+        tcp_active_opens: v("Tcp.ActiveOpens"),
+        tcp_passive_opens: v("Tcp.PassiveOpens"),
+        tcp_in_errors: v("Tcp.InErrs"),
+        tcp_resets_sent: v("Tcp.OutRsts"),
+        tcp_established: v("Tcp.CurrEstab"),
+        udp_in: v("Udp.InDatagrams"),
+        udp_out: v("Udp.OutDatagrams"),
+        udp_in_errors: v("Udp.InErrors"),
+        udp_no_port: v("Udp.NoPorts"),
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -184,6 +259,7 @@ pub struct Machine {
     pub paging: Paging,
     pub filesystems: Vec<Filesystem>,
     pub pressure_detail: Option<PressureDetail>,
+    pub transport: Transport,
 }
 
 /// `/`, or a directory laid out like it.
@@ -292,6 +368,7 @@ impl SysFs {
             paging: self.paging(),
             filesystems: self.filesystems(),
             pressure_detail: self.pressure_detail(),
+            transport: parse_snmp(&read(self.path("proc/net/snmp")).unwrap_or_default()),
         }
     }
 
@@ -430,13 +507,47 @@ impl SysFs {
             dirty: kib("Dirty"),
             writeback: kib("Writeback"),
             swap_cached: kib("SwapCached"),
+            committed: kib("Committed_AS"),
+            commit_limit: kib("CommitLimit"),
+            zswap: kib("Zswap"),
+            zswapped: kib("Zswapped"),
+            anon_huge: kib("AnonHugePages"),
+            // A count of pages, not KiB: times the page size.
+            huge_total: kib("HugePages_Total") / 1024 * kib("Hugepagesize"),
+            huge_free: kib("HugePages_Free") / 1024 * kib("Hugepagesize"),
         }
     }
 
     fn paging(&self) -> Paging {
         let text = read(self.path("proc/vmstat")).unwrap_or_default();
         let n = |key: &str| text.lines().find_map(|l| l.strip_prefix(key)?.strip_prefix(' ')?.trim().parse().ok()).unwrap_or(0);
-        Paging { faults: n("pgfault"), major_faults: n("pgmajfault"), swap_in: n("pswpin"), swap_out: n("pswpout") }
+        let has = |key: &str| text.lines().any(|l| l.split_once(' ').is_some_and(|(k, _)| k == key));
+        // Reclaim is counted twice over on current kernels: once by who
+        // reclaimed (kswapd, direct, khugepaged, proactive) and once by
+        // what (anon, file) — each split is the whole, so adding every
+        // `pgscan_*` line counts it twice (and `pgscan_direct_throttle`
+        // is a different thing again). The by-what pair where the kernel
+        // has it; the by-who lines on older kernels, which do not.
+        let reclaim = |what: &str| {
+            if has(&format!("{what}_anon")) {
+                n(&format!("{what}_anon")) + n(&format!("{what}_file"))
+            } else {
+                n(&format!("{what}_kswapd")) + n(&format!("{what}_direct"))
+            }
+        };
+        // Allocation stalls are split by zone, and zones are disjoint.
+        let stalls: u64 = ["dma", "dma32", "normal", "movable", "device"].iter().map(|z| n(&format!("allocstall_{z}"))).sum();
+        Paging {
+            faults: n("pgfault"),
+            major_faults: n("pgmajfault"),
+            swap_in: n("pswpin"),
+            swap_out: n("pswpout"),
+            scanned: reclaim("pgscan"),
+            stolen: reclaim("pgsteal"),
+            alloc_stalls: stalls,
+            compact_stalls: n("compact_stall"),
+            oom_kills: n("oom_kill"),
+        }
     }
 
     /// Real filesystems only — those on a block device — once each.
@@ -668,7 +779,7 @@ mod tests {
         w("sys/class/power_supply/BAT1/voltage_now", "17204000\n");
         w("proc/loadavg", "2.21 2.16 2.54 2/1124 1239420\n");
         w("proc/uptime", "66567.25 688206.95\n");
-        w("proc/vmstat", "pgpgin 29853745\npgpgout 120545912\npswpin 1132\npswpout 358547\npgfault 705063422\npgmajfault 76805\n");
+        w("proc/vmstat", "pgpgin 29853745\npgpgout 120545912\npswpin 1132\npswpout 358547\npgfault 705063422\npgmajfault 76805\npgsteal_kswapd 8\npgsteal_direct 1\npgsteal_khugepaged 0\npgsteal_proactive 0\npgsteal_anon 2\npgsteal_file 7\npgscan_kswapd 10\npgscan_direct 2\npgscan_khugepaged 0\npgscan_proactive 0\npgscan_anon 3\npgscan_file 9\nallocstall_dma 0\nallocstall_dma32 1\nallocstall_normal 2\nallocstall_movable 0\nallocstall_device 0\npgscan_direct_throttle 50\ncompact_stall 4\noom_kill 0\n");
         t
     }
 
@@ -713,8 +824,17 @@ mod tests {
         assert_eq!((d.io_some.avg60, d.io_some.avg300), (87.96, 85.98));
         assert_eq!(m.load, Some([2.21, 2.16, 2.54]));
         assert_eq!(m.uptime_seconds, Some(66567));
-        assert_eq!(m.paging, Paging { faults: 705063422, major_faults: 76805, swap_in: 1132, swap_out: 358547 });
+        assert_eq!(m.paging, Paging { faults: 705063422, major_faults: 76805, swap_in: 1132, swap_out: 358547, scanned: 12, stolen: 9, alloc_stalls: 3, compact_stalls: 4, oom_kills: 0 });
         assert_eq!(m.battery, Some(Battery { status: "Not charging".into(), percent: 90, watts: Some(0.0) }));
+    }
+
+    /// This machine's `/proc/net/snmp` (the Ip, Tcp and Udp pairs).
+    #[test]
+    fn snmp_is_read_by_column_name() {
+        let t = parse_snmp("Ip: Forwarding DefaultTTL InReceives InHdrErrors InAddrErrors ForwDatagrams InUnknownProtos InDiscards InDelivers OutRequests OutDiscards OutNoRoutes ReasmTimeout ReasmReqds ReasmOKs ReasmFails FragOKs FragFails FragCreates OutTransmits\nIp: 2 64 98267 0 1 0 0 0 98264 11109 28 0 0 0 0 0 0 0 0 11109\nTcp: RtoAlgorithm RtoMin RtoMax MaxConn ActiveOpens PassiveOpens AttemptFails EstabResets CurrEstab InSegs OutSegs RetransSegs InErrs OutRsts InCsumErrors\nTcp: 1 200 120000 -1 150 68 2 37 35 8307 15796 21 0 48 0\nUdp: InDatagrams NoPorts InErrors OutDatagrams RcvbufErrors SndbufErrors InCsumErrors IgnoredMulti MemErrors\nUdp: 89500 143 0 4013 0 0 0 245 0\n");
+        assert_eq!((t.ip_in, t.ip_delivered, t.ip_out), (98267, 98264, 11109));
+        assert_eq!((t.tcp_in, t.tcp_out, t.tcp_retransmitted, t.tcp_established, t.tcp_resets_sent), (8307, 15796, 21, 35, 48));
+        assert_eq!((t.udp_in, t.udp_out, t.udp_no_port), (89500, 4013, 143));
     }
 
     #[test]

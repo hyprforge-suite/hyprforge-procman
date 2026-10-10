@@ -17,7 +17,7 @@ use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
 /// One process, as one read of its files saw it.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Proc {
     pub pid: i32,
     /// When it started, in clock ticks since boot. With the pid, this is
@@ -65,12 +65,42 @@ pub struct Proc {
     /// From `status`, read only in the Advanced view: one more file per
     /// process per refresh is not worth paying for when nothing shows it.
     pub verbose: Option<Verbose>,
+    /// Time spent runnable but waiting for a CPU, in nanoseconds over its
+    /// life — atop's RDELAY. From `schedstat`, readable for every process.
+    pub run_delay_ns: Option<u64>,
+    /// Clock ticks spent waiting for block I/O — atop's BDELAY. Zero
+    /// unless delay accounting is on (`kernel.task_delayacct`), which
+    /// the recorder can switch on; the reader cannot tell zero from off.
+    pub blkio_ticks: u64,
+    /// The kernel's priority (`20 + nice` for a normal task).
+    pub priority: i64,
+    /// Bytes written and then truncated away before reaching the disk.
+    pub cancelled_write: Option<u64>,
+    /// How many of its threads are in each state, when threads are read.
+    pub thread_states: Option<ThreadStates>,
+    /// Proportional set size, when asked for: its private pages plus its
+    /// share of every shared one. Costly (the kernel walks its page
+    /// tables), so read only when a view or the recorder asks.
+    pub pss: Option<u64>,
+}
+
+/// Threads by state, atop's TRUN / TSLPI / TSLPU.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ThreadStates {
+    pub running: u32,
+    /// Sleeping, and could be woken by a signal.
+    pub sleeping: u32,
+    /// Waiting uninterruptibly, usually on I/O.
+    pub blocked: u32,
+    pub other: u32,
 }
 
 /// What `/proc/<pid>/status` adds for the Advanced view.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Verbose {
     pub swap_bytes: u64,
+    /// Memory it has locked into RAM (`VmLck`).
+    pub locked_bytes: u64,
     /// Times it gave up the CPU to wait for something.
     pub voluntary_switches: u64,
     /// Times the scheduler took the CPU away from it.
@@ -83,6 +113,7 @@ pub fn parse_status(text: &str) -> Option<Verbose> {
     Some(Verbose {
         // Kernel threads have no VmSwap line at all.
         swap_bytes: field("VmSwap:").unwrap_or(0) * 1024,
+        locked_bytes: field("VmLck:").unwrap_or(0) * 1024,
         voluntary_switches: field("voluntary_ctxt_switches:")?,
         forced_switches: field("nonvoluntary_ctxt_switches:")?,
     })
@@ -173,20 +204,24 @@ pub struct ProcFs {
     page_size: u64,
     /// Read each process's `status` too, for the Advanced view.
     pub verbose: bool,
+    /// Count each process's threads by state (one more file per thread).
+    pub threads: bool,
+    /// Read each process's proportional set size (a page-table walk).
+    pub pss: bool,
 }
 
 impl Default for ProcFs {
     fn default() -> ProcFs {
         // SAFETY: sysconf has no preconditions; it reads a constant.
         let page = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
-        ProcFs { root: PathBuf::from("/proc"), page_size: u64::try_from(page).unwrap_or(4096), verbose: false }
+        ProcFs { root: PathBuf::from("/proc"), page_size: u64::try_from(page).unwrap_or(4096), verbose: false, threads: false, pss: false }
     }
 }
 
 impl ProcFs {
     /// A directory laid out like `/proc`, with this page size.
     pub fn rooted_at(root: impl Into<PathBuf>, page_size: u64) -> ProcFs {
-        ProcFs { root: root.into(), page_size, verbose: false }
+        ProcFs { root: root.into(), page_size, verbose: false, threads: false, pss: false }
     }
 
     pub fn snapshot(&self) -> io::Result<Snapshot> {
@@ -244,6 +279,12 @@ impl ProcFs {
             processor: stat.processor,
             policy: stat.policy,
             verbose: if self.verbose { fs::read_to_string(dir.join("status")).ok().and_then(|s| parse_status(&s)) } else { None },
+            run_delay_ns: fs::read_to_string(dir.join("schedstat")).ok().and_then(|s| parse_schedstat(&s)),
+            blkio_ticks: stat.blkio_ticks,
+            priority: stat.priority,
+            cancelled_write: fs::read_to_string(dir.join("io")).ok().and_then(|io| io_field(&io, "cancelled_write_bytes:")),
+            thread_states: if self.threads { thread_states(dir) } else { None },
+            pss: if self.pss { fs::read_to_string(dir.join("smaps_rollup")).ok().and_then(|s| parse_pss(&s)) } else { None },
         })
     }
 }
@@ -313,6 +354,8 @@ struct Stat {
     vsize: u64,
     processor: i32,
     policy: u32,
+    blkio_ticks: u64,
+    priority: i64,
 }
 
 /// `pid (comm) state ppid …`. The name is between the *first* `(` and the
@@ -343,6 +386,8 @@ fn parse_stat(line: &str) -> Option<Stat> {
         // Added in later kernels than the rest; absent reads as unknown.
         processor: field(39).and_then(|f| f.parse().ok()).unwrap_or(-1),
         policy: field(41).and_then(|f| f.parse().ok()).unwrap_or(0),
+        blkio_ticks: field(42).and_then(|f| f.parse().ok()).unwrap_or(0),
+        priority: field(18)?.parse().ok()?,
     })
 }
 
@@ -350,8 +395,37 @@ fn parse_stat(line: &str) -> Option<Stat> {
 /// process caused to be touched, not `rchar`/`wchar` (which count reads
 /// served from cache, and every pipe and socket).
 fn parse_io(io: &str) -> Option<(u64, u64)> {
-    let field = |key: &str| io.lines().find_map(|l| l.strip_prefix(key)?.trim().parse::<u64>().ok());
-    Some((field("read_bytes:")?, field("write_bytes:")?))
+    Some((io_field(io, "read_bytes:")?, io_field(io, "write_bytes:")?))
+}
+
+fn io_field(io: &str, key: &str) -> Option<u64> {
+    io.lines().find_map(|l| l.strip_prefix(key)?.trim().parse::<u64>().ok())
+}
+
+/// `schedstat`: time on a CPU, time waiting for one (both nanoseconds),
+/// and how many times it ran. The second is the run delay.
+fn parse_schedstat(text: &str) -> Option<u64> {
+    text.split_whitespace().nth(1)?.parse().ok()
+}
+
+/// `Pss:` from `smaps_rollup`, in bytes.
+fn parse_pss(text: &str) -> Option<u64> {
+    text.lines().find_map(|l| l.strip_prefix("Pss:")?.split_whitespace().next()?.parse::<u64>().ok()).map(|k| k * 1024)
+}
+
+/// Each thread's state from `task/<tid>/stat`, counted.
+fn thread_states(dir: &Path) -> Option<ThreadStates> {
+    let mut states = ThreadStates::default();
+    for entry in fs::read_dir(dir.join("task")).ok()?.flatten() {
+        let Some(stat) = fs::read_to_string(entry.path().join("stat")).ok().and_then(|s| parse_stat(&s)) else { continue };
+        match stat.state {
+            'R' => states.running += 1,
+            'S' => states.sleeping += 1,
+            'D' => states.blocked += 1,
+            _ => states.other += 1,
+        }
+    }
+    Some(states)
 }
 
 /// `size resident shared text lib data dt`, in pages: resident minus
@@ -485,6 +559,7 @@ mod tests {
         assert_eq!((s.utime, s.stime, s.threads, s.start), (0, 0, 1, 6202074));
         assert_eq!(s.nice, 0);
         assert_eq!((s.minflt, s.majflt, s.vsize, s.processor, s.policy), (362, 0, 9388032, 8, 0));
+        assert_eq!((s.priority, s.blkio_ticks), (20, 0));
         assert_eq!(s.flags & PF_KTHREAD, 0);
     }
 
@@ -510,11 +585,32 @@ mod tests {
     #[test]
     fn status_and_counters_read_what_the_advanced_view_shows() {
         let v = parse_status("Name:\tzsh\nVmSwap:\t      12 kB\nvoluntary_ctxt_switches:\t41\nnonvoluntary_ctxt_switches:\t3\n").unwrap();
-        assert_eq!(v, Verbose { swap_bytes: 12 * 1024, voluntary_switches: 41, forced_switches: 3 });
+        assert_eq!(v, Verbose { swap_bytes: 12 * 1024, locked_bytes: 0, voluntary_switches: 41, forced_switches: 3 });
         let c = parse_counters("cpu  1 2 3\nintr 375827975 133 0 0\nctxt 330627480\nbtime 1\nprocesses 1239419\nprocs_running 1\nprocs_blocked 6\n");
         assert_eq!(c, Counters { context_switches: 330627480, interrupts: 375827975, forks: 1239419, running: 1, blocked: 6 });
         let (all, _) = parse_cpu(STAT).unwrap();
         assert_eq!(all.split[4], 30835332, "iowait, in /proc/stat's order");
+    }
+
+    /// This machine's `schedstat`, `smaps_rollup` and `io` lines.
+    #[test]
+    fn delays_pss_and_cancelled_writes_read_from_their_files() {
+        assert_eq!(parse_schedstat("500593 0 1\n"), Some(0));
+        assert_eq!(parse_schedstat("8213400 2195700 31\n"), Some(2195700));
+        let rollup = "558744672000-7ffc4552e000 ---p 00000000 00:00 0 [rollup]\nRss:                2456 kB\nPss:                 197 kB\nPss_Dirty:           112 kB\n";
+        assert_eq!(parse_pss(rollup), Some(197 * 1024), "Pss, not Pss_Dirty");
+        assert_eq!(io_field("read_bytes: 4096\ncancelled_write_bytes: 8192\n", "cancelled_write_bytes:"), Some(8192));
+    }
+
+    #[test]
+    fn this_process_has_its_threads_counted_and_a_run_delay() {
+        let me = std::process::id() as i32;
+        let fs = ProcFs { threads: true, pss: true, ..ProcFs::default() };
+        let snap = fs.snapshot().unwrap();
+        let p = snap.procs.iter().find(|p| p.pid == me).unwrap();
+        let t = p.thread_states.unwrap();
+        assert!(t.running + t.sleeping + t.blocked + t.other >= 1);
+        assert!(p.run_delay_ns.is_some() && p.pss.is_some_and(|b| b > 0));
     }
 
     #[test]

@@ -167,6 +167,7 @@ mod tests {
             processor: 0,
             policy: 0,
             verbose: None,
+            ..Proc::default()
         }
     }
 
@@ -209,12 +210,12 @@ mod tests {
         a.user_ticks = 100;
         a.system_ticks = 10;
         a.majflt = 3;
-        a.verbose = Some(crate::proc::Verbose { swap_bytes: 0, voluntary_switches: 50, forced_switches: 1 });
+        a.verbose = Some(crate::proc::Verbose { swap_bytes: 0, locked_bytes: 0, voluntary_switches: 50, forced_switches: 1 });
         let mut b = a.clone();
         b.user_ticks = 160;
         b.system_ticks = 30;
         b.majflt = 7;
-        b.verbose = Some(crate::proc::Verbose { swap_bytes: 0, voluntary_switches: 250, forced_switches: 5 });
+        b.verbose = Some(crate::proc::Verbose { swap_bytes: 0, locked_bytes: 0, voluntary_switches: 250, forced_switches: 5 });
         let d = details(&snap(1000, 0, vec![a]), &snap(1400, 0, vec![b]), 2.0)[&Id { pid: 10, start: 5 }];
         assert!((d.user_pct - 15.0).abs() < 1e-4 && (d.system_pct - 5.0).abs() < 1e-4);
         assert_eq!((d.major_faults, d.voluntary, d.forced), (2.0, Some(100.0), Some(2.0)));
