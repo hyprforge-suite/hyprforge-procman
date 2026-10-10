@@ -156,6 +156,10 @@ pub struct Reader {
     pub entries: Vec<Entry>,
     /// Where the last whole record ends.
     end: u64,
+    /// The decompressor primed with the last keyframe used, by index:
+    /// reading a day in order decodes each keyframe once rather than once
+    /// for every frame after it.
+    keyed: Option<(usize, zstd::bulk::Decompressor<'static>)>,
 }
 
 impl Reader {
@@ -207,7 +211,7 @@ impl Reader {
             offset += RECORD_HEAD as u64 + u64::from(plen);
             end = offset;
         }
-        Ok(Reader { file, header, entries, end })
+        Ok(Reader { file, header, entries, end, keyed: None })
     }
 
     fn payload(&mut self, e: Entry) -> io::Result<Vec<u8>> {
@@ -226,9 +230,13 @@ impl Reader {
             zstd::bulk::decompress(&self.payload(e)?, MAX)?
         } else {
             let key = (0..i).rev().find(|&k| self.entries[k].keyframe).ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "a frame with no keyframe before it"))?;
-            let key_raw = zstd::bulk::decompress(&self.payload(self.entries[key])?, MAX)?;
-            let mut d = zstd::bulk::Decompressor::with_dictionary(&key_raw)?;
-            d.decompress(&self.payload(e)?, MAX)?
+            if self.keyed.as_ref().is_none_or(|(k, _)| *k != key) {
+                let key_raw = zstd::bulk::decompress(&self.payload(self.entries[key])?, MAX)?;
+                self.keyed = Some((key, zstd::bulk::Decompressor::with_dictionary(&key_raw)?));
+            }
+            let body = self.payload(e)?;
+            let (_, d) = self.keyed.as_mut().expect("primed above");
+            d.decompress(&body, MAX)?
         };
         postcard::from_bytes(&raw).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
     }

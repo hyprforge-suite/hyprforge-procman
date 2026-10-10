@@ -14,23 +14,7 @@ use ratatui::widgets::{Block, Borders, Cell, Clear, Paragraph, Row as TableRow, 
 use ratatui::Frame;
 use std::collections::BTreeMap;
 
-/// `3.2G`, `512M`, `40K`: atop's widths, so a column never jumps.
-pub fn bytes(n: u64) -> String {
-    const UNITS: [&str; 5] = ["B", "K", "M", "G", "T"];
-    let mut v = n as f64;
-    let mut u = 0;
-    while v >= 1024.0 && u < UNITS.len() - 1 {
-        v /= 1024.0;
-        u += 1;
-    }
-    if u == 0 {
-        format!("{n}B")
-    } else if v < 10.0 {
-        format!("{v:.1}{}", UNITS[u])
-    } else {
-        format!("{v:.0}{}", UNITS[u])
-    }
-}
+pub use crate::report::bytes;
 
 fn signed(n: i64) -> String {
     match n {

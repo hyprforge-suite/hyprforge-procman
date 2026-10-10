@@ -218,7 +218,7 @@ impl State {
 }
 
 /// `HH:MM`.
-fn parse_time(text: &str) -> Option<(u32, u32)> {
+pub fn parse_time(text: &str) -> Option<(u32, u32)> {
     let (h, m) = text.trim().split_once(':')?;
     let (h, m) = (h.parse().ok()?, m.parse().ok()?);
     (h < 24 && m < 60).then_some((h, m))

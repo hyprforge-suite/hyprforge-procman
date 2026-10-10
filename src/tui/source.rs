@@ -157,11 +157,9 @@ impl Replay {
 
     /// `hour:minute` on the journal's own day.
     pub fn go_to_time(&mut self, hour: u32, minute: u32) {
-        use chrono::TimeZone;
-        let first = self.reader.entries[0].at_ms;
-        let Some(day) = chrono::Local.timestamp_millis_opt(first).single().map(|d| d.date_naive()) else { return };
-        let Some(at) = day.and_hms_opt(hour, minute, 0).and_then(|t| chrono::Local.from_local_datetime(&t).earliest()) else { return };
-        self.go_to(at.timestamp_millis());
+        if let Some(at) = crate::report::at_time(&self.reader, hour, minute) {
+            self.go_to(at);
+        }
     }
 
     /// The interval ending at the current sample. The first sample of a

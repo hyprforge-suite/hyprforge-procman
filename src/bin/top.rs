@@ -5,12 +5,14 @@
 //! everything, and a journal you may not open is asked of the helper,
 //! which checks polkit first.
 
+use hyprforge_procman::journal::Reader;
 use hyprforge_procman::recorder;
+use hyprforge_procman::report::{self, Kind};
 use hyprforge_procman::sample::Id;
 use hyprforge_procman::signal::{self, How};
 use hyprforge_procman::tui::render;
 use hyprforge_procman::tui::source::{self, Live, Replay, Screen};
-use hyprforge_procman::tui::state::{Action, Key, State, View};
+use hyprforge_procman::tui::state::{self, Action, Key, State, View};
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use std::time::{Duration, Instant};
 
@@ -23,6 +25,12 @@ USAGE
                                         replay the recorder's journal: a day
                                         (2026-10-10, default today) or a file,
                                         starting at a time of day
+    hyprforge-top report KIND [DAY|FILE] [--from HH:MM] [--to HH:MM]
+                         [--step 10m] [--top N] [--json]
+                                        what a day added up to, atopsar's
+                                        way. KIND is cpu, mem, disk, net,
+                                        psi or top (the programs that used
+                                        the most). Steps are 30s, 10m, 1h…
 
 Inside, press h for every key. The journal is root's: run with sudo, or
 the helper asks for your password through polkit.
@@ -33,36 +41,115 @@ enum Mode {
     Replay(Replay),
 }
 
+/// The journal `-r` or `report` names: a day or a file, today if neither.
+fn journal(what: Option<String>) -> (String, std::io::Result<Reader>) {
+    let what = what.unwrap_or_else(|| chrono::Local::now().format("%Y-%m-%d").to_string());
+    let directory = recorder::load_config(std::path::Path::new(recorder::CONFIG_PATH)).map(|c| c.directory).unwrap_or_else(|_| recorder::Config::default().directory);
+    let reader = source::open_journal(&what, &directory);
+    (what, reader)
+}
+
+fn fail(message: impl std::fmt::Display) -> std::process::ExitCode {
+    eprintln!("hyprforge-top: {message}");
+    std::process::ExitCode::FAILURE
+}
+
+/// `30s`, `10m`, `1h`, or plain seconds.
+fn parse_step(text: &str) -> Option<i64> {
+    let (number, unit) = match text.char_indices().find(|(_, c)| !c.is_ascii_digit()) {
+        Some((i, _)) => text.split_at(i),
+        None => (text, "s"),
+    };
+    let n: i64 = number.parse().ok().filter(|&n| n > 0)?;
+    let scale = match unit {
+        "s" => 1,
+        "m" => 60,
+        "h" => 3600,
+        _ => return None,
+    };
+    Some(n * scale * 1000)
+}
+
+fn report_main(args: &[String]) -> std::process::ExitCode {
+    let Some(kind) = args.first().and_then(|k| Kind::parse(k)) else {
+        return fail("report takes cpu, mem, disk, net, psi or top — see --help");
+    };
+    let flags = ["--from", "--to", "--step", "--top"];
+    let value = |name: &str| args.iter().position(|a| a == name).and_then(|i| args.get(i + 1)).cloned();
+    // The day or file: the one argument that is neither a flag nor a flag's value.
+    let what = args.iter().enumerate().skip(1).find(|(i, a)| !a.starts_with("--") && !flags.contains(&args[i - 1].as_str())).map(|(_, a)| a.clone());
+    let (what, reader) = journal(what);
+    let mut reader = match reader {
+        Ok(r) => r,
+        Err(e) => return fail(format!("couldn't open the journal for {what}: {e}")),
+    };
+    let time = |name: &str, default: i64| -> Result<i64, std::process::ExitCode> {
+        match value(name) {
+            None => Ok(default),
+            Some(t) => state::parse_time(&t).and_then(|(h, m)| report::at_time(&reader, h, m)).ok_or_else(|| fail(format!("{name} {t:?} isn't a time — HH:MM"))),
+        }
+    };
+    let from_ms = match time("--from", i64::MIN / 2) {
+        Ok(t) => t,
+        Err(code) => return code,
+    };
+    let to_ms = match time("--to", i64::MAX / 2) {
+        Ok(t) => t,
+        Err(code) => return code,
+    };
+    let step_ms = match value("--step").map(|s| parse_step(&s)) {
+        None => 600_000,
+        Some(Some(ms)) => ms,
+        Some(None) => return fail("--step takes 30s, 10m, 1h or a number of seconds"),
+    };
+    let top = match value("--top").map(|n| n.parse::<usize>()) {
+        None => 15,
+        Some(Ok(n)) if n > 0 => n,
+        Some(_) => return fail("--top takes a number"),
+    };
+    let built = match report::build(&mut reader, &report::Options { from_ms, to_ms, step_ms, top }) {
+        Ok(r) => r,
+        Err(e) => return fail(format!("couldn't read the journal for {what}: {e}")),
+    };
+    if args.iter().any(|a| a == "--json") {
+        match serde_json::to_string_pretty(&built.only(kind)) {
+            Ok(json) => println!("{json}"),
+            Err(e) => return fail(e),
+        }
+    } else if built.intervals == 0 {
+        return fail(format!("the journal for {what} has nothing recorded in that range"));
+    } else {
+        print!("{}", report::text(&built, kind));
+    }
+    std::process::ExitCode::SUCCESS
+}
+
 fn main() -> std::process::ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.iter().any(|a| a == "-h" || a == "--help") {
         print!("{USAGE}");
         return std::process::ExitCode::SUCCESS;
     }
+    if args.first().is_some_and(|a| a == "report") {
+        return report_main(&args[1..]);
+    }
     let position = |name: &str| args.iter().position(|a| a == name);
     let value = |name: &str| position(name).and_then(|i| args.get(i + 1)).filter(|v| !v.starts_with('-')).cloned();
 
     let mode = if position("-r").is_some() {
-        let what = value("-r").unwrap_or_else(|| chrono::Local::now().format("%Y-%m-%d").to_string());
-        let directory = recorder::load_config(std::path::Path::new(recorder::CONFIG_PATH)).map(|c| c.directory).unwrap_or_else(|_| recorder::Config::default().directory);
-        let replay = source::open_journal(&what, &directory).and_then(Replay::new);
+        let (what, reader) = journal(value("-r"));
+        let replay = reader.and_then(Replay::new);
         match replay {
             Ok(mut r) => {
                 if let Some(t) = value("-b") {
-                    match t.split_once(':').and_then(|(h, m)| Some((h.parse().ok()?, m.parse().ok()?))) {
+                    match state::parse_time(&t) {
                         Some((h, m)) => r.go_to_time(h, m),
-                        None => {
-                            eprintln!("hyprforge-top: {t:?} isn't a time — HH:MM");
-                            return std::process::ExitCode::FAILURE;
-                        }
+                        None => return fail(format!("{t:?} isn't a time — HH:MM")),
                     }
                 }
                 Mode::Replay(r)
             }
-            Err(e) => {
-                eprintln!("hyprforge-top: couldn't open the journal for {what}: {e}");
-                return std::process::ExitCode::FAILURE;
-            }
+            Err(e) => return fail(format!("couldn't open the journal for {what}: {e}")),
         }
     } else {
         let seconds = match value("-i").map(|v| v.parse::<u64>()) {
@@ -81,10 +168,7 @@ fn main() -> std::process::ExitCode {
     ratatui::restore();
     match result {
         Ok(()) => std::process::ExitCode::SUCCESS,
-        Err(e) => {
-            eprintln!("hyprforge-top: {e}");
-            std::process::ExitCode::FAILURE
-        }
+        Err(e) => fail(e),
     }
 }
 
@@ -173,5 +257,16 @@ fn run(mut terminal: ratatui::DefaultTerminal, mut mode: Mode) -> std::io::Resul
             screen = live.screen()?;
             next_refresh = Instant::now() + *every;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_step_reads_with_or_without_a_unit() {
+        assert_eq!([parse_step("30s"), parse_step("10m"), parse_step("1h"), parse_step("90")], [Some(30_000), Some(600_000), Some(3_600_000), Some(90_000)]);
+        assert_eq!([parse_step("0m"), parse_step("10x"), parse_step("m")], [None, None, None]);
     }
 }
