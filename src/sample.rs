@@ -97,6 +97,8 @@ mod tests {
             uid: 1000,
             kernel: false,
             io: None,
+            nice: 0,
+            resident_bytes: 0,
         }
     }
 

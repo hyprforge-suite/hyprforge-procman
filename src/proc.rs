@@ -45,6 +45,10 @@ pub struct Proc {
     /// life — `None` when this reader may not see them (another user's
     /// process, without the helper).
     pub io: Option<(u64, u64)>,
+    /// -20 (first in line) to 19 (last).
+    pub nice: i32,
+    /// Everything resident, shared pages included: what `top` calls RES.
+    pub resident_bytes: u64,
 }
 
 /// The CPU's cumulative time counters, from one `cpu` line of
@@ -89,6 +93,9 @@ pub struct Snapshot {
     /// `cpu0`, `cpu1`, … in order.
     pub cores: Vec<CpuTimes>,
     pub memory: Memory,
+    /// When the machine booted, in seconds since the epoch (`btime`):
+    /// with a process's start ticks, when the process started.
+    pub boot: u64,
 }
 
 /// `/proc`, or a directory standing in for it.
@@ -114,6 +121,8 @@ impl ProcFs {
 
     pub fn snapshot(&self) -> io::Result<Snapshot> {
         let (cpu, cores) = parse_cpu(&fs::read_to_string(self.root.join("stat"))?)?;
+        let stat = fs::read_to_string(self.root.join("stat"))?;
+        let boot = stat.lines().find_map(|l| l.strip_prefix("btime ")?.trim().parse().ok()).unwrap_or(0);
         let memory = parse_meminfo(&fs::read_to_string(self.root.join("meminfo"))?)?;
         let mut procs = Vec::new();
         for entry in fs::read_dir(&self.root)? {
@@ -124,7 +133,7 @@ impl ProcFs {
             }
         }
         procs.sort_by_key(|p| p.pid);
-        Ok(Snapshot { procs, cpu, cores, memory })
+        Ok(Snapshot { procs, cpu, cores, memory, boot })
     }
 
     /// One process, or `None` if it ended while being read.
@@ -133,6 +142,7 @@ impl ProcFs {
         let stat = parse_stat(&fs::read_to_string(dir.join("stat")).ok()?)?;
         let statm = fs::read_to_string(dir.join("statm")).ok()?;
         let private_pages = parse_statm_private(&statm)?;
+        let resident_pages: u64 = statm.split_whitespace().nth(1)?.parse().ok()?;
         // Permission to read a command line is not given for every
         // process; a missing one only costs the name its extension.
         let argv = fs::read(dir.join("cmdline")).unwrap_or_default();
@@ -154,6 +164,8 @@ impl ProcFs {
             uid,
             kernel: stat.flags & PF_KTHREAD != 0,
             io: fs::read_to_string(dir.join("io")).ok().and_then(|io| parse_io(&io)),
+            nice: stat.nice,
+            resident_bytes: resident_pages * self.page_size,
         })
     }
 }
@@ -183,6 +195,13 @@ pub fn usage(root: &Path, id: crate::sample::Id) -> Option<crate::helper::Usage>
     Some(crate::helper::Usage { pid: id.pid, start: id.start, read_bytes, write_bytes, open_files })
 }
 
+/// Clock ticks a second (`CLK_TCK`): a process's start and CPU time are
+/// counted in these.
+pub fn ticks_per_second() -> u64 {
+    // SAFETY: sysconf has no preconditions.
+    u64::try_from(unsafe { libc::sysconf(libc::_SC_CLK_TCK) }).ok().filter(|t| *t > 0).unwrap_or(100)
+}
+
 /// `include/linux/sched.h`.
 const PF_KTHREAD: u64 = 0x0020_0000;
 
@@ -196,6 +215,7 @@ struct Stat {
     utime: u64,
     stime: u64,
     threads: u32,
+    nice: i32,
     start: u64,
 }
 
@@ -219,6 +239,7 @@ fn parse_stat(line: &str) -> Option<Stat> {
         utime: field(14)?.parse().ok()?,
         stime: field(15)?.parse().ok()?,
         threads: field(20)?.parse().ok()?,
+        nice: field(19)?.parse().ok()?,
         start: field(22)?.parse().ok()?,
     })
 }
@@ -359,6 +380,7 @@ mod tests {
         assert_eq!(s.state, 'S');
         assert_eq!(s.ppid, 33855);
         assert_eq!((s.utime, s.stime, s.threads, s.start), (0, 0, 1, 6202074));
+        assert_eq!(s.nice, 0);
         assert_eq!(s.flags & PF_KTHREAD, 0);
     }
 

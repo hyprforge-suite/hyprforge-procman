@@ -38,6 +38,11 @@ pub struct Entry {
     pub threads: u32,
     pub state: char,
     pub kernel: bool,
+    pub ppid: i32,
+    pub nice: i32,
+    /// CPU time over its whole life, in clock ticks.
+    pub ticks: u64,
+    pub resident_bytes: u64,
 }
 
 /// A window's process and the processes it started.
@@ -103,6 +108,10 @@ pub fn table(
             threads: p.threads,
             state: p.state,
             kernel: p.kernel,
+            ppid: p.ppid,
+            nice: p.nice,
+            ticks: p.ticks,
+            resident_bytes: p.resident_bytes,
         }
     };
 
@@ -206,6 +215,9 @@ pub struct View {
     /// Apps opened to show their processes.
     pub expanded: HashSet<Id>,
     pub show_kernel: bool,
+    /// What a `port:`/`file:` search found; replaces the text search
+    /// while it is set.
+    pub only: Option<HashSet<i32>>,
 }
 
 /// One line of the list, top to bottom.
@@ -257,6 +269,8 @@ fn app_key(a: &App) -> Key<'_> {
 
 fn matches(e: &Entry, query: &str) -> bool {
     query.is_empty()
+        || query.starts_with("port:")
+        || query.starts_with("file:")
         || e.name.to_lowercase().contains(query)
         || e.command.to_lowercase().contains(query)
         || e.id.pid.to_string() == query
@@ -267,24 +281,27 @@ fn matches(e: &Entry, query: &str) -> bool {
 /// class or window title), which shows the app as it is.
 pub fn lines(table: &Table, view: &View) -> Vec<Line> {
     let query = view.query.trim().to_lowercase();
+    let hit = |e: &Entry| match &view.only {
+        Some(set) => set.contains(&e.id.pid),
+        None => matches(e, &query),
+    };
     let mut apps: Vec<(App, bool)> = Vec::new();
     for app in &table.apps {
-        let itself = query.is_empty()
-            || app.title.to_lowercase().contains(&query)
-            || app.class.to_lowercase().contains(&query)
-            || matches(&app.lead, &query);
+        let itself = view.only.is_none() && query.is_empty()
+            || view.only.is_none() && (app.title.to_lowercase().contains(&query) || app.class.to_lowercase().contains(&query))
+            || hit(&app.lead);
         if itself {
             apps.push((app.clone(), view.expanded.contains(&app.lead.id)));
             continue;
         }
-        let found: Vec<Entry> = app.members.iter().filter(|m| matches(m, &query)).cloned().collect();
+        let found: Vec<Entry> = app.members.iter().filter(|m| hit(m)).cloned().collect();
         if !found.is_empty() {
             apps.push((App { members: found, ..app.clone() }, true));
         }
     }
     apps.sort_by(|(a, _), (b, _)| compare(view.sort, app_key(a), app_key(b)));
     let mut background: Vec<&Entry> =
-        table.background.iter().filter(|e| (view.show_kernel || !e.kernel) && matches(e, &query)).collect();
+        table.background.iter().filter(|e| (view.show_kernel || !e.kernel) && hit(e)).collect();
     background.sort_by(|a, b| compare(view.sort, key(a), key(b)));
 
     let mut out = Vec::new();
@@ -306,6 +323,101 @@ pub fn lines(table: &Table, view: &View) -> Vec<Line> {
     out
 }
 
+/// Every process in the table, apps' and background alike.
+pub fn entries(table: &Table) -> impl Iterator<Item = &Entry> {
+    table.apps.iter().flat_map(|a| a.members.iter()).chain(table.background.iter())
+}
+
+/// The Details tab's lines: every process, flat or as a tree, each with
+/// its depth. In a tree a search keeps the way down to what it found, so
+/// a match is never shown without its parents. `only`, when given, is
+/// the set a `port:`/`file:` lookup found.
+pub fn details(table: &Table, view: &View, tree: bool) -> Vec<(usize, Entry)> {
+    let query = view.query.trim().to_lowercase();
+    let only = view.only.as_ref();
+    let lookup = only.is_some();
+    let all: Vec<&Entry> = entries(table).filter(|e| view.show_kernel || !e.kernel).collect();
+    let hit = |e: &Entry| match only {
+        Some(set) => set.contains(&e.id.pid),
+        None => matches(e, &query),
+    };
+    if !tree {
+        let mut flat: Vec<&Entry> = all.into_iter().filter(|e| hit(e)).collect();
+        flat.sort_by(|a, b| compare(view.sort, key(a), key(b)));
+        return flat.into_iter().map(|e| (0, e.clone())).collect();
+    }
+    let present: HashSet<i32> = all.iter().map(|e| e.id.pid).collect();
+    let mut children: HashMap<i32, Vec<&Entry>> = HashMap::new();
+    let mut roots = Vec::new();
+    for e in &all {
+        if present.contains(&e.ppid) && e.ppid != e.id.pid {
+            children.entry(e.ppid).or_default().push(e);
+        } else {
+            roots.push(*e);
+        }
+    }
+    // What to keep: everything when nothing is searched, otherwise each
+    // match and every ancestor of one.
+    let keep: Option<HashSet<i32>> = (lookup || !query.is_empty()).then(|| {
+        let parent: HashMap<i32, i32> = all.iter().map(|e| (e.id.pid, e.ppid)).collect();
+        let mut keep = HashSet::new();
+        for e in all.iter().filter(|e| hit(e)) {
+            let mut at = e.id.pid;
+            while keep.insert(at) {
+                match parent.get(&at) {
+                    Some(&up) if present.contains(&up) => at = up,
+                    _ => break,
+                }
+            }
+        }
+        keep
+    });
+    let sort = |list: &mut Vec<&Entry>| list.sort_by(|a, b| compare(view.sort, key(a), key(b)));
+    sort(&mut roots);
+    let mut out = Vec::new();
+    let mut stack: Vec<(usize, &Entry)> = roots.into_iter().rev().map(|e| (0, e)).collect();
+    while let Some((depth, e)) = stack.pop() {
+        if keep.as_ref().is_some_and(|k| !k.contains(&e.id.pid)) {
+            continue;
+        }
+        out.push((depth, e.clone()));
+        if let Some(kids) = children.get(&e.id.pid) {
+            let mut kids = kids.clone();
+            sort(&mut kids);
+            stack.extend(kids.into_iter().rev().map(|k| (depth + 1, k)));
+        }
+    }
+    out
+}
+
+/// `id` and everything under it, deepest first — the order End process
+/// tree signals in, so a parent never sees its children die and starts
+/// new ones before it is asked to stop itself.
+pub fn tree_of(table: &Table, id: Id) -> Vec<Id> {
+    let all: Vec<&Entry> = entries(table).collect();
+    let mut children: HashMap<i32, Vec<Id>> = HashMap::new();
+    for e in &all {
+        children.entry(e.ppid).or_default().push(e.id);
+    }
+    let mut order = Vec::new();
+    let mut stack = vec![(id, false)];
+    let mut seen = HashSet::new();
+    while let Some((at, expanded)) = stack.pop() {
+        if expanded {
+            order.push(at);
+            continue;
+        }
+        if !seen.insert(at.pid) {
+            continue;
+        }
+        stack.push((at, true));
+        for kid in children.get(&at.pid).into_iter().flatten() {
+            stack.push((*kid, false));
+        }
+    }
+    order
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -325,6 +437,8 @@ mod tests {
             uid,
             kernel: false,
             io: None,
+            nice: 0,
+            resident_bytes: 0,
         }
     }
 
@@ -458,6 +572,32 @@ mod tests {
         assert_eq!(ancestry(&snapshot, 60), HashSet::from([60, 50, 1]));
         let looped = Snapshot { procs: vec![proc(5, 6, "a", 0), proc(6, 5, "b", 0)], ..Snapshot::default() };
         assert_eq!(ancestry(&looped, 5), HashSet::from([5, 6]));
+    }
+
+    #[test]
+    fn the_tree_puts_children_under_parents_and_a_search_keeps_the_way_down() {
+        let t = table_of(&HashMap::new());
+        let view = View { sort: Sort { column: Column::Pid, descending: false }, ..View::default() };
+        let tree: Vec<(usize, i32)> = details(&t, &view, true).into_iter().map(|(d, e)| (d, e.id.pid)).collect();
+        assert_eq!(tree, [(0, 1), (1, 100), (2, 101), (2, 102), (1, 200), (2, 201), (3, 202), (1, 300)]);
+        let found: Vec<(usize, i32)> =
+            details(&t, &View { query: "gedit".into(), ..view.clone() }, true).into_iter().map(|(d, e)| (d, e.id.pid)).collect();
+        assert_eq!(found, [(0, 1), (1, 200), (2, 201), (3, 202)]);
+        let flat = details(&t, &View { query: "gedit".into(), ..view.clone() }, false);
+        assert_eq!(flat.len(), 1);
+        let looked = View { query: "port:443".into(), only: Some(HashSet::from([101])), ..view.clone() };
+        assert_eq!(details(&t, &looked, false).len(), 1, "a lookup's set replaces the text search");
+        let l = lines(&t, &looked);
+        assert!(matches!(&l[1], Line::App { app, open: true } if app.members.len() == 1 && app.members[0].id.pid == 101), "and Processes answers it too");
+    }
+
+    #[test]
+    fn a_process_tree_ends_deepest_first() {
+        let t = table_of(&HashMap::new());
+        let order: Vec<i32> = tree_of(&t, Id { pid: 200, start: 2000 }).into_iter().map(|i| i.pid).collect();
+        assert_eq!(order.last(), Some(&200), "the parent last");
+        assert!(order.iter().position(|p| *p == 202) < order.iter().position(|p| *p == 201), "grandchild before child");
+        assert_eq!(order.len(), 3);
     }
 
     #[test]

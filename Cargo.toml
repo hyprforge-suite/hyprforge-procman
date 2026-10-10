@@ -51,6 +51,8 @@ tokio = { version = "1.53", features = ["rt-multi-thread", "macros", "sync", "ti
 # signal reaches the process that was chosen and never one that reused
 # its number.
 libc = "0.2"
+# When a process started, in the reader's own time zone.
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 # The helper's service and the window's client of it, on the system bus.
 zbus = { version = "5.18", default-features = false, features = ["tokio"] }
 serde = { version = "1", features = ["derive"] }

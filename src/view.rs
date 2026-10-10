@@ -19,12 +19,12 @@ use hyprforge_ui::{density, glyph, widgets};
 use iced::widget::{button, canvas, column, container, row, scrollable, stack, text, Space};
 use iced::{Alignment, Background, Border, Element, Length};
 
-const NAME_PORTION: u16 = 6;
-const CPU_W: f32 = 84.0;
-const MEM_W: f32 = 104.0;
-const DISK_W: f32 = 104.0;
-const PID_W: f32 = 84.0;
-const USER_W: f32 = 120.0;
+pub const NAME_PORTION: u16 = 6;
+pub const CPU_W: f32 = 84.0;
+pub const MEM_W: f32 = 104.0;
+pub const DISK_W: f32 = 104.0;
+pub const PID_W: f32 = 84.0;
+pub const USER_W: f32 = 120.0;
 
 fn scale() -> FontScale {
     FontScale(theme::active().font_scale)
@@ -74,6 +74,7 @@ impl App {
         let body = match self.tab {
             Tab::Processes => self.processes(s),
             Tab::Performance => self.performance(s),
+            Tab::Details => self.details_view(s),
             Tab::Services => self.services_view(s),
         };
         let page = column![self.header(s), widgets::divider(), body, widgets::divider(), self.status(s)];
@@ -91,7 +92,7 @@ impl App {
     }
 
     fn header(&self, s: FontScale) -> Element<'_, Message> {
-        let tabs = widgets::panel_tabs(&[(Tab::Processes, "Processes"), (Tab::Performance, "Performance"), (Tab::Services, "Services")], &self.tab, Message::Tab, s);
+        let tabs = widgets::panel_tabs(&[(Tab::Processes, "Processes"), (Tab::Performance, "Performance"), (Tab::Details, "Details"), (Tab::Services, "Services")], &self.tab, Message::Tab, s);
         let mut bar = row![tabs, Space::new().width(Length::Fill)].spacing(spacing::MD).align_y(Alignment::Center);
         if self.tab == Tab::Services {
             bar = bar.push(
@@ -99,9 +100,9 @@ impl App {
                     .width(Length::Fixed(s.apply(320.0))),
             );
         }
-        if self.tab == Tab::Processes {
+        if matches!(self.tab, Tab::Processes | Tab::Details) {
             bar = bar.push(
-                container(widgets::search_field("Search name, command or PID", &self.view.query, Message::Query, None, Some(crate::search_id()), s))
+                container(widgets::search_field("Search, or port:8080, file:~/notes.txt", &self.view.query, Message::Query, None, Some(crate::search_id()), s))
                     .width(Length::Fixed(s.apply(320.0))),
             );
         }
@@ -131,7 +132,7 @@ impl App {
             .into()
     }
 
-    fn column_head(&self, label: &'static str, column: Column, width: Length, right: bool, s: FontScale) -> Element<'_, Message> {
+    pub fn column_head(&self, label: &'static str, column: Column, width: Length, right: bool, s: FontScale) -> Element<'_, Message> {
         let sort = self.view.sort;
         let marker = if sort.column == column { if sort.descending { " ↓" } else { " ↑" } } else { "" };
         let label = widgets::meta_text(format!("{label}{marker}"), density::META_TEXT_BASE, s);
@@ -201,7 +202,7 @@ impl App {
         }
     }
 
-    fn entry_name(&self, e: &Entry, s: FontScale) -> Element<'_, Message> {
+    pub fn entry_name(&self, e: &Entry, s: FontScale) -> Element<'_, Message> {
         let mut name = row![widgets::scaled_text(e.name.clone(), density::ROW_TEXT_BASE, s)].spacing(spacing::SM).align_y(Alignment::Center);
         match e.state {
             'T' | 't' => name = name.push(widgets::chip("Frozen", widgets::Tint::Info, s)),

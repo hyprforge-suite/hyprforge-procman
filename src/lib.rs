@@ -9,6 +9,7 @@
 
 pub mod graph;
 pub mod helper;
+pub mod inspect;
 pub mod history;
 pub mod machine;
 pub mod model;

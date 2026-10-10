@@ -6,11 +6,13 @@
 //! selected, and the one question this app asks before acting — "end
 //! this?".
 
+mod details;
 mod view;
 
 use hyprforge_keys::{Key, KeyPress};
 use hyprforge_procman::helper;
 use hyprforge_procman::history::History;
+use hyprforge_procman::inspect;
 use hyprforge_procman::machine::{self, DiskRate, Machine, NetRate, SysFs};
 use hyprforge_procman::model::{self, Column, Table, View};
 use hyprforge_procman::proc::{ProcFs, Snapshot};
@@ -41,7 +43,26 @@ pub enum Resource {
 pub enum Tab {
     Processes,
     Performance,
+    Details,
     Services,
+}
+
+/// What the Details tab knows about the selected process beyond its row.
+#[derive(Debug, Clone, Default)]
+pub struct Properties {
+    pub id: Option<Id>,
+    pub exe: Option<std::path::PathBuf>,
+    pub cwd: Option<std::path::PathBuf>,
+    pub unit: Option<String>,
+    /// `None`: not this user's to see.
+    pub open_files: Option<usize>,
+    pub sockets: Option<Vec<inspect::Socket>>,
+}
+
+#[derive(Debug, Default)]
+pub struct DetailsTab {
+    pub tree: bool,
+    pub properties: Properties,
 }
 
 /// The Services tab's state.
@@ -109,6 +130,8 @@ pub struct Confirm {
     pub how: How,
     /// For an app: how many windows ending it closes.
     pub windows: usize,
+    /// End it and everything it started.
+    pub tree: bool,
     /// This window's session depends on it: the compositor, or a
     /// process this window runs under. Ending it is allowed, and said.
     pub critical: bool,
@@ -143,6 +166,12 @@ pub enum Message {
     Tab(Tab),
     ServicesLoaded(Scope, Result<Vec<Unit>, String>),
     ServiceScope(Scope),
+    Tree(bool),
+    EndTree,
+    /// Lower (`true`) or raise the selected process's priority.
+    Nicer(bool),
+    Niced(Result<(), String>),
+    OpenLocation,
     ServiceFilter(services::Filter),
     ServiceQuery(String),
     SelectService(String),
@@ -200,6 +229,9 @@ pub struct App {
     pub history: History,
     pub resource: Resource,
     pub services: ServicesTab,
+    pub details: DetailsTab,
+    /// When the machine booted, seconds since the epoch.
+    pub boot: u64,
     pub machine: Machine,
     pub disk_rates: Vec<(String, DiskRate)>,
     pub net_rates: Vec<(String, NetRate)>,
@@ -313,6 +345,8 @@ impl App {
             history: History::default(),
             resource: Resource::Cpu,
             services: ServicesTab::default(),
+            details: DetailsTab { tree: true, ..DetailsTab::default() },
+            boot: 0,
             machine: Machine::default(),
             disk_rates: Vec::new(),
             net_rates: Vec::new(),
@@ -375,6 +409,10 @@ impl App {
         self.services.memory = memory;
     }
 
+    pub fn everything_open(&self) -> bool {
+        matches!(self.everything, Everything::Open(_))
+    }
+
     fn helper(&self) -> Option<zbus::Connection> {
         match &self.everything {
             Everything::Open(system) => Some(system.clone()),
@@ -425,6 +463,49 @@ impl App {
                 match result {
                     Ok(reading) => self.take(*reading),
                     Err(e) => self.notice = Some(e),
+                }
+            }
+            Message::Tree(on) => self.details.tree = on,
+            Message::EndTree => {
+                if let Some(mut c) = self.selected.and_then(|id| self.confirmation(id, How::Ask)) {
+                    c.tree = true;
+                    // Anything in the tree the session runs under makes
+                    // the whole tree critical.
+                    c.critical = model::tree_of(&self.table, c.id).iter().any(|i| self.critical.contains(&i.pid));
+                    self.confirm = Some(c);
+                }
+            }
+            Message::Nicer(lower) => {
+                let Some(id) = self.selected else { return Task::none() };
+                let Some(entry) = model::entries(&self.table).find(|e| e.id == id).cloned() else { return Task::none() };
+                let nice = (entry.nice + if lower { 5 } else { -5 }).clamp(-20, 19);
+                // Lowering one's own needs nothing; anything else goes
+                // through the helper, which asks.
+                if lower && entry.own {
+                    let result = signal::renice(id, nice).map_err(|e| e.to_string());
+                    return self.update(Message::Niced(result));
+                }
+                return Task::perform(
+                    async move {
+                        let system = zbus::Connection::system().await.map_err(|e| e.to_string())?;
+                        let proxy = helper::ProcManProxy::new(&system).await.map_err(|e| e.to_string())?;
+                        proxy.set_nice(id.pid, id.start, nice, true).await.map_err(helper_error)
+                    },
+                    Message::Niced,
+                );
+            }
+            Message::Niced(result) => match result {
+                Ok(()) => {
+                    if !self.reading {
+                        self.reading = true;
+                        return read(self.fs.clone(), self.helper());
+                    }
+                }
+                Err(e) => self.notice = Some(format!("Couldn't change its priority: {e}.")),
+            },
+            Message::OpenLocation => {
+                if let Some(exe) = self.details.properties.exe.clone() {
+                    show_in_folder(exe);
                 }
             }
             Message::Tab(tab) => {
@@ -488,7 +569,14 @@ impl App {
                 }
             }
             Message::Resource(resource) => self.resource = resource,
-            Message::Query(q) => self.view.query = q,
+            Message::Query(q) => {
+                // A lookup is answered at the next reading; until then a
+                // half-typed `port:80` must not filter on a stale set.
+                if self.view.query.trim() != q.trim() {
+                    self.view.only = None;
+                }
+                self.view.query = q;
+            }
             Message::Sort(column) => self.view.sort = self.view.sort.clicked(column),
             Message::Select(id) => self.selected = Some(id),
             Message::Toggle(id) => {
@@ -502,6 +590,21 @@ impl App {
             Message::Interval(d) => self.interval = d,
             Message::Ask(how) => self.confirm = self.selected.and_then(|id| self.confirmation(id, how)),
             Message::Cancelled => self.confirm = None,
+            Message::Confirmed if self.confirm.as_ref().is_some_and(|c| c.tree) => {
+                let c = self.confirm.take().expect("checked");
+                let mut refused = 0;
+                for id in model::tree_of(&self.table, c.id) {
+                    match signal::end(id, How::Ask) {
+                        Ok(()) | Err(signal::Refused::Gone) => {}
+                        Err(_) => refused += 1,
+                    }
+                }
+                self.notice = (refused > 0).then(|| format!("{refused} of the processes under {} weren't yours to end.", c.name));
+                if !self.reading {
+                    self.reading = true;
+                    return read(self.fs.clone(), self.helper());
+                }
+            }
             Message::Confirmed => {
                 if let Some(c) = self.confirm.take() {
                     match signal::end(c.id, c.how) {
@@ -602,7 +705,8 @@ impl App {
             }
             Key::Char('1') if ctrl => self.tab = Tab::Processes,
             Key::Char('2') if ctrl => self.tab = Tab::Performance,
-            Key::Char('3') if ctrl => return self.update(Message::Tab(Tab::Services)),
+            Key::Char('3') if ctrl => self.tab = Tab::Details,
+            Key::Char('4') if ctrl => return self.update(Message::Tab(Tab::Services)),
             Key::Char('p') if ctrl => self.paused = !self.paused,
             _ => {}
         }
@@ -613,12 +717,12 @@ impl App {
     fn confirmation(&self, id: Id, how: How) -> Option<Confirm> {
         if let Some(app) = self.table.apps.iter().find(|a| a.lead.id == id) {
             let critical = self.critical.contains(&id.pid);
-            return Some(Confirm { id, name: app.lead.name.clone(), command: app.lead.command.clone(), how, windows: app.windows, critical });
+            return Some(Confirm { id, name: app.lead.name.clone(), command: app.lead.command.clone(), how, windows: app.windows, critical, tree: false });
         }
         let entry =
             self.table.apps.iter().flat_map(|a| a.members.iter()).chain(self.table.background.iter()).find(|e| e.id == id)?;
         let critical = self.critical.contains(&id.pid);
-        Some(Confirm { id, name: entry.name.clone(), command: entry.command.clone(), how, windows: 0, critical })
+        Some(Confirm { id, name: entry.name.clone(), command: entry.command.clone(), how, windows: 0, critical, tree: false })
     }
 
     fn take(&mut self, reading: Reading) {
@@ -695,14 +799,63 @@ impl App {
         // name, in case this window was started some other way.
         self.critical = model::ancestry(&snapshot, std::process::id() as i32);
         self.critical.extend(snapshot.procs.iter().filter(|p| p.name == "Hyprland" && p.uid == self.me).map(|p| p.pid));
+        // A `port:`/`file:` search is answered again with every reading,
+        // since what holds a port changes.
+        let home = std::env::var_os("HOME").map(std::path::PathBuf::from).unwrap_or_default();
+        self.view.only = inspect::Lookup::parse(&self.view.query, &home).map(|lookup| {
+            let pids: Vec<i32> = snapshot.procs.iter().filter(|p| !p.kernel).map(|p| p.pid).collect();
+            inspect::who(std::path::Path::new("/proc"), &pids, &lookup)
+        });
+        // What the Details tab shows of the selected process.
+        self.details.properties = match self.selected {
+            Some(id) => {
+                let root = std::path::Path::new("/proc");
+                Properties {
+                    id: Some(id),
+                    exe: inspect::exe(root, id.pid),
+                    cwd: inspect::cwd(root, id.pid),
+                    unit: inspect::unit(root, id.pid),
+                    open_files: inspect::open(root, id.pid).map(|o| o.len()),
+                    sockets: inspect::sockets(root, id.pid),
+                }
+            }
+            None => Properties::default(),
+        };
         // A selection whose process ended goes with it.
         if let Some(id) = self.selected {
             if !snapshot.procs.iter().any(|p| p.pid == id.pid && p.start == id.start) {
                 self.selected = None;
             }
         }
+        self.boot = snapshot.boot;
         self.last = Some(snapshot);
     }
+}
+
+/// "Open file location": the program in Files (or whatever answers
+/// `org.freedesktop.FileManager1`), selected. Off the UI thread.
+fn show_in_folder(path: std::path::PathBuf) {
+    std::thread::spawn(move || {
+        let runtime = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+            Ok(r) => r,
+            Err(_) => return,
+        };
+        runtime.block_on(async move {
+            let Ok(session) = zbus::Connection::session().await else { return };
+            let uri = format!("file://{}", path.display());
+            let body = (vec![uri.as_str()], "");
+            let call = session.call_method(
+                Some("org.freedesktop.FileManager1"),
+                "/org/freedesktop/FileManager1",
+                Some("org.freedesktop.FileManager1"),
+                "ShowItems",
+                &body,
+            );
+            if let Err(e) = tokio::time::timeout(Duration::from_secs(5), call).await.map_err(|e| e.to_string()).and_then(|r| r.map_err(|e| e.to_string())) {
+                tracing::warn!("couldn't show the program's folder: {e}");
+            }
+        });
+    });
 }
 
 /// Focuses the window of process `pid` — Files' `hl.dsp.focus` call,
