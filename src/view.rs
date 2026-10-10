@@ -111,6 +111,7 @@ impl App {
         let body = match self.tab {
             Tab::Overview => self.overview_view(s),
             Tab::History => self.history_view(s),
+            Tab::Recorded => self.recorded_view(s),
             Tab::Processes => self.processes(s),
             Tab::Performance => self.performance(s),
             Tab::Details => self.details_view(s),
@@ -145,6 +146,7 @@ impl App {
             (Tab::Processes, "Processes"),
             (Tab::Performance, "Performance"),
             (Tab::History, "App history"),
+            (Tab::Recorded, "Recorded"),
             (Tab::Startup, "Startup"),
             (Tab::Users, "Users"),
             (Tab::Details, "Details"),

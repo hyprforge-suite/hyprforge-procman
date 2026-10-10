@@ -10,7 +10,7 @@ use crate::moment::{self, Moment};
 use crate::recorder::{Config, Recorder};
 use crate::users::Users;
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 /// Everything one screen draws.
 #[derive(Debug, Clone, Default)]
@@ -94,25 +94,13 @@ pub struct Replay {
 /// recorder's directory. A day the caller may not read is asked of the
 /// helper, which checks polkit and hands back an open file.
 pub fn open_journal(what: &str, directory: &Path) -> io::Result<Reader> {
-    let path = if journal::is_day(what) { directory.join(format!("{what}.hfr")) } else { PathBuf::from(what) };
-    match Reader::open(&path) {
-        Err(e) if e.kind() == io::ErrorKind::PermissionDenied && journal::is_day(what) => through_helper(what),
-        other => other,
+    if !journal::is_day(what) {
+        return Reader::open(Path::new(what));
     }
-}
-
-/// `OpenHistory` on the system bus. polkit asks for a password in
-/// whatever agent this session has — a text one in a TTY.
-fn through_helper(day: &str) -> io::Result<Reader> {
+    // polkit asks for a password in whatever agent this session has — a
+    // text one in a TTY.
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
-    let fd = runtime
-        .block_on(async {
-            let bus = zbus::Connection::system().await?;
-            let proxy = crate::helper::ProcManProxy::new(&bus).await?;
-            proxy.open_history(day, true).await
-        })
-        .map_err(|e| io::Error::new(io::ErrorKind::PermissionDenied, format!("the journal is root's, and the helper wouldn't open it: {e}")))?;
-    Reader::from_file(std::fs::File::from(std::os::fd::OwnedFd::from(fd)))
+    runtime.block_on(crate::recorded::open(what, directory, true)).map_err(|e| io::Error::new(io::ErrorKind::PermissionDenied, e))
 }
 
 impl Replay {
@@ -197,7 +185,7 @@ mod tests {
         Frame { at_ms, boot_id: "b".into(), snapshot: Snapshot { procs: vec![p], cpu: CpuTimes { total, ..CpuTimes::default() }, boot: 1, ..Snapshot::default() }, ..Frame::default() }
     }
 
-    fn journal(dir: &Path) -> PathBuf {
+    fn journal(dir: &Path) -> std::path::PathBuf {
         let path = dir.join("2026-10-10.hfr");
         let header = Header { hostname: "hogwarts".into(), cpus: 4, page_size: 4096, ticks_per_second: 100, interval_seconds: 10, command_lines: true };
         let mut w = Writer::open(&path, &header).unwrap();

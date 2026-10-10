@@ -10,6 +10,7 @@ mod details;
 mod overview;
 mod past;
 mod people;
+mod recorded_view;
 mod view;
 
 use hyprforge_keys::{Key, KeyPress};
@@ -51,6 +52,8 @@ pub enum Tab {
     Processes,
     Performance,
     History,
+    /// The recorder's journal: the whole machine, any moment of a day.
+    Recorded,
     Startup,
     Users,
     Details,
@@ -279,6 +282,7 @@ pub enum Message {
     Freeze(bool),
     Key(KeyPress),
     Dismiss,
+    Recorded(recorded_view::Msg),
 }
 
 pub struct App {
@@ -318,6 +322,7 @@ pub struct App {
     /// recorded, so nothing is written over it).
     pub app_history: Result<hyprforge_procman::app_history::History, String>,
     pub history_days: usize,
+    pub recorded: recorded_view::RecordedTab,
     /// Installed apps, for showing a window class by its app's name.
     pub apps_db: Option<hyprforge_mime::MimeDb>,
     history_saved: std::time::Instant,
@@ -485,6 +490,7 @@ impl App {
             resource: Resource::Cpu,
             app_history: hyprforge_procman::app_history::load(&hyprforge_procman::app_history::path()),
             history_days: 1,
+            recorded: recorded_view::RecordedTab::default(),
             apps_db: None,
             history_saved: std::time::Instant::now(),
             advanced: false,
@@ -749,6 +755,7 @@ impl App {
                     Tab::Services => return self.load_services(),
                     Tab::Startup => return Task::perform(load_startup(), |d| Message::StartupLoaded(Box::new(d))),
                     Tab::Users => return Task::perform(sessions::list(), Message::SessionsLoaded),
+                    Tab::Recorded => return self.recorded_opened(),
                     _ => {}
                 }
             }
@@ -882,6 +889,7 @@ impl App {
                     }
                 }
             }
+            Message::Recorded(msg) => return self.recorded_update(msg),
             Message::ShowEverything => {
                 self.everything = Everything::Asking;
                 return Task::perform(unlock(), Message::Unlocked);
@@ -1365,5 +1373,17 @@ mod render {
         app.services.selected = Some("NetworkManager.service".into());
         app.services.journal = services::journal(Scope::System, "NetworkManager.service", 30);
         draw(&app, "services", &dir);
+    }
+
+    #[test]
+    #[ignore = "draws the journal at $JOURNAL to $SHOTS"]
+    fn render_recorded() {
+        let dir = std::path::PathBuf::from(std::env::var("SHOTS").expect("SHOTS"));
+        let journal = std::path::PathBuf::from(std::env::var("JOURNAL").expect("JOURNAL"));
+        hyprforge_ui::theme::init(hyprforge_appearance::look::resolve());
+        let (mut app, _) = App::new();
+        app.tab = Tab::Recorded;
+        app.recorded = recorded_view::RecordedTab::read_now(&journal, 0.6);
+        draw_sized(&app, "recorded", &dir, 1500.0);
     }
 }
