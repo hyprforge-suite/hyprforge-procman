@@ -23,7 +23,7 @@ pub const NAME_PORTION: u16 = 6;
 pub const CPU_W: f32 = 84.0;
 pub const MEM_W: f32 = 104.0;
 pub const DISK_W: f32 = 104.0;
-pub const GPU_W: f32 = 140.0;
+pub const GPU_W: f32 = 170.0;
 pub const PID_W: f32 = 84.0;
 pub const USER_W: f32 = 120.0;
 
@@ -75,14 +75,25 @@ pub fn rate(per_second: Option<f64>) -> String {
     }
 }
 
-/// The GPU column: `AMD 5.0 %`, `AMD · NVIDIA`, or blank.
+/// The GPU column: `AMD 5.0 %`, `AMD 0.4 % · NVIDIA`, or blank. The load
+/// is measured from fdinfo, which NVIDIA's driver does not write, so it
+/// sits beside the first card that is not NVIDIA's — never after a list,
+/// where it would read as the whole list's.
 pub fn gpu_cell((load, cards): &(Option<f32>, Vec<String>)) -> String {
-    match (cards.is_empty(), load) {
-        (true, _) => String::new(),
-        (false, Some(l)) if cards.len() == 1 => format!("{} {}", cards[0], percent(Some(*l))),
-        (false, Some(l)) => format!("{} {}", cards.join(" · "), percent(Some(*l))),
-        (false, None) => cards.join(" · "),
+    let mut parts: Vec<String> = Vec::new();
+    let mut placed = false;
+    let mut ordered: Vec<&String> = cards.iter().filter(|c| *c != "NVIDIA").collect();
+    ordered.extend(cards.iter().filter(|c| *c == "NVIDIA"));
+    for card in ordered {
+        match load {
+            Some(l) if !placed && card != "NVIDIA" => {
+                parts.push(format!("{card} {}", percent(Some(*l))));
+                placed = true;
+            }
+            _ => parts.push(card.clone()),
+        }
     }
+    parts.join(" · ")
 }
 
 /// A share, or a dash while there is only one reading to go on.
@@ -840,6 +851,14 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_gpu_load_sits_beside_the_card_it_was_measured_on() {
+        let cards = |c: &[&str]| c.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(gpu_cell(&(Some(0.4), cards(&["AMD", "NVIDIA"]))), "AMD 0.4 % · NVIDIA");
+        assert_eq!(gpu_cell(&(None, cards(&["NVIDIA"]))), "NVIDIA");
+        assert_eq!(gpu_cell(&(None, Vec::new())), "");
+    }
 
     #[test]
     fn sizes_read_the_way_task_managers_write_them() {
