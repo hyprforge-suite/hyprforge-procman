@@ -135,6 +135,23 @@ pub fn table(
     Table { apps, background }
 }
 
+/// `pid` and every process above it, up to the first that has no
+/// parent in the snapshot. For this window that is the session it runs
+/// in — the compositor, the session manager, the user's systemd —
+/// which is what ending or freezing must not take away from under it.
+pub fn ancestry(snapshot: &Snapshot, pid: i32) -> HashSet<i32> {
+    let parent: HashMap<i32, i32> = snapshot.procs.iter().map(|p| (p.pid, p.ppid)).collect();
+    let mut out = HashSet::new();
+    let mut at = pid;
+    while at > 0 && out.insert(at) {
+        match parent.get(&at) {
+            Some(&up) => at = up,
+            None => break,
+        }
+    }
+    out
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Column {
     Name,
@@ -404,6 +421,17 @@ mod tests {
         assert_eq!(s.clicked(Column::Cpu), Sort { column: Column::Cpu, descending: false });
         assert_eq!(s.clicked(Column::Name), Sort { column: Column::Name, descending: false });
         assert_eq!(s.clicked(Column::Memory), Sort { column: Column::Memory, descending: true });
+    }
+
+    #[test]
+    fn ancestry_climbs_to_the_top_and_stops_at_a_loop() {
+        let snapshot = Snapshot {
+            procs: vec![proc(1, 0, "systemd", 0), proc(50, 1, "Hyprland", 1000), proc(60, 50, "procman", 1000), proc(70, 1, "other", 1000)],
+            ..Snapshot::default()
+        };
+        assert_eq!(ancestry(&snapshot, 60), HashSet::from([60, 50, 1]));
+        let looped = Snapshot { procs: vec![proc(5, 6, "a", 0), proc(6, 5, "b", 0)], ..Snapshot::default() };
+        assert_eq!(ancestry(&looped, 5), HashSet::from([5, 6]));
     }
 
     #[test]

@@ -21,6 +21,7 @@ path = "src/main.rs"
 # suite's CLAUDE.md on `[patch.crates-io]`.
 hyprforge-ui = "0.1"
 hyprforge-look = "0.1"
+hyprforge-keys = "0.1"
 hyprforge-appearance = "0.1"
 # `hyprctl clients -j`, which names the process behind each window, with
 # the suite's bound on how long another program may take to answer.

@@ -59,6 +59,13 @@ pub fn end(id: Id, how: How) -> Result<(), Refused> {
     )
 }
 
+/// Freezes `id` (SIGSTOP) or lets it run again (SIGCONT). A frozen
+/// process keeps everything it has and uses no CPU — a way to stop
+/// something busy without losing its work, which ending would.
+pub fn freeze(id: Id, frozen: bool) -> Result<(), Refused> {
+    send(id, if frozen { libc::SIGSTOP } else { libc::SIGCONT })
+}
+
 /// The signal `signal` to `id`, through a pidfd. Signal 0 sends nothing
 /// and only asks whether sending would be allowed.
 fn send(id: Id, signal: i32) -> Result<(), Refused> {
@@ -117,6 +124,26 @@ mod tests {
         let stale = Id { start: id.start.wrapping_sub(1), ..id };
         assert_eq!(end(stale, How::Force), Err(Refused::Gone));
         assert!(child.try_wait().unwrap().is_none(), "still running");
+        child.kill().unwrap();
+        child.wait().unwrap();
+    }
+
+    #[test]
+    fn a_frozen_process_stops_and_resumes() {
+        let (mut child, id) = sleeper();
+        freeze(id, true).unwrap();
+        let state = || std::fs::read_to_string(format!("/proc/{}/stat", id.pid)).unwrap();
+        let stopped = (0..50).any(|_| {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            state().contains(") T ")
+        });
+        assert!(stopped, "stopped");
+        freeze(id, false).unwrap();
+        let running = (0..50).any(|_| {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            !state().contains(") T ")
+        });
+        assert!(running, "resumed");
         child.kill().unwrap();
         child.wait().unwrap();
     }
