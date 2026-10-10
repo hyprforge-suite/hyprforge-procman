@@ -9,7 +9,9 @@
 
 pub mod app_history;
 pub mod gpu;
+#[cfg(feature = "gui")]
 pub mod graph;
+#[cfg(feature = "dbus")]
 pub mod helper;
 pub mod inspect;
 pub mod history;
@@ -18,9 +20,12 @@ pub mod model;
 pub mod nvidia;
 pub mod proc;
 pub mod sample;
+#[cfg(feature = "dbus")]
 pub mod services;
+#[cfg(feature = "dbus")]
 pub mod sessions;
 pub mod signal;
+#[cfg(feature = "desktop")]
 pub mod startup;
 pub mod users;
 pub mod windows;

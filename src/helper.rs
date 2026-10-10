@@ -91,16 +91,7 @@ impl Authority for Polkit {
     }
 }
 
-/// What the helper reads for one process that the window cannot.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, zbus::zvariant::Type)]
-pub struct Usage {
-    pub pid: i32,
-    pub start: u64,
-    /// Bytes it caused to be read from and written to storage.
-    pub read_bytes: u64,
-    pub write_bytes: u64,
-    pub open_files: u32,
-}
+pub use crate::proc::Usage;
 
 /// The service. `last_call` is when anything last asked, for the
 /// binary's idle exit.

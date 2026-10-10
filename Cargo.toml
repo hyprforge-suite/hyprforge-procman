@@ -12,37 +12,53 @@ categories = ["os::linux-apis", "gui"]
 # and crates.io is where the suite's libraries live.
 publish = false
 
+# Four programs, one crate (a package's binaries must live in one crate
+# directory: the suite's CLAUDE.md, "a binary cannot be fetched"), and
+# features so that each links only what it uses — above all the root
+# recorder, which must not carry a GUI toolkit or a D-Bus stack into a
+# process that runs as root all day.
+[features]
+default = ["gui"]
+# The window.
+gui = ["dbus", "desktop", "dep:iced", "dep:hyprforge-ui", "dep:hyprforge-look", "dep:hyprforge-keys", "dep:hyprforge-appearance"]
+# The helper's service and its clients; systemd and logind.
+dbus = ["dep:zbus", "dep:tokio"]
+# What only a desktop session has: Hyprland's startup programs, app names.
+desktop = ["dep:hyprforge-session", "dep:hyprforge-mime"]
+# The terminal UI.
+tui = ["dep:ratatui", "dep:crossterm"]
+
 [[bin]]
 name = "hyprforge-procman"
 path = "src/main.rs"
+required-features = ["gui"]
 
 # The privileged half: a system D-Bus service that runs as root, checks
-# polkit for every call, and takes only typed arguments. In this crate
-# because a package's binaries must live in one crate directory (the
-# suite's CLAUDE.md: a binary cannot be fetched).
+# polkit for every call, and takes only typed arguments.
 [[bin]]
 name = "hyprforge-procman-helper"
 path = "src/bin/helper.rs"
+required-features = ["dbus"]
 
 [dependencies]
 # By crates.io version, as every component names its siblings — see the
 # suite's CLAUDE.md on `[patch.crates-io]`.
-hyprforge-ui = "0.1"
-hyprforge-look = "0.1"
-hyprforge-keys = "0.1"
-hyprforge-appearance = "0.1"
-# `hyprctl clients -j`, which names the process behind each window, with
-# the suite's bound on how long another program may take to answer.
+hyprforge-ui = { version = "0.1", optional = true }
+hyprforge-look = { version = "0.1", optional = true }
+hyprforge-keys = { version = "0.1", optional = true }
+hyprforge-appearance = { version = "0.1", optional = true }
+# `hyprctl clients -j`, and every other program waited on, with the
+# suite's bound on how long another program may take to answer.
 hyprforge-process = "0.1"
 # Hyprland's startup programs, read from the file Settings' Session page
 # keeps — through its own module, which owns that file.
-hyprforge-session = "0.1"
+hyprforge-session = { version = "0.1", optional = true }
 hyprforge-paths = "0.1"
 # App names for window classes: on Wayland a class is the app id, which
 # is the launcher entry's file name — and the entry has the name to show.
-hyprforge-mime = "0.1"
+hyprforge-mime = { version = "0.1", optional = true }
 # `canvas` for the history graphs, on top of the suite's base set.
-iced = { version = "0.14", default-features = false, features = [
+iced = { version = "0.14", optional = true, default-features = false, features = [
     "wgpu",
     "tiny-skia",
     "crisp",
@@ -53,7 +69,7 @@ iced = { version = "0.14", default-features = false, features = [
     "tokio",
     "canvas",
 ] }
-tokio = { version = "1.53", features = ["rt-multi-thread", "macros", "sync", "time"] }
+tokio = { version = "1.53", optional = true, features = ["rt-multi-thread", "macros", "sync", "time"] }
 # getpwuid_r for user names, and pidfd_open / pidfd_send_signal, so a
 # signal reaches the process that was chosen and never one that reused
 # its number.
@@ -61,12 +77,15 @@ libc = "0.2"
 # When a process started, in the reader's own time zone.
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 # The helper's service and the window's client of it, on the system bus.
-zbus = { version = "5.18", default-features = false, features = ["tokio"] }
+zbus = { version = "5.18", optional = true, default-features = false, features = ["tokio"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "1.1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# The terminal UI.
+ratatui = { version = "0.30", optional = true }
+crossterm = { version = "0.29", optional = true }
 
 [dev-dependencies]
 tempfile = "3"

@@ -77,6 +77,7 @@ pub fn save(path: &Path, history: &History) -> Result<(), String> {
     hyprforge_paths::write_atomic(path, &text).map_err(|e| e.to_string())
 }
 
+#[cfg(feature = "desktop")]
 /// What to call a window class: its launcher entry's `Name=` when one is
 /// installed under that id (exactly, or ignoring case), else the class.
 pub fn app_name(db: &hyprforge_mime::MimeDb, class: &str) -> String {
