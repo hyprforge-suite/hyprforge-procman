@@ -14,6 +14,7 @@ pub mod machine;
 pub mod model;
 pub mod proc;
 pub mod sample;
+pub mod services;
 pub mod signal;
 pub mod users;
 pub mod windows;

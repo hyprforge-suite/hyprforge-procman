@@ -12,6 +12,7 @@ use hyprforge_procman::graph::Graph;
 use hyprforge_procman::history::Series;
 use hyprforge_procman::model::{self, Column, Entry, Line};
 use hyprforge_procman::sample::Id;
+use hyprforge_procman::services::{self, Action, Scope};
 use hyprforge_procman::signal::How;
 use hyprforge_ui::theme::{self, spacing, surface, FontScale};
 use hyprforge_ui::{density, glyph, widgets};
@@ -73,12 +74,16 @@ impl App {
         let body = match self.tab {
             Tab::Processes => self.processes(s),
             Tab::Performance => self.performance(s),
+            Tab::Services => self.services_view(s),
         };
         let page = column![self.header(s), widgets::divider(), body, widgets::divider(), self.status(s)];
         let page = container(page).width(Length::Fill).height(Length::Fill).style(|_t: &iced::Theme| container::Style {
             background: Some(Background::Color(surface::root())),
             ..container::Style::default()
         });
+        if let Some((scope, name, action)) = &self.services.confirm {
+            return stack![page, widgets::scrim(self.service_confirm_card(*scope, name, *action), Some(Message::ServiceCancelled))].into();
+        }
         match &self.confirm {
             Some(c) => stack![page, widgets::scrim(self.confirm_card(c), Some(Message::Cancelled))].into(),
             None => page.into(),
@@ -86,8 +91,14 @@ impl App {
     }
 
     fn header(&self, s: FontScale) -> Element<'_, Message> {
-        let tabs = widgets::panel_tabs(&[(Tab::Processes, "Processes"), (Tab::Performance, "Performance")], &self.tab, Message::Tab, s);
+        let tabs = widgets::panel_tabs(&[(Tab::Processes, "Processes"), (Tab::Performance, "Performance"), (Tab::Services, "Services")], &self.tab, Message::Tab, s);
         let mut bar = row![tabs, Space::new().width(Length::Fill)].spacing(spacing::MD).align_y(Alignment::Center);
+        if self.tab == Tab::Services {
+            bar = bar.push(
+                container(widgets::search_field("Search services", &self.services.query, Message::ServiceQuery, None, None, s))
+                    .width(Length::Fixed(s.apply(320.0))),
+            );
+        }
         if self.tab == Tab::Processes {
             bar = bar.push(
                 container(widgets::search_field("Search name, command or PID", &self.view.query, Message::Query, None, Some(crate::search_id()), s))
@@ -315,6 +326,186 @@ impl App {
                 Space::new().width(Length::Fill),
                 widgets::secondary_button("Cancel").on_press(Message::Cancelled),
                 widgets::danger_button(verb, Message::Confirmed),
+            ]
+            .spacing(spacing::SM),
+        ]
+        .spacing(spacing::MD);
+        container(card)
+            .padding(spacing::LG)
+            .width(Length::Fixed(s.apply(460.0)))
+            .style(|_t: &iced::Theme| container::Style {
+                background: Some(Background::Color(surface::card())),
+                border: Border { radius: density::card_radius().into(), width: 1.0, color: surface::card_border() },
+                ..container::Style::default()
+            })
+            .into()
+    }
+
+    fn services_view(&self, s: FontScale) -> Element<'_, Message> {
+        let tab = &self.services;
+        let scope = tab.scope();
+        let controls = row![
+            widgets::segmented_choice(&[Scope::System, Scope::User], Some(&scope), |s| match s {
+                Scope::System => "This computer".to_string(),
+                Scope::User => "Your account".to_string(),
+            }, Message::ServiceScope, s),
+            widgets::segmented_choice(
+                &[services::Filter::Relevant, services::Filter::Running, services::Filter::Failed, services::Filter::All],
+                Some(&tab.filter),
+                |f| match f {
+                    services::Filter::Relevant => "Enabled or running".to_string(),
+                    services::Filter::Running => "Running".to_string(),
+                    services::Filter::Failed => "Failed".to_string(),
+                    services::Filter::All => "All".to_string(),
+                },
+                Message::ServiceFilter,
+                s,
+            ),
+        ]
+        .spacing(spacing::MD)
+        .padding([spacing::SM, spacing::MD]);
+
+        let units = tab.units.get(&scope).map(Vec::as_slice).unwrap_or(&[]);
+        let shown = services::rows(units, tab.filter, &tab.query);
+        let head = |label: &'static str, width: Length, right: bool| {
+            container(widgets::meta_text(label, density::META_TEXT_BASE, s))
+                .width(width)
+                .padding([spacing::XS, spacing::SM])
+                .align_x(if right { Alignment::End } else { Alignment::Start })
+        };
+        let heads = row![
+            head("Service", Length::FillPortion(4), false),
+            head("Status", Length::Fixed(s.apply(130.0)), false),
+            head("At boot", Length::Fixed(s.apply(110.0)), false),
+            head("CPU", Length::Fixed(s.apply(CPU_W)), true),
+            head("Memory", Length::Fixed(s.apply(MEM_W)), true),
+            head("Description", Length::FillPortion(5), false),
+        ]
+        .padding([0.0, spacing::SM]);
+
+        let mut list = column![].spacing(1.0).padding([spacing::XS, spacing::SM]);
+        if let Some(e) = &tab.error {
+            list = list.push(container(widgets::hint_text(e.clone(), s)).padding(spacing::MD));
+        } else if shown.is_empty() {
+            let why = if units.is_empty() { "Reading systemd…" } else { "No service matches." };
+            list = list.push(container(widgets::hint_text(why, s)).padding(spacing::MD));
+        }
+        for u in shown {
+            let selected = tab.selected.as_deref() == Some(u.name.as_str());
+            let (tint, status) = match u.active.as_str() {
+                "active" => (widgets::Tint::Success, if u.sub == "running" { "Running".to_string() } else { format!("Active ({})", u.sub) }),
+                "failed" => (widgets::Tint::Error, "Failed".to_string()),
+                "activating" => (widgets::Tint::Warning, "Starting".to_string()),
+                "deactivating" => (widgets::Tint::Warning, "Stopping".to_string()),
+                _ => (widgets::Tint::Dim, "Stopped".to_string()),
+            };
+            let boot = match u.file.as_deref() {
+                Some("enabled") | Some("enabled-runtime") => "Starts",
+                Some("disabled") => "Off",
+                Some("static") | Some("indirect") => "When needed",
+                Some("masked") | Some("masked-runtime") => "Masked",
+                Some("alias") => "Alias",
+                Some("generated") | Some("transient") | None => "—",
+                Some(_) => "—",
+            };
+            let cpu = tab.cpu.get(&u.name).copied();
+            let memory = tab.memory.get(&u.name).copied();
+            let mono = |text: String, width: f32| {
+                container(widgets::scaled_text(text, density::ROW_TEXT_BASE, s).font(theme::mono_font()))
+                    .width(Length::Fixed(s.apply(width)))
+                    .padding([0.0, spacing::SM])
+                    .align_x(Alignment::End)
+            };
+            let line = row![
+                container(widgets::scaled_text(u.name.trim_end_matches(".service").to_string(), density::ROW_TEXT_BASE, s))
+                    .width(Length::FillPortion(4))
+                    .padding([0.0, spacing::SM]),
+                container(row![widgets::status_dot(tint, s), widgets::scaled_text(status, density::ROW_TEXT_BASE, s)].spacing(spacing::SM).align_y(Alignment::Center))
+                    .width(Length::Fixed(s.apply(130.0)))
+                    .padding([0.0, spacing::SM]),
+                container(widgets::meta_text(boot, density::ROW_TEXT_BASE, s)).width(Length::Fixed(s.apply(110.0))).padding([0.0, spacing::SM]),
+                mono(if u.active == "active" { percent(cpu) } else { String::new() }, CPU_W),
+                mono(memory.filter(|_| u.active == "active").map(bytes).unwrap_or_default(), MEM_W),
+                container(widgets::clamped_text(u.description.clone(), 1).size(s.apply(density::META_TEXT_BASE)).width(Length::Fill).color(theme::text_dim()))
+                    .width(Length::FillPortion(5))
+                    .padding([0.0, spacing::SM]),
+            ]
+            .align_y(Alignment::Center);
+            list = list.push(
+                button(line)
+                    .padding([spacing::XS, 0.0])
+                    .width(Length::Fill)
+                    .on_press(Message::SelectService(u.name.clone()))
+                    .style(move |t, status| widgets::selectable_row_style(t, status, selected)),
+            );
+        }
+        let mut page = column![controls, widgets::divider(), heads, widgets::divider(), scrollable(list).height(Length::FillPortion(3))];
+        if let Some(unit) = tab.selected.as_ref().and_then(|n| units.iter().find(|u| &u.name == n)) {
+            page = page.push(widgets::divider()).push(self.service_detail(unit, s));
+        }
+        page.height(Length::Fill).into()
+    }
+
+    fn service_detail<'a>(&'a self, unit: &'a services::Unit, s: FontScale) -> Element<'a, Message> {
+        let mut actions = row![].spacing(spacing::SM);
+        for action in Action::offered(unit) {
+            let button = if matches!(action, Action::Start | Action::Restart) {
+                widgets::primary_button(action.label())
+            } else {
+                widgets::secondary_button(action.label())
+            };
+            actions = actions.push(button.on_press_maybe((!self.services.busy).then_some(Message::ServiceAct(action))));
+        }
+        let title = column![
+            widgets::scaled_text(unit.name.clone(), 18.0, s),
+            widgets::meta_text(if unit.description.is_empty() { "No description".to_string() } else { unit.description.clone() }, density::META_TEXT_BASE, s),
+        ]
+        .spacing(spacing::XS);
+        let journal: Element<'_, Message> = match &self.services.journal {
+            Ok(lines) if lines.is_empty() => widgets::hint_text("Nothing in the journal for this service that you can read.", s).into(),
+            Ok(lines) => scrollable(
+                column(lines.iter().map(|l| widgets::scaled_text(l.clone(), density::META_TEXT_BASE, s).font(theme::mono_font()).color(theme::text_dim()).into()))
+                    .spacing(2.0),
+            )
+            .anchor_bottom()
+            .height(Length::Fill)
+            .into(),
+            Err(e) => widgets::hint_text(e.clone(), s).into(),
+        };
+        let journal = container(journal).padding(spacing::SM).width(Length::Fill).height(Length::Fill).style(|_t: &iced::Theme| container::Style {
+            background: Some(Background::Color(surface::card())),
+            border: Border { radius: density::inner_radius().into(), width: 1.0, color: surface::card_border() },
+            ..container::Style::default()
+        });
+        container(
+            column![row![title, Space::new().width(Length::Fill), actions].align_y(Alignment::Center), widgets::section_label("Recent log", s), journal]
+                .spacing(spacing::SM),
+        )
+        .padding(spacing::MD)
+        .height(Length::FillPortion(2))
+        .into()
+    }
+
+    fn service_confirm_card(&self, scope: Scope, name: &str, action: Action) -> Element<'_, Message> {
+        let s = scale();
+        let short = name.trim_end_matches(".service").to_string();
+        let (title, what) = match action {
+            Action::Stop => (format!("Stop {short}?"), "Whatever depends on it stops working until it is started again — stopping a network service ends the connection."),
+            Action::Disable => (format!("Stop {short} starting at boot?"), "It keeps running now, and won't start on its own next time."),
+            _ => (format!("Mask {short}?"), "Nothing can start it, not even another service that needs it, until it is unmasked."),
+        };
+        let note = match scope {
+            Scope::System => "This is the computer's, so you'll be asked for your password.",
+            Scope::User => "This is one of your own; nothing will be asked.",
+        };
+        let card = column![
+            widgets::scaled_text(title, 18.0, s),
+            widgets::meta_text(what, density::ROW_TEXT_BASE, s),
+            widgets::hint_text(note, s),
+            row![
+                Space::new().width(Length::Fill),
+                widgets::secondary_button("Cancel").on_press(Message::ServiceCancelled),
+                widgets::danger_button(action.label(), Message::ServiceConfirmed),
             ]
             .spacing(spacing::SM),
         ]

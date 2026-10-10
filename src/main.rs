@@ -15,6 +15,8 @@ use hyprforge_procman::machine::{self, DiskRate, Machine, NetRate, SysFs};
 use hyprforge_procman::model::{self, Column, Table, View};
 use hyprforge_procman::proc::{ProcFs, Snapshot};
 use hyprforge_procman::sample::{self, Id};
+use hyprforge_procman::services::{self, Action, Dbus, Scope, Systemd, Unit};
+use std::collections::HashMap;
 use hyprforge_procman::signal::{self, How};
 use hyprforge_procman::users::Users;
 use hyprforge_procman::windows::{self, Window};
@@ -39,6 +41,57 @@ pub enum Resource {
 pub enum Tab {
     Processes,
     Performance,
+    Services,
+}
+
+/// The Services tab's state.
+#[derive(Debug)]
+pub struct ServicesTab {
+    pub scope: Option<Scope>,
+    pub units: HashMap<Scope, Vec<Unit>>,
+    pub error: Option<String>,
+    pub filter: services::Filter,
+    pub query: String,
+    pub selected: Option<String>,
+    pub journal: Result<Vec<String>, String>,
+    /// Running units' cgroups, refreshed with the list.
+    cgroups: HashMap<String, std::path::PathBuf>,
+    /// Last counters, for a CPU rate; and the rate, by unit.
+    counters: HashMap<String, (services::Counters, std::time::Instant)>,
+    pub cpu: HashMap<String, f32>,
+    pub memory: HashMap<String, u64>,
+    /// Refreshes since the list was read.
+    age: u32,
+    /// A stop or disable waiting on "are you sure".
+    pub confirm: Option<(Scope, String, Action)>,
+    pub busy: bool,
+}
+
+impl Default for ServicesTab {
+    fn default() -> ServicesTab {
+        ServicesTab {
+            scope: None,
+            units: HashMap::new(),
+            error: None,
+            filter: services::Filter::default(),
+            query: String::new(),
+            selected: None,
+            journal: Ok(Vec::new()),
+            cgroups: HashMap::new(),
+            counters: HashMap::new(),
+            cpu: HashMap::new(),
+            memory: HashMap::new(),
+            age: 0,
+            confirm: None,
+            busy: false,
+        }
+    }
+}
+
+impl ServicesTab {
+    pub fn scope(&self) -> Scope {
+        self.scope.unwrap_or(Scope::System)
+    }
 }
 
 /// How often to read. Pausing is its own state, not an interval: it is
@@ -88,6 +141,16 @@ pub enum Message {
     Tick,
     Read(Result<Box<Reading>, String>),
     Tab(Tab),
+    ServicesLoaded(Scope, Result<Vec<Unit>, String>),
+    ServiceScope(Scope),
+    ServiceFilter(services::Filter),
+    ServiceQuery(String),
+    SelectService(String),
+    ServiceAct(Action),
+    ServiceConfirmed,
+    ServiceCancelled,
+    ServiceActed(Result<(), String>),
+    Journal(String, Result<Vec<String>, String>),
     Resource(Resource),
     Query(String),
     Sort(Column),
@@ -136,6 +199,7 @@ pub struct App {
     pub interval: Duration,
     pub history: History,
     pub resource: Resource,
+    pub services: ServicesTab,
     pub machine: Machine,
     pub disk_rates: Vec<(String, DiskRate)>,
     pub net_rates: Vec<(String, NetRate)>,
@@ -248,6 +312,7 @@ impl App {
             interval: INTERVALS[1],
             history: History::default(),
             resource: Resource::Cpu,
+            services: ServicesTab::default(),
             machine: Machine::default(),
             disk_rates: Vec::new(),
             net_rates: Vec::new(),
@@ -256,6 +321,58 @@ impl App {
             reading: true,
         };
         (app, read(fs, None))
+    }
+
+    fn load_services(&mut self) -> Task<Message> {
+        let scope = self.services.scope();
+        self.services.age = 0;
+        self.services.cgroups = services::cgroups(std::path::Path::new("/sys/fs/cgroup"));
+        Task::perform(async move { (scope, Dbus.list(scope).await) }, |(scope, result)| Message::ServicesLoaded(scope, result))
+    }
+
+    fn load_journal(&self, name: String) -> Task<Message> {
+        let scope = self.services.scope();
+        Task::perform(
+            async move {
+                let lines = tokio::task::spawn_blocking({
+                    let name = name.clone();
+                    move || services::journal(scope, &name, 60)
+                })
+                .await
+                .map_err(|e| e.to_string())
+                .and_then(|r| r);
+                (name, lines)
+            },
+            |(name, lines)| Message::Journal(name, lines),
+        )
+    }
+
+    fn service_act(&mut self, scope: Scope, name: String, action: Action) -> Task<Message> {
+        self.services.busy = true;
+        Task::perform(async move { Dbus.act(scope, name, action).await }, Message::ServiceActed)
+    }
+
+    /// Each running unit's CPU share and memory, from its cgroup.
+    fn service_counters(&mut self) {
+        let now = std::time::Instant::now();
+        let cores = self.history.cores.len().max(1) as f32;
+        let mut cpu = HashMap::new();
+        let mut memory = HashMap::new();
+        for (name, path) in &self.services.cgroups {
+            let Some(c) = services::counters(path) else { continue };
+            if let Some((before, at)) = self.services.counters.get(name) {
+                let seconds = now.duration_since(*at).as_secs_f32();
+                if seconds > 0.0 {
+                    // A share of the whole machine, as the Processes tab's.
+                    let used = c.cpu_usec.saturating_sub(before.cpu_usec) as f32 / 1e6;
+                    cpu.insert(name.clone(), (used / seconds / cores * 100.0).min(100.0));
+                }
+            }
+            memory.insert(name.clone(), c.memory);
+            self.services.counters.insert(name.clone(), (c, now));
+        }
+        self.services.cpu = cpu;
+        self.services.memory = memory;
     }
 
     fn helper(&self) -> Option<zbus::Connection> {
@@ -281,6 +398,21 @@ impl App {
     fn update(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::Tick => {
+                if self.tab == Tab::Services {
+                    self.service_counters();
+                    self.services.age += 1;
+                    // The list itself every few refreshes: units change
+                    // state rarely, and a full list is a D-Bus round trip.
+                    if self.services.age >= 5 && !self.services.busy {
+                        self.services.busy = true;
+                        let list = self.load_services();
+                        if !self.reading {
+                            self.reading = true;
+                            return Task::batch([list, read(self.fs.clone(), self.helper())]);
+                        }
+                        return list;
+                    }
+                }
                 // A read still running is not doubled up behind: a slow
                 // machine gets fewer refreshes, not a queue of them.
                 if !self.reading {
@@ -295,7 +427,66 @@ impl App {
                     Err(e) => self.notice = Some(e),
                 }
             }
-            Message::Tab(tab) => self.tab = tab,
+            Message::Tab(tab) => {
+                self.tab = tab;
+                if tab == Tab::Services {
+                    return self.load_services();
+                }
+            }
+            Message::ServicesLoaded(scope, result) => {
+                self.services.busy = false;
+                match result {
+                    Ok(units) => {
+                        self.services.units.insert(scope, units);
+                        self.services.error = None;
+                    }
+                    Err(e) => self.services.error = Some(e),
+                }
+            }
+            Message::ServiceScope(scope) => {
+                self.services.scope = Some(scope);
+                self.services.selected = None;
+                return self.load_services();
+            }
+            Message::ServiceFilter(f) => self.services.filter = f,
+            Message::ServiceQuery(q) => self.services.query = q,
+            Message::SelectService(name) => {
+                self.services.selected = Some(name.clone());
+                return self.load_journal(name);
+            }
+            Message::ServiceAct(action) => {
+                let Some(name) = self.services.selected.clone() else { return Task::none() };
+                let scope = self.services.scope();
+                // Stopping or switching off is asked about first: stopping
+                // NetworkManager is how a Wi-Fi connection ends.
+                if matches!(action, Action::Stop | Action::Disable | Action::Mask) {
+                    self.services.confirm = Some((scope, name, action));
+                    return Task::none();
+                }
+                return self.service_act(scope, name, action);
+            }
+            Message::ServiceConfirmed => {
+                if let Some((scope, name, action)) = self.services.confirm.take() {
+                    return self.service_act(scope, name, action);
+                }
+            }
+            Message::ServiceCancelled => self.services.confirm = None,
+            Message::ServiceActed(result) => {
+                self.services.busy = false;
+                if let Err(e) = result {
+                    self.notice = Some(format!("That didn't work: {e}."));
+                }
+                let mut tasks = vec![self.load_services()];
+                if let Some(name) = self.services.selected.clone() {
+                    tasks.push(self.load_journal(name));
+                }
+                return Task::batch(tasks);
+            }
+            Message::Journal(name, lines) => {
+                if self.services.selected.as_deref() == Some(name.as_str()) {
+                    self.services.journal = lines;
+                }
+            }
             Message::Resource(resource) => self.resource = resource,
             Message::Query(q) => self.view.query = q,
             Message::Sort(column) => self.view.sort = self.view.sort.clicked(column),
@@ -403,6 +594,7 @@ impl App {
         let ctrl = press.mods.ctrl;
         match press.key {
             Key::Escape if self.confirm.is_some() => self.confirm = None,
+            Key::Escape if self.services.confirm.is_some() => self.services.confirm = None,
             Key::Enter if self.confirm.is_some() => return self.update(Message::Confirmed),
             Key::Char('f') if ctrl => return iced::widget::operation::focus(search_id()),
             Key::Delete if self.selected.is_some() && self.confirm.is_none() => {
@@ -410,6 +602,7 @@ impl App {
             }
             Key::Char('1') if ctrl => self.tab = Tab::Processes,
             Key::Char('2') if ctrl => self.tab = Tab::Performance,
+            Key::Char('3') if ctrl => return self.update(Message::Tab(Tab::Services)),
             Key::Char('p') if ctrl => self.paused = !self.paused,
             _ => {}
         }
