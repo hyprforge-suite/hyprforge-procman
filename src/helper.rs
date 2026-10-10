@@ -99,11 +99,14 @@ pub struct Service {
     authority: Arc<dyn Authority>,
     pub last_call: Arc<Mutex<Instant>>,
     proc_root: std::path::PathBuf,
+    /// The recorder's journal directory, from its config.
+    pub history: std::path::PathBuf,
 }
 
 impl Service {
     pub fn new(authority: Arc<dyn Authority>) -> Service {
-        Service { authority, last_call: Arc::new(Mutex::new(Instant::now())), proc_root: "/proc".into() }
+        let history = crate::recorder::load_config(std::path::Path::new(crate::recorder::CONFIG_PATH)).map(|c| c.directory).unwrap_or_else(|_| crate::recorder::Config::default().directory);
+        Service { authority, last_call: Arc::new(Mutex::new(Instant::now())), proc_root: "/proc".into(), history }
     }
 
     async fn allow(&self, header: &Header<'_>, action: &'static str, interactive: bool) -> zbus::fdo::Result<()> {
@@ -164,6 +167,29 @@ impl Service {
         signal::renice(id, nice).map_err(refused)
     }
 
+    /// The days the recorder's journal holds, with their sizes. The names
+    /// say only which days were recorded; reading one is `open_history`.
+    async fn history_days(&self, interactive: bool, #[zbus(header)] header: Header<'_>) -> zbus::fdo::Result<Vec<(String, u64)>> {
+        self.allow(&header, action::READ_ALL, interactive).await?;
+        match crate::journal::days(&self.history) {
+            Ok(days) => Ok(days),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+            Err(e) => Err(zbus::fdo::Error::Failed(e.to_string())),
+        }
+    }
+
+    /// One day's journal, opened read-only by root and handed over as a
+    /// file descriptor: the caller reads that file and no other, and
+    /// never needs root to. `day` is `YYYY-MM-DD` and nothing else.
+    async fn open_history(&self, day: String, interactive: bool, #[zbus(header)] header: Header<'_>) -> zbus::fdo::Result<zbus::zvariant::OwnedFd> {
+        if !crate::journal::is_day(&day) {
+            return Err(zbus::fdo::Error::InvalidArgs(format!("{day:?} isn't a day")));
+        }
+        self.allow(&header, action::READ_ALL, interactive).await?;
+        let file = std::fs::File::open(self.history.join(format!("{day}.hfr"))).map_err(|e| zbus::fdo::Error::Failed(e.to_string()))?;
+        Ok(std::os::fd::OwnedFd::from(file).into())
+    }
+
     /// I/O and open files for each process asked about, as root reads
     /// them. A process that ended, or whose start time no longer matches,
     /// is left out of the answer.
@@ -179,6 +205,8 @@ pub trait ProcMan {
     fn signal(&self, pid: i32, start: u64, signal: i32, interactive: bool) -> zbus::Result<()>;
     fn set_nice(&self, pid: i32, start: u64, nice: i32, interactive: bool) -> zbus::Result<()>;
     fn usage(&self, processes: Vec<(i32, u64)>, interactive: bool) -> zbus::Result<Vec<Usage>>;
+    fn history_days(&self, interactive: bool) -> zbus::Result<Vec<(String, u64)>>;
+    fn open_history(&self, day: &str, interactive: bool) -> zbus::Result<zbus::zvariant::OwnedFd>;
 }
 
 #[cfg(test)]
@@ -281,6 +309,29 @@ mod tests {
         assert!(child.try_wait().unwrap().is_none());
         child.kill().unwrap();
         child.wait().unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_days_journal_comes_back_as_a_file_and_nothing_else_does() {
+        let t = tempfile::tempdir().unwrap();
+        let header = crate::journal::Header { hostname: "h".into(), cpus: 1, page_size: 4096, ticks_per_second: 100, interval_seconds: 10, command_lines: true };
+        let mut w = crate::journal::Writer::open(&t.path().join("2026-10-10.hfr"), &header).unwrap();
+        w.write(&crate::journal::Frame { at_ms: 5, ..Default::default() }).unwrap();
+        drop(w);
+        let says = Arc::new(Says { yes: true, asked: Default::default() });
+        let mut service = Service::new(says.clone());
+        service.history = t.path().to_path_buf();
+        let (a, b) = tokio::net::UnixStream::pair().unwrap();
+        let server = zbus::connection::Builder::unix_stream(a).server(zbus::Guid::generate()).unwrap().p2p().serve_at(OBJECT_PATH, service).unwrap().build();
+        let client = zbus::connection::Builder::unix_stream(b).p2p().build();
+        let (_server, client) = tokio::try_join!(server, client).unwrap();
+        let proxy = ProcManProxy::builder(&client).destination(BUS_NAME).unwrap().path(OBJECT_PATH).unwrap().build().await.unwrap();
+        assert_eq!(proxy.history_days(false).await.unwrap(), [("2026-10-10".to_string(), std::fs::metadata(t.path().join("2026-10-10.hfr")).unwrap().len())]);
+        let fd: std::os::fd::OwnedFd = proxy.open_history("2026-10-10", false).await.unwrap().into();
+        let mut reader = crate::journal::Reader::from_file(std::fs::File::from(fd)).unwrap();
+        assert_eq!(reader.frame(0).unwrap().at_ms, 5);
+        assert!(proxy.open_history("../../etc/shadow", false).await.is_err());
+        assert!(says.asked.lock().unwrap().iter().all(|(a, _)| *a == action::READ_ALL));
     }
 
     #[tokio::test]

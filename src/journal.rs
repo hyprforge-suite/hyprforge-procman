@@ -160,11 +160,16 @@ pub struct Reader {
 
 impl Reader {
     pub fn open(path: &Path) -> io::Result<Reader> {
-        let mut file = File::open(path)?;
+        Reader::from_file(File::open(path)?).map_err(|e| io::Error::new(e.kind(), format!("{}: {e}", path.display())))
+    }
+
+    /// A journal already open — one the helper handed over as a file
+    /// descriptor, for a reader who may not open the path itself.
+    pub fn from_file(mut file: File) -> io::Result<Reader> {
         let mut magic = [0u8; 8];
         file.read_exact(&mut magic)?;
         if &magic != MAGIC {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, format!("{} isn't a procman journal", path.display())));
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "not a procman journal"));
         }
         let mut len = [0u8; 4];
         file.read_exact(&mut len)?;
@@ -233,6 +238,27 @@ impl Reader {
         let i = self.entries.partition_point(|e| e.at_ms <= at_ms);
         i.checked_sub(1)
     }
+}
+
+/// Whether `day` is a day file's name, `YYYY-MM-DD` and nothing else — the
+/// whole of what the helper will open, so no path can be smuggled in.
+pub fn is_day(day: &str) -> bool {
+    let b = day.as_bytes();
+    b.len() == 10 && b[4] == b'-' && b[7] == b'-' && b.iter().enumerate().all(|(i, c)| i == 4 || i == 7 || c.is_ascii_digit())
+}
+
+/// The days a journal directory holds, oldest first, with their sizes.
+pub fn days(dir: &Path) -> io::Result<Vec<(String, u64)>> {
+    let mut out: Vec<(String, u64)> = std::fs::read_dir(dir)?
+        .flatten()
+        .filter_map(|e| {
+            let name = e.file_name().into_string().ok()?;
+            let day = name.strip_suffix(".hfr")?.to_owned();
+            is_day(&day).then(|| (day, e.metadata().map(|m| m.len()).unwrap_or(0)))
+        })
+        .collect();
+    out.sort();
+    Ok(out)
 }
 
 /// The day file for a moment, in the machine's local time.
@@ -408,6 +434,14 @@ mod tests {
         let per_day = 144.0 * key + 8496.0 * delta;
         eprintln!("keyframe {key:.0} B, between {delta:.0} B, a day ≈ {:.1} MB", per_day / 1e6);
         assert!(per_day < 150e6, "{:.1} MB a day", per_day / 1e6);
+    }
+
+    #[test]
+    fn only_a_plain_date_names_a_day() {
+        assert!(is_day("2026-10-10"));
+        for bad in ["../etc/shadow", "2026-10-1", "2026/10/10", "2026-10-10.hfr", "2026-1a-10", ""] {
+            assert!(!is_day(bad), "{bad:?}");
+        }
     }
 
     #[test]
