@@ -10,6 +10,9 @@ use iced::{mouse, Color, Point, Rectangle, Renderer, Size, Theme};
 
 pub struct Graph<'a> {
     pub series: &'a Series,
+    /// What the top edge stands for: 1 for a share, a series' own
+    /// ceiling for a rate.
+    pub ceiling: f32,
     pub line: Color,
     pub grid: Color,
 }
@@ -25,7 +28,8 @@ impl<Message> canvas::Program<Message> for Graph<'_> {
             let y = (height * i as f32 / 4.0).round() + 0.5;
             frame.stroke(&Path::line(Point::new(0.0, y), Point::new(width, y)), Stroke::default().with_color(self.grid).with_width(1.0));
         }
-        let values: Vec<f32> = self.series.values().collect();
+        let ceiling = if self.ceiling > 0.0 { self.ceiling } else { 1.0 };
+        let values: Vec<f32> = self.series.values().map(|v| (v / ceiling).min(1.0)).collect();
         if values.len() >= 2 {
             // Placed from the right, so a graph that has only a few
             // readings fills in from where the newest one is.

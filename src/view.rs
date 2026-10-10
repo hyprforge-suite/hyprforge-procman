@@ -6,7 +6,8 @@
 //! places only — the selected row and the chosen tab — because that is
 //! all it means.
 
-use crate::{App, Message, Tab, INTERVALS};
+use crate::{App, Message, Resource, Tab, INTERVALS};
+use hyprforge_procman::machine::{DiskRate, NetRate};
 use hyprforge_procman::graph::Graph;
 use hyprforge_procman::history::Series;
 use hyprforge_procman::model::{self, Column, Entry, Line};
@@ -330,66 +331,220 @@ impl App {
     }
 
     fn performance(&self, s: FontScale) -> Element<'_, Message> {
-        let t = self.totals;
-        let cpu = self.panel(
-            "CPU",
-            percent(t.cpu.map(|c| c * 100.0)),
-            format!("{} cores · {} processes · {} threads", self.history.cores.len(), t.processes, t.threads),
-            &self.history.cpu,
-            s.apply(200.0),
-            s,
-        );
-        let memory = self.panel(
-            "Memory",
-            format!("{} of {}", bytes(t.memory_used), bytes(t.memory_total)),
-            "In use: what programs hold, not counting cache the system can give back".to_string(),
-            &self.history.memory,
-            s.apply(140.0),
-            s,
-        );
-        let mut page = column![cpu].spacing(spacing::LG).padding(spacing::LG);
-        // Per core: a small multiple each, the same scale as the whole.
-        let mut cores = column![widgets::section_label("Each core", s)].spacing(spacing::SM);
-        let per_row = 4;
-        for chunk in self.history.cores.chunks(per_row).enumerate() {
-            let (n, series) = chunk;
-            let mut r = row![].spacing(spacing::SM);
-            for (i, core) in series.iter().enumerate() {
-                let label = format!("{} · {}", n * per_row + i, percent(core.last().map(|v| v * 100.0)));
-                r = r.push(
-                    column![widgets::meta_text(label, density::META_TEXT_BASE, s), self.graph(core, s.apply(56.0))]
-                        .spacing(spacing::XS)
-                        .width(Length::FillPortion(1)),
-                );
-            }
-            cores = cores.push(r);
-        }
-        page = page.push(cores).push(memory);
-        if t.swap_total > 0 {
-            page = page.push(self.panel(
-                "Swap",
-                format!("{} of {}", bytes(t.swap_used), bytes(t.swap_total)),
-                "Memory written out to disk to make room".to_string(),
-                &self.history.swap,
-                s.apply(90.0),
-                s,
-            ));
-        }
-        scrollable(page).height(Length::Fill).into()
+        let rail = scrollable(column(self.resources().into_iter().map(|(resource, title, figure, series, ceiling)| {
+            let selected = self.resource == resource;
+            let item = column![
+                row![
+                    widgets::scaled_text(title, density::ROW_TEXT_BASE, s),
+                    Space::new().width(Length::Fill),
+                    widgets::meta_text(figure, density::META_TEXT_BASE, s).font(theme::mono_font()),
+                ]
+                .align_y(Alignment::Center),
+                self.graph(series, ceiling, s.apply(34.0)),
+            ]
+            .spacing(spacing::XS);
+            button(item)
+                .padding(spacing::SM)
+                .width(Length::Fill)
+                .on_press(Message::Resource(resource))
+                .style(move |t, status| widgets::selectable_row_style(t, status, selected))
+                .into()
+        }))
+        .spacing(spacing::XS)
+        .padding(spacing::SM));
+        let rail = container(rail).width(Length::Fixed(s.apply(260.0))).height(Length::Fill).style(|_t: &iced::Theme| container::Style {
+            background: Some(Background::Color(surface::sidebar())),
+            ..container::Style::default()
+        });
+        let detail = scrollable(container(self.detail(s)).padding(spacing::LG)).height(Length::Fill);
+        row![rail, widgets::vertical_divider(), detail].height(Length::Fill).into()
     }
 
-    fn panel<'a>(&self, title: &'a str, figure: String, detail: String, series: &'a Series, height: f32, s: FontScale) -> Element<'a, Message> {
+    /// The rail's entries: what each is, its figure now, and its graph.
+    fn resources(&self) -> Vec<(Resource, String, String, &Series, f32)> {
+        let t = self.totals;
+        let h = &self.history;
+        let mut out = vec![
+            (Resource::Cpu, "CPU".to_string(), percent(t.cpu.map(|c| c * 100.0)), &h.cpu, 1.0),
+            (Resource::Memory, "Memory".to_string(), format!("{} / {}", bytes(t.memory_used), bytes(t.memory_total)), &h.memory, 1.0),
+        ];
+        for (i, d) in self.machine.disks.iter().enumerate() {
+            let active = self.disk_rate(&d.name).map(|r| r.active * 100.0);
+            if let Some(series) = h.disks.get(&d.name) {
+                out.push((Resource::Disk(d.name.clone()), format!("Disk {i}"), percent(active), series, 1.0));
+            }
+        }
+        for n in &self.machine.nets {
+            if let Some(series) = h.nets.get(&n.name) {
+                let figure = self.net_rate(&n.name).map_or("—".to_string(), |r| rate(Some(r.rx + r.tx)));
+                let title = if n.wireless { format!("Wi-Fi · {}", n.name) } else { format!("Ethernet · {}", n.name) };
+                out.push((Resource::Net(n.name.clone()), title, figure, series, series.ceiling(64.0 * 1024.0)));
+            }
+        }
+        for (i, g) in self.machine.gpus.iter().enumerate() {
+            if let Some(series) = h.gpus.get(&g.card) {
+                out.push((Resource::Gpu(g.card.clone()), format!("GPU {i} · {}", g.driver), percent(g.busy_percent.map(f32::from)), series, 1.0));
+            }
+        }
+        if let Some(b) = &self.machine.battery {
+            out.push((Resource::Battery, "Battery".to_string(), format!("{} %", b.percent), &h.battery, 1.0));
+        }
+        out
+    }
+
+    fn disk_rate(&self, name: &str) -> Option<DiskRate> {
+        self.disk_rates.iter().find(|(n, _)| n == name).map(|(_, r)| *r)
+    }
+
+    fn net_rate(&self, name: &str) -> Option<NetRate> {
+        self.net_rates.iter().find(|(n, _)| n == name).map(|(_, r)| *r)
+    }
+
+    fn detail(&self, s: FontScale) -> Element<'_, Message> {
+        let t = self.totals;
+        let m = &self.machine;
+        let pressure = |share: Option<f32>| share.map_or("—".to_string(), |p| format!("{p:.0} % of the last 10 s"));
+        let celsius = |c: Option<f32>| c.map_or("—".to_string(), |c| format!("{c:.0} °C"));
+        match &self.resource {
+            Resource::Cpu => {
+                let mut facts = column![
+                    widgets::fact("Processes", t.processes.to_string(), s),
+                    widgets::fact("Threads", t.threads.to_string(), s),
+                    widgets::fact("Cores", self.history.cores.len().to_string(), s),
+                    widgets::fact("Temperature", celsius(m.cpu_celsius), s),
+                    widgets::fact("Waiting for CPU", pressure(m.pressure.map(|p| p.cpu_some)), s),
+                ]
+                .spacing(spacing::XS);
+                for f in &m.fans {
+                    facts = facts.push(widgets::fact(f.label.clone(), format!("{} rpm", f.rpm), s));
+                }
+                if let Some(w) = m.gpus.iter().find(|g| g.driver == "amdgpu").and_then(|g| g.watts) {
+                    facts = facts.push(widgets::fact("Package power", format!("{w:.1} W (CPU and GPU together)"), s));
+                }
+                let mut cores = column![widgets::section_label("Each core", s)].spacing(spacing::SM);
+                let per_row = 4;
+                for (n, series) in self.history.cores.chunks(per_row).enumerate() {
+                    let mut r = row![].spacing(spacing::SM);
+                    for (i, core) in series.iter().enumerate() {
+                        let label = format!("{} · {}", n * per_row + i, percent(core.last().map(|v| v * 100.0)));
+                        r = r.push(
+                            column![widgets::meta_text(label, density::META_TEXT_BASE, s), self.graph(core, 1.0, s.apply(48.0))]
+                                .spacing(spacing::XS)
+                                .width(Length::FillPortion(1)),
+                        );
+                    }
+                    cores = cores.push(r);
+                }
+                self.page("CPU", percent(t.cpu.map(|c| c * 100.0)), &self.history.cpu, 1.0, facts.into(), Some(cores.into()), s)
+            }
+            Resource::Memory => {
+                let mut facts = column![
+                    widgets::fact("In use", bytes(t.memory_used), s),
+                    widgets::fact("Available", bytes(t.memory_total.saturating_sub(t.memory_used)), s),
+                    widgets::fact("Waiting for memory", pressure(m.pressure.map(|p| p.memory_some)), s),
+                ]
+                .spacing(spacing::XS);
+                if t.swap_total > 0 {
+                    facts = facts.push(widgets::fact("Swap", format!("{} of {}", bytes(t.swap_used), bytes(t.swap_total)), s));
+                }
+                let swap = (t.swap_total > 0).then(|| {
+                    column![widgets::section_label("Swap", s), self.graph(&self.history.swap, 1.0, s.apply(80.0))].spacing(spacing::SM).into()
+                });
+                self.page("Memory", format!("{} / {}", bytes(t.memory_used), bytes(t.memory_total)), &self.history.memory, 1.0, facts.into(), swap, s)
+            }
+            Resource::Disk(name) => {
+                let Some(d) = m.disks.iter().find(|d| &d.name == name) else { return self.gone(s) };
+                let r = self.disk_rate(name).unwrap_or_default();
+                let facts = column![
+                    widgets::fact("Drive", d.model.clone().unwrap_or_else(|| d.name.clone()), s),
+                    widgets::fact("Read", rate(Some(r.read)), s),
+                    widgets::fact("Write", rate(Some(r.write)), s),
+                    widgets::fact("Temperature", celsius(d.celsius), s),
+                    // PSI has no per-device figure: this is every drive's.
+                    widgets::fact("Waiting for storage", pressure(m.pressure.map(|p| p.io_some)), s),
+                ]
+                .spacing(spacing::XS);
+                let series = self.history.disks.get(name);
+                match series {
+                    Some(series) => self.page("Active time", percent(Some(r.active * 100.0)), series, 1.0, facts.into(), None, s),
+                    None => self.gone(s),
+                }
+            }
+            Resource::Net(name) => {
+                let Some(n) = m.nets.iter().find(|n| &n.name == name) else { return self.gone(s) };
+                let r = self.net_rate(name).unwrap_or_default();
+                let facts = column![
+                    widgets::fact("Adapter", n.name.clone(), s),
+                    widgets::fact("Receiving", rate(Some(r.rx)), s),
+                    widgets::fact("Sending", rate(Some(r.tx)), s),
+                ]
+                .spacing(spacing::XS);
+                match self.history.nets.get(name) {
+                    Some(series) => {
+                        let ceiling = series.ceiling(64.0 * 1024.0);
+                        let title = if n.wireless { "Wi-Fi" } else { "Ethernet" };
+                        let figure = format!("scale {}", rate(Some(f64::from(ceiling))));
+                        self.page(title, figure, series, ceiling, facts.into(), None, s)
+                    }
+                    None => self.gone(s),
+                }
+            }
+            Resource::Gpu(card) => {
+                let Some(g) = m.gpus.iter().find(|g| &g.card == card) else { return self.gone(s) };
+                let mut facts = column![widgets::fact("Driver", g.driver.clone(), s), widgets::fact("Temperature", celsius(g.celsius), s)].spacing(spacing::XS);
+                if let (Some(used), Some(total)) = (g.vram_used, g.vram_total) {
+                    facts = facts.push(widgets::fact("Video memory", format!("{} of {}", bytes(used), bytes(total)), s));
+                }
+                if let Some(w) = g.watts {
+                    facts = facts.push(widgets::fact("Power", format!("{w:.1} W"), s));
+                }
+                match self.history.gpus.get(card) {
+                    Some(series) => self.page("GPU", percent(g.busy_percent.map(f32::from)), series, 1.0, facts.into(), None, s),
+                    None => self.gone(s),
+                }
+            }
+            Resource::Battery => {
+                let Some(b) = &m.battery else { return self.gone(s) };
+                let mut facts = column![widgets::fact("Status", b.status.clone(), s)].spacing(spacing::XS);
+                if let Some(w) = b.watts.filter(|w| *w > 0.05) {
+                    facts = facts.push(widgets::fact("Power", format!("{w:.1} W"), s));
+                }
+                self.page("Battery", format!("{} %", b.percent), &self.history.battery, 1.0, facts.into(), None, s)
+            }
+        }
+    }
+
+    /// A resource that was there and is not now (a drive unplugged).
+    fn gone(&self, s: FontScale) -> Element<'_, Message> {
+        widgets::hint_text("This isn't there any more.", s).into()
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn page<'a>(
+        &self,
+        title: &'a str,
+        figure: String,
+        series: &'a Series,
+        ceiling: f32,
+        facts: Element<'a, Message>,
+        below: Option<Element<'a, Message>>,
+        s: FontScale,
+    ) -> Element<'a, Message> {
         let head = row![
-            widgets::scaled_text(title, 18.0, s),
+            widgets::scaled_text(title, 22.0, s),
             Space::new().width(Length::Fill),
-            widgets::scaled_text(figure, 18.0, s).font(theme::mono_font()),
+            widgets::scaled_text(figure, 22.0, s).font(theme::mono_font()),
         ]
         .align_y(Alignment::Center);
-        column![head, self.graph(series, height), widgets::meta_text(detail, density::META_TEXT_BASE, s)].spacing(spacing::SM).into()
+        let mut page = column![head, self.graph(series, ceiling, s.apply(220.0)), facts].spacing(spacing::MD);
+        if let Some(below) = below {
+            page = page.push(below);
+        }
+        page.into()
     }
 
-    fn graph<'a>(&self, series: &'a Series, height: f32) -> Element<'a, Message> {
-        container(canvas(Graph { series, line: theme::text(), grid: surface::card_border() }).width(Length::Fill).height(Length::Fixed(height)))
+    fn graph<'a>(&self, series: &'a Series, ceiling: f32, height: f32) -> Element<'a, Message> {
+        container(canvas(Graph { series, ceiling, line: theme::text(), grid: surface::card_border() }).width(Length::Fill).height(Length::Fixed(height)))
             .style(|_t: &iced::Theme| container::Style {
                 background: Some(Background::Color(surface::card())),
                 border: Border { radius: density::inner_radius().into(), width: 1.0, color: surface::card_border() },

@@ -10,6 +10,7 @@
 pub mod graph;
 pub mod helper;
 pub mod history;
+pub mod machine;
 pub mod model;
 pub mod proc;
 pub mod sample;

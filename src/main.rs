@@ -11,6 +11,7 @@ mod view;
 use hyprforge_keys::{Key, KeyPress};
 use hyprforge_procman::helper;
 use hyprforge_procman::history::History;
+use hyprforge_procman::machine::{self, DiskRate, Machine, NetRate, SysFs};
 use hyprforge_procman::model::{self, Column, Table, View};
 use hyprforge_procman::proc::{ProcFs, Snapshot};
 use hyprforge_procman::sample::{self, Id};
@@ -22,6 +23,17 @@ use iced::{keyboard, window, Size, Subscription, Task, Theme};
 use std::time::Duration;
 
 const APP_ID: &str = "hyprforge-procman";
+
+/// The Performance tab's rail: which resource is open beside it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Resource {
+    Cpu,
+    Memory,
+    Disk(String),
+    Net(String),
+    Gpu(String),
+    Battery,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tab {
@@ -53,6 +65,7 @@ pub struct Confirm {
 #[derive(Debug, Clone)]
 pub struct Reading {
     snapshot: Snapshot,
+    machine: Machine,
     windows: Result<Vec<Window>, String>,
     at: std::time::Instant,
     /// Show everything was on and polkit said no this time: its few
@@ -75,6 +88,7 @@ pub enum Message {
     Tick,
     Read(Result<Box<Reading>, String>),
     Tab(Tab),
+    Resource(Resource),
     Query(String),
     Sort(Column),
     Select(Id),
@@ -121,6 +135,10 @@ pub struct App {
     pub paused: bool,
     pub interval: Duration,
     pub history: History,
+    pub resource: Resource,
+    pub machine: Machine,
+    pub disk_rates: Vec<(String, DiskRate)>,
+    pub net_rates: Vec<(String, NetRate)>,
     /// The whole machine's figures, for the status bar and Performance.
     pub totals: Totals,
     /// This window's own process and everything it runs under — never
@@ -147,9 +165,9 @@ pub fn search_id() -> WidgetId {
 fn read(fs: ProcFs, helper: Option<zbus::Connection>) -> Task<Message> {
     Task::perform(
         async move {
-            let (mut snapshot, windows) = tokio::task::spawn_blocking(move || {
+            let (mut snapshot, machine, windows) = tokio::task::spawn_blocking(move || {
                 let snapshot = fs.snapshot().map_err(|e| format!("couldn't read /proc: {e}"))?;
-                Ok::<_, String>((snapshot, windows::read()))
+                Ok::<_, String>((snapshot, SysFs::default().read(), windows::read()))
             })
             .await
             .map_err(|e| e.to_string())??;
@@ -158,7 +176,7 @@ fn read(fs: ProcFs, helper: Option<zbus::Connection>) -> Task<Message> {
             if let Some(system) = helper {
                 everything_lapsed = !fill_in(&system, &mut snapshot).await;
             }
-            Ok(Box::new(Reading { snapshot, windows, at, everything_lapsed }))
+            Ok(Box::new(Reading { snapshot, machine, windows, at, everything_lapsed }))
         },
         Message::Read,
     )
@@ -229,6 +247,10 @@ impl App {
             paused: false,
             interval: INTERVALS[1],
             history: History::default(),
+            resource: Resource::Cpu,
+            machine: Machine::default(),
+            disk_rates: Vec::new(),
+            net_rates: Vec::new(),
             totals: Totals::default(),
             critical: Default::default(),
             reading: true,
@@ -274,6 +296,7 @@ impl App {
                 }
             }
             Message::Tab(tab) => self.tab = tab,
+            Message::Resource(resource) => self.resource = resource,
             Message::Query(q) => self.view.query = q,
             Message::Sort(column) => self.view.sort = self.view.sort.clicked(column),
             Message::Select(id) => self.selected = Some(id),
@@ -406,7 +429,28 @@ impl App {
     }
 
     fn take(&mut self, reading: Reading) {
-        let Reading { snapshot, windows, at, everything_lapsed } = reading;
+        let Reading { snapshot, machine, windows, at, everything_lapsed } = reading;
+        let seconds = self.last_at.map_or(0.0, |t| at.duration_since(t).as_secs_f64());
+        if self.last_at.is_some() {
+            let (disks, nets) = machine::rates(&self.machine, &machine, seconds);
+            for (name, rate) in &disks {
+                self.history.disks.entry(name.clone()).or_default().push(rate.active);
+            }
+            for (name, rate) in &nets {
+                self.history.nets.entry(name.clone()).or_default().push((rate.rx + rate.tx) as f32);
+            }
+            self.disk_rates = disks;
+            self.net_rates = nets;
+        }
+        for gpu in &machine.gpus {
+            if let Some(busy) = gpu.busy_percent {
+                self.history.gpus.entry(gpu.card.clone()).or_default().push(f32::from(busy) / 100.0);
+            }
+        }
+        if let Some(b) = &machine.battery {
+            self.history.battery.push(f32::from(b.percent) / 100.0);
+        }
+        self.machine = machine;
         if everything_lapsed && matches!(self.everything, Everything::Open(_)) {
             self.everything = Everything::Locked;
             self.notice = Some("Show everything has ended: administrator access timed out.".into());
@@ -414,7 +458,6 @@ impl App {
         let mut usage = sample::Use::default();
         if let Some(before) = &self.last {
             usage.cpu = sample::shares(before, &snapshot);
-            let seconds = self.last_at.map_or(0.0, |t| at.duration_since(t).as_secs_f64());
             usage.disk = sample::disk_rates(before, &snapshot, seconds);
         }
         self.last_at = Some(at);
