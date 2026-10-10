@@ -38,6 +38,9 @@ hyprforge-process = "0.1"
 # keeps — through its own module, which owns that file.
 hyprforge-session = "0.1"
 hyprforge-paths = "0.1"
+# App names for window classes: on Wayland a class is the app id, which
+# is the launcher entry's file name — and the entry has the name to show.
+hyprforge-mime = "0.1"
 # `canvas` for the history graphs, on top of the suite's base set.
 iced = { version = "0.14", default-features = false, features = [
     "wgpu",
@@ -61,6 +64,7 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "std"
 zbus = { version = "5.18", default-features = false, features = ["tokio"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+toml = "1.1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 

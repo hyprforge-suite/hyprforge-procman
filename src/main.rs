@@ -8,6 +8,7 @@
 
 mod details;
 mod overview;
+mod past;
 mod people;
 mod view;
 
@@ -49,6 +50,7 @@ pub enum Tab {
     Overview,
     Processes,
     Performance,
+    History,
     Startup,
     Users,
     Details,
@@ -226,6 +228,8 @@ pub enum Message {
     ServicesLoaded(Scope, Result<Vec<Unit>, String>),
     ServiceScope(Scope),
     Tree(bool),
+    /// App history's range, in days.
+    HistoryRange(usize),
     Advanced(bool),
     StartupLoaded(Box<StartupData>),
     /// An autostart entry on or off, by id.
@@ -307,6 +311,13 @@ pub struct App {
     pub interval: Duration,
     pub history: History,
     pub resource: Resource,
+    /// App history, or why its file couldn't be read (then nothing is
+    /// recorded, so nothing is written over it).
+    pub app_history: Result<hyprforge_procman::app_history::History, String>,
+    pub history_days: usize,
+    /// Installed apps, for showing a window class by its app's name.
+    pub apps_db: Option<hyprforge_mime::MimeDb>,
+    history_saved: std::time::Instant,
     /// The btop/atop-verbose view: the Overview tab and the extra columns.
     pub advanced: bool,
     /// Machine-wide rates the Overview shows.
@@ -465,6 +476,10 @@ impl App {
             interval: INTERVALS[1],
             history: History::default(),
             resource: Resource::Cpu,
+            app_history: hyprforge_procman::app_history::load(&hyprforge_procman::app_history::path()),
+            history_days: 1,
+            apps_db: None,
+            history_saved: std::time::Instant::now(),
             advanced: false,
             overview: Overview::default(),
             counters: Default::default(),
@@ -606,6 +621,7 @@ impl App {
                 }
             }
             Message::Tree(on) => self.details.tree = on,
+            Message::HistoryRange(days) => self.history_days = days,
             Message::Advanced(on) => {
                 self.advanced = on;
                 // `status` is one more file per process: read only while
@@ -706,6 +722,10 @@ impl App {
             }
             Message::Tab(tab) => {
                 self.tab = tab;
+                // The app list is read once, when history first needs names.
+                if tab == Tab::History && self.apps_db.is_none() {
+                    self.apps_db = Some(hyprforge_mime::MimeDb::load());
+                }
                 match tab {
                     Tab::Services => return self.load_services(),
                     Tab::Startup => return Task::perform(load_startup(), |d| Message::StartupLoaded(Box::new(d))),
@@ -1059,6 +1079,31 @@ impl App {
             processes: snapshot.procs.iter().filter(|p| !p.kernel).count(),
             threads: snapshot.procs.iter().map(|p| u64::from(p.threads)).sum(),
         };
+        // App history: this reading's share of each app's day.
+        if let (Ok(history), true) = (&mut self.app_history, seconds > 0.0) {
+            let samples: Vec<hyprforge_procman::app_history::Sample> = self
+                .table
+                .apps
+                .iter()
+                .map(|a| hyprforge_procman::app_history::Sample {
+                    class: if a.class.is_empty() { a.lead.name.clone() } else { a.class.clone() },
+                    cpu: a.cpu(),
+                    disk: a.disk(),
+                    gpu: a.gpu(),
+                    memory: a.private_bytes(),
+                })
+                .collect();
+            let day = chrono::Local::now().format("%Y-%m-%d").to_string();
+            history.record(&day, &samples, seconds, self.history.cores.len().max(1));
+            // Written a minute at a time: at most a minute is lost if
+            // the window is closed, and the disk is not touched each second.
+            if self.history_saved.elapsed() >= Duration::from_secs(60) {
+                self.history_saved = std::time::Instant::now();
+                if let Err(e) = hyprforge_procman::app_history::save(&hyprforge_procman::app_history::path(), history) {
+                    self.notice = Some(format!("App history couldn't be saved: {e}"));
+                }
+            }
+        }
         // A minute of CPU per process, for the Overview's sparklines; a
         // process that ended takes its history with it.
         if self.advanced {
@@ -1236,6 +1281,9 @@ mod render {
         let runtime = tokio::runtime::Runtime::new().unwrap();
         let (mut app, _) = App::new();
         app.nvidia = Some(hyprforge_procman::nvidia::query());
+        // History in memory only: a test never writes the user's file.
+        app.app_history = Ok(Default::default());
+        app.history_saved = std::time::Instant::now() + Duration::from_secs(3600);
         let _ = app.update(Message::Advanced(true));
         let mut fs = ProcFs::default();
         fs.verbose = true;
@@ -1260,6 +1308,10 @@ mod render {
             app.resource = Resource::Gpu(gpu.card.clone());
             draw(&app, "performance-gpu", &dir);
         }
+
+        app.tab = Tab::History;
+        app.apps_db = Some(hyprforge_mime::MimeDb::load());
+        draw(&app, "history", &dir);
 
         app.tab = Tab::Startup;
         app.startup = Some(runtime.block_on(load_startup()));

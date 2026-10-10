@@ -240,10 +240,15 @@ as administrator through pkexec.
 - **Services:** system and user units, with cgroup CPU and memory, the actions, and the journal.
 - **The helper:** polkit-checked and typed. Show everything, End as administrator, Raise priority.
 
+**Since added:**
+- **Advanced mode** (Ctrl+.): the Overview tab, btop's layout with atop's detail, and the extra columns in Details.
+- **App history:** per app, per day, for 30 days. It records only while the window is open, and says so.
+- **GPUs:** every one is listed, NVIDIA's included, read without waking it. Each process shows which GPU it uses.
+
 **Not yet:**
-- App history.
 - Per-process network. TCP alone is available without root, but a TCP-only figure undercounts QUIC, so it waits for the helper's eBPF.
 - Other users' processes in `port:` and `file:` lookups, through the helper.
+- Choosing a GPU per app. That moved to the GPU broker idea in the suite's vision.md.
 - The packaging step: PKGBUILD, installer, Set up's Ctrl+Shift+Escape bind, the site page, becoming the twelfth component.
 
-**Never seen running.** It was built while no one was at the machine. The suite's rule against unattended live compositor work kept the window closed, so its first look is still to come.
+**Seen only offscreen so far.** `render_every_tab` (an ignored test) draws every tab from live readings with the software renderer. The window itself has not yet been opened with its user watching.
