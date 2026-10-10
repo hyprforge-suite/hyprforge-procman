@@ -36,7 +36,7 @@ pub struct Reading {
 /// What `nvidia-smi` is asked, in this order.
 const FIELDS: &str = "name,utilization.gpu,utilization.memory,memory.used,memory.total,temperature.gpu,power.draw,clocks.gr,clocks.max.gr,fan.speed,pstate";
 
-/// One `--format=csv,noheader,nounits` line, in [`FIELDS`]' order. A
+/// One `--format=csv,noheader,nounits` line, in `FIELDS`' order. A
 /// laptop GPU answers `[N/A]` for a fan it does not control, and older
 /// cards for power; those are unknown, never zero.
 ///
