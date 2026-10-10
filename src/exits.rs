@@ -19,7 +19,7 @@ use std::io;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 
 /// One process's life, as the kernel summed it up when it ended.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub struct Exit {
     pub pid: u32,
     pub ppid: u32,

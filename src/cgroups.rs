@@ -13,13 +13,13 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 /// One pressure file's `avg10` figures, `some` and `full`.
-#[derive(Debug, Clone, Copy, PartialEq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub struct Waits {
     pub some: f32,
     pub full: f32,
 }
 
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub struct Cgroup {
     /// Below the cgroup root: `system.slice/NetworkManager.service`.
     pub path: String,

@@ -17,7 +17,7 @@ use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
 /// One process, as one read of its files saw it.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub struct Proc {
     pub pid: i32,
     /// When it started, in clock ticks since boot. With the pid, this is
@@ -85,7 +85,7 @@ pub struct Proc {
 }
 
 /// Threads by state, atop's TRUN / TSLPI / TSLPU.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub struct ThreadStates {
     pub running: u32,
     /// Sleeping, and could be woken by a signal.
@@ -96,7 +96,7 @@ pub struct ThreadStates {
 }
 
 /// What `/proc/<pid>/status` adds for the Advanced view.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub struct Verbose {
     pub swap_bytes: u64,
     /// Memory it has locked into RAM (`VmLck`).
@@ -120,7 +120,7 @@ pub fn parse_status(text: &str) -> Option<Verbose> {
 }
 
 /// The kernel's running totals for the whole machine, from `/proc/stat`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub struct Counters {
     pub context_switches: u64,
     pub interrupts: u64,
@@ -144,7 +144,7 @@ fn parse_counters(stat: &str) -> Counters {
 
 /// The CPU's cumulative time counters, from one `cpu` line of
 /// `/proc/stat`, in clock ticks.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub struct CpuTimes {
     /// Every state but guest time, which the kernel already counts
     /// inside user time.
@@ -161,7 +161,7 @@ pub struct CpuTimes {
 pub const CPU_STATES: [&str; 8] = ["user", "nice", "system", "idle", "iowait", "irq", "softirq", "steal"];
 
 /// Memory and swap, in bytes, from `/proc/meminfo`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub struct Memory {
     pub total: u64,
     /// What could be given to a program without swapping — the kernel's
@@ -183,7 +183,7 @@ impl Memory {
 }
 
 /// Everything one refresh reads.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub struct Snapshot {
     pub procs: Vec<Proc>,
     /// The `cpu` line: every core added together.

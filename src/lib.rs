@@ -16,6 +16,7 @@ pub mod graph;
 #[cfg(feature = "dbus")]
 pub mod helper;
 pub mod inspect;
+pub mod journal;
 pub mod history;
 pub mod machine;
 pub mod model;

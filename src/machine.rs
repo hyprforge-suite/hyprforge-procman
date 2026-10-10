@@ -19,7 +19,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Disk {
     /// `nvme1n1`.
     pub name: String,
@@ -42,7 +42,7 @@ pub struct Disk {
     pub celsius: Option<f32>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Net {
     pub name: String,
     pub rx_bytes: u64,
@@ -56,7 +56,7 @@ pub struct Net {
     pub wireless: bool,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Gpu {
     /// `card2`.
     pub card: String,
@@ -77,7 +77,7 @@ pub struct Gpu {
     pub pci: String,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Fan {
     pub label: String,
     pub rpm: u32,
@@ -87,7 +87,7 @@ pub struct Fan {
 /// which something was *waiting* for the resource. `some`: at least one
 /// task waited; `full`: everything runnable did. Busy is not the same as
 /// slow; this is the figure that says slow.
-#[derive(Debug, Clone, Copy, PartialEq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub struct Pressure {
     pub cpu_some: f32,
     pub memory_some: f32,
@@ -96,7 +96,7 @@ pub struct Pressure {
     pub io_full: f32,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Battery {
     pub status: String,
     pub percent: u8,
@@ -105,7 +105,7 @@ pub struct Battery {
 }
 
 /// One pressure line's three windows: the last 10 s, 60 s and 5 min.
-#[derive(Debug, Clone, Copy, PartialEq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub struct Windows {
     pub avg10: f32,
     pub avg60: f32,
@@ -113,7 +113,7 @@ pub struct Windows {
 }
 
 /// Every pressure line, with all three windows, for the Advanced view.
-#[derive(Debug, Clone, Copy, PartialEq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub struct PressureDetail {
     pub cpu_some: Windows,
     pub memory_some: Windows,
@@ -123,7 +123,7 @@ pub struct PressureDetail {
 }
 
 /// Where memory went, in bytes, from `/proc/meminfo`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub struct MemoryDetail {
     pub free: u64,
     /// Programs' own memory, not backed by any file.
@@ -153,7 +153,7 @@ pub struct MemoryDetail {
 }
 
 /// Paging totals since boot, from `/proc/vmstat`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub struct Paging {
     pub faults: u64,
     pub major_faults: u64,
@@ -172,7 +172,7 @@ pub struct Paging {
 
 /// One mounted filesystem, by device: btrfs mounts one device at several
 /// places (`/`, `/home`, …), and it is one filesystem, listed once.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Filesystem {
     pub device: String,
     /// Where it is mounted — the shortest of its mount points.
@@ -184,7 +184,7 @@ pub struct Filesystem {
 }
 
 /// The network stack's totals since boot, from `/proc/net/snmp`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub struct Transport {
     pub ip_in: u64,
     pub ip_out: u64,
@@ -240,7 +240,7 @@ pub fn parse_snmp(text: &str) -> Transport {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub struct Machine {
     pub disks: Vec<Disk>,
     pub nets: Vec<Net>,
@@ -618,7 +618,7 @@ fn space(path: &Path) -> Option<(u64, u64)> {
 }
 
 /// What two readings say: bytes a second, and active time.
-#[derive(Debug, Clone, Copy, PartialEq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub struct DiskRate {
     pub read: f64,
     pub write: f64,
@@ -634,7 +634,7 @@ pub struct DiskRate {
     pub queue: f64,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub struct NetRate {
     pub rx: f64,
     pub tx: f64,
