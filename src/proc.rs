@@ -750,9 +750,15 @@ mod tests {
     #[test]
     fn a_processs_threads_are_read_with_their_own_names() {
         let (named, stop) = std::sync::mpsc::channel::<()>();
+        let (running, started) = std::sync::mpsc::channel::<()>();
+        // The new thread names itself once it runs, so read only after it
+        // says so: on a busy CI runner /proc was read first and the name
+        // wasn't there yet.
         let worker = std::thread::Builder::new().name("hogsmeade".into()).spawn(move || {
+            let _ = running.send(());
             let _ = stop.recv();
         }).unwrap();
+        started.recv().unwrap();
         let me = std::process::id() as i32;
         let mine = threads(Path::new("/proc"), me);
         assert!(mine.iter().any(|t| t.tid == me), "the main thread is the process's own id");
