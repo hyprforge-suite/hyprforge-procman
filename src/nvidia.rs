@@ -74,6 +74,9 @@ pub fn explain(stdout: &str, stderr: &str) -> String {
             .and_then(|v| v.split_whitespace().skip_while(|w| *w != "x86_64").nth(1).map(str::to_owned));
         return match (driver, library) {
             (Some(d), Some(l)) => format!("NVIDIA's tools ({l}) don't match the driver that's loaded ({d}). Restart to finish the driver update."),
+            // The tools said their own version; the driver's can be
+            // unreadable (or, as on CI, absent) without making that wrong.
+            (None, Some(l)) => format!("NVIDIA's tools ({l}) don't match the driver that's loaded. Restart to finish the driver update."),
             _ => "NVIDIA's tools don't match the driver that's loaded. Restart to finish the driver update.".to_string(),
         };
     }
