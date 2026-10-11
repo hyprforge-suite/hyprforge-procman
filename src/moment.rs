@@ -147,10 +147,12 @@ fn delta(now: u64, then: u64) -> u64 {
 
 /// The interval from `prev` to `now`. A reboot between them (another
 /// boot id) restarts every counter, so the interval is `now` alone, read
-/// as if it began at boot.
+/// as if it began at boot — *at* boot, too: from a default frame's time
+/// of 0, the first interval after a reboot was fifty-odd years long and
+/// every rate in it read as nothing.
 pub fn between(prev: &Frame, now: &Frame, ticks_per_second: u64, users: &mut Users) -> Moment {
     let rebooted = prev.boot_id != now.boot_id;
-    let empty = Frame::default();
+    let empty = Frame { at_ms: now.snapshot.boot as i64 * 1000, ..Frame::default() };
     let prev = if rebooted { &empty } else { prev };
     let seconds = ((now.at_ms - prev.at_ms).max(1) as f64 / 1000.0).max(0.001);
     let tps = ticks_per_second.max(1) as f64;
@@ -213,6 +215,13 @@ pub fn between(prev: &Frame, now: &Frame, ticks_per_second: u64, users: &mut Use
             }
         })
         .collect();
+
+    // A process that ended after `/proc` was read and before its exit was
+    // taken is in both: the exit has its last word, so the row goes and
+    // the exit stands for it — or the interval counts it twice. A zombie,
+    // still listed, is the same case.
+    let ended: std::collections::HashSet<i32> = now.exits.iter().map(|e| e.pid as i32).collect();
+    rows.retain(|r| !ended.contains(&r.id.pid));
 
     // Exits: the record's lifetime totals, less what the earlier frame had
     // already counted for that pid (when it was alive then).
@@ -395,5 +404,32 @@ mod tests {
         b.boot_id = "new".into();
         let m = between(&a, &b, 100, &mut Users::default());
         assert_eq!(m.rows[0].cpu_pct, 10.0, "not a negative or a huge delta");
+    }
+
+    /// The first interval after a reboot runs from the boot, not from
+    /// 1970 — or every rate in it divides by fifty-odd years.
+    #[test]
+    fn the_first_interval_after_a_reboot_is_measured_from_the_boot() {
+        let a = frame(1_760_000_000_000, 50_000, vec![], vec![]);
+        let mut b = frame(1_760_000_090_000, 1000, vec![], vec![]);
+        b.boot_id = "new".into();
+        b.snapshot.boot = 1_760_000_060;
+        let m = between(&a, &b, 100, &mut Users::default());
+        assert_eq!(m.system.seconds, 30.0);
+    }
+
+    /// A process that ended after `/proc` was read and before its exit was
+    /// taken is in both the frame's processes and its exits; it is one
+    /// row, the exit, and its time is counted once.
+    #[test]
+    fn a_process_read_and_heard_ending_in_one_frame_counts_once() {
+        let a = frame(0, 1000, vec![proc(4, 1, 100)], vec![]);
+        let exit = Exit { pid: 4, comm: "p4".into(), user_us: 1_300_000, status: 0, ..Exit::default() };
+        let b = frame(10_000, 2000, vec![proc(4, 1, 130)], vec![exit]);
+        let m = between(&a, &b, 100, &mut Users::default());
+        let fours: Vec<&Row> = m.rows.iter().filter(|r| r.id.pid == 4).collect();
+        assert_eq!(fours.len(), 1, "{fours:?}");
+        assert!(fours[0].exit.is_some(), "the exit stands for it");
+        assert_eq!(fours[0].cpu_pct, 3.0, "130 ticks in all, 100 already counted, of 1000");
     }
 }

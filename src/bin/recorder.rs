@@ -41,7 +41,7 @@ fn main() -> std::process::ExitCode {
         config.directory = dir.into();
     }
     if flag("--once").is_some() {
-        return match Recorder::new(config).tick(chrono::Local::now(), Vec::new()) {
+        return match Recorder::new(config).tick(chrono::Local::now(), Vec::new) {
             Ok(()) => std::process::ExitCode::SUCCESS,
             Err(e) => {
                 tracing::error!("couldn't take a sample: {e}");
@@ -89,7 +89,7 @@ fn run(config: Config) -> std::process::ExitCode {
         if STOP.load(Ordering::SeqCst) {
             break;
         }
-        let heard = exits.as_ref().map(Listener::take).unwrap_or_default();
+        let heard = || exits.as_ref().map(Listener::take).unwrap_or_default();
         if let Err(e) = recorder.tick(chrono::Local::now(), heard) {
             // One failed sample is a gap in the journal, not a reason to
             // stop recording.

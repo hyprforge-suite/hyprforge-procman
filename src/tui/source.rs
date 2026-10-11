@@ -123,8 +123,8 @@ impl Live {
     }
 
     pub fn screen(&mut self) -> io::Result<Screen> {
-        let heard = self.exits.as_ref().map(crate::exits::Listener::take).unwrap_or_default();
-        let now = self.recorder.collect(chrono::Local::now(), heard)?;
+        let exits = &self.exits;
+        let now = self.recorder.collect(chrono::Local::now(), || exits.as_ref().map(crate::exits::Listener::take).unwrap_or_default())?;
         let since_boot = self.prev.is_none();
         let prev = self.prev.take().unwrap_or_else(|| at_boot(&now));
         let moment = moment::between(&prev, &now, self.tps, &mut self.users);
