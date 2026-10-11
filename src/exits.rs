@@ -339,6 +339,29 @@ fn netlink_error(payload: &[u8]) -> io::Error {
     io::Error::from_raw_os_error(-code)
 }
 
+/// Starts `true` and reaps it, bounded, for [`Listener::start`] to hear
+/// end: its pid, or `None` when it couldn't be started.
+fn probe() -> Option<u32> {
+    let mut child = std::process::Command::new("true")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .ok()?;
+    let pid = child.id();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    while std::time::Instant::now() < deadline {
+        if let Ok(Some(_)) = child.try_wait() {
+            return Some(pid);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    // `true` that hasn't ended in two seconds is not `true`.
+    let _ = child.kill();
+    let _ = child.wait();
+    Some(pid)
+}
+
 /// "0-15", for every CPU this machine has.
 pub fn all_cpus() -> String {
     // SAFETY: sysconf has no preconditions.
@@ -397,13 +420,39 @@ impl Listener {
                 }
             }
         })?;
-        // On a busy machine something ends within milliseconds; on an idle
-        // one the receive's own bound answers.
+        // A refusal arrives on the first receive; a short-lived process of
+        // our own makes that receive happen at once, and then proves the
+        // exits actually reach us. Registering alone proves nothing: the
+        // kernel takes a registration from a socket in another network
+        // namespace (systemd's PrivateNetwork=) and then delivers exits
+        // only in the first one, so a listener that "started" heard
+        // nothing, said nothing, and every frame recorded no exits.
+        let probe = probe();
         match wait.recv_timeout(std::time::Duration::from_secs(6)) {
-            Ok(Ok(())) | Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Ok(listener),
-            Ok(Err(e)) => Err(e),
-            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => Err(io::Error::other("the exits listener stopped")),
+            Ok(Ok(())) | Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+            Ok(Err(e)) => return Err(e),
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return Err(io::Error::other("the exits listener stopped")),
         }
+        let Some(pid) = probe else {
+            // `true` wouldn't start, so there is nothing to prove it by;
+            // carry on as before rather than give up on exits.
+            return Ok(listener);
+        };
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        while std::time::Instant::now() < deadline {
+            let found = {
+                let mut heard = listener.heard.lock().unwrap_or_else(|e| e.into_inner());
+                // Ours, and not something the machine did: taken back out.
+                heard.iter().position(|e| e.pid == pid).map(|at| heard.remove(at))
+            };
+            if found.is_some() {
+                return Ok(listener);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        Err(io::Error::other(
+            "registered for exits, but none arrives — a private network namespace (systemd's PrivateNetwork=) hides them",
+        ))
     }
 
     /// What was heard since the last call.
@@ -531,6 +580,38 @@ mod tests {
         }
         child.wait().unwrap();
         panic!("never heard the exit");
+    }
+
+    /// Root only: what systemd's PrivateNetwork= did to the recorder. In a
+    /// network namespace of its own the kernel takes the registration and
+    /// sends no exit, so starting must fail, and say why, rather than hand
+    /// back a listener that hears nothing.
+    #[test]
+    #[ignore = "needs root (CAP_NET_ADMIN, CAP_SYS_ADMIN) to listen and to unshare"]
+    fn in_a_private_network_namespace_the_listener_says_it_hears_nothing() {
+        // SAFETY: geteuid cannot fail.
+        if unsafe { libc::geteuid() } != 0 {
+            eprintln!("HYPRFORGE-SKIP: listening for every exit needs root");
+            return;
+        }
+        // A thread of its own: unshare moves only the calling thread, and
+        // the socket is made on it.
+        let started = std::thread::spawn(|| {
+            // SAFETY: unshare with one flag; it changes only this thread.
+            if unsafe { libc::unshare(libc::CLONE_NEWNET) } != 0 {
+                return None;
+            }
+            Some(Listener::start().map(|_| ()))
+        })
+        .join()
+        .unwrap();
+        match started {
+            None => eprintln!("HYPRFORGE-SKIP: couldn't make a network namespace"),
+            Some(result) => {
+                let e = result.expect_err("a listener that hears nothing must not start");
+                assert!(e.to_string().contains("PrivateNetwork"), "{e}");
+            }
+        }
     }
 
     #[test]

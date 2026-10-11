@@ -33,7 +33,11 @@ LogsDirectoryMode=0700
 ReadWritePaths=/proc/sys/kernel/task_delayacct
 PrivateTmp=yes
 PrivateDevices=yes
-PrivateNetwork=yes
+# No PrivateNetwork=: the kernel delivers taskstats exit events only to
+# listeners in the first network namespace, and takes the registration
+# from any other without complaint — so with it the recorder heard no
+# exit at all, and said nothing. The address families below keep it off
+# the network all the same: netlink and Unix sockets, nothing else.
 RestrictAddressFamilies=AF_NETLINK AF_UNIX
 ProtectKernelModules=yes
 ProtectClock=yes
