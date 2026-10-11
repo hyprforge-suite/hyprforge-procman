@@ -100,6 +100,10 @@ pub use crate::proc::Usage;
 pub struct Service {
     authority: Arc<dyn Authority>,
     pub last_call: Arc<Mutex<Instant>>,
+    /// polkit checks still waiting for an answer — a person at a
+    /// password prompt, maybe for minutes. The helper isn't idle while
+    /// any is, whenever its last call came in.
+    pub asking: Arc<std::sync::atomic::AtomicUsize>,
     proc_root: std::path::PathBuf,
     /// The recorder's journal directory, from its config.
     pub history: std::path::PathBuf,
@@ -139,6 +143,7 @@ impl Service {
         Service {
             authority,
             last_call: Arc::new(Mutex::new(Instant::now())),
+            asking: Default::default(),
             proc_root: "/proc".into(),
             history,
             #[cfg(feature = "netbpf")]
@@ -149,7 +154,14 @@ impl Service {
     async fn allow(&self, header: &Header<'_>, action: &'static str, interactive: bool) -> zbus::fdo::Result<()> {
         *self.last_call.lock().await = Instant::now();
         let sender = header.sender().map(|s| s.to_string()).unwrap_or_default();
-        match self.authority.check(sender, action, interactive).await {
+        let checked = {
+            let _asking = Asking::new(&self.asking);
+            self.authority.check(sender, action, interactive).await
+        };
+        // The answer is a call too: the idle minute starts again from it,
+        // not from a question that may have been asked minutes ago.
+        *self.last_call.lock().await = Instant::now();
+        match checked {
             Ok(true) => Ok(()),
             Ok(false) => Err(zbus::fdo::Error::AccessDenied("not authorized".into())),
             Err(e) => Err(zbus::fdo::Error::Failed(e)),
@@ -184,6 +196,23 @@ impl Service {
             return Err(zbus::fdo::Error::InvalidArgs("kernel threads are never signalled".into()));
         }
         Ok(())
+    }
+}
+
+/// One polkit check in flight, for as long as this lives — dropped on
+/// every way out, an answer or a cancelled call alike.
+struct Asking<'a>(&'a std::sync::atomic::AtomicUsize);
+
+impl<'a> Asking<'a> {
+    fn new(count: &'a std::sync::atomic::AtomicUsize) -> Self {
+        count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Asking(count)
+    }
+}
+
+impl Drop for Asking<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
     }
 }
 
@@ -332,6 +361,44 @@ mod tests {
         let (server, client) = tokio::try_join!(server, client).unwrap();
         let proxy = ProcManProxy::builder(&client).destination(BUS_NAME).unwrap().path(OBJECT_PATH).unwrap().build().await.unwrap();
         (proxy, says, server, client)
+    }
+
+    /// polkit as a person at the prompt: no answer until told.
+    struct Prompt(std::sync::Mutex<Option<tokio::sync::oneshot::Receiver<bool>>>);
+
+    impl Authority for Prompt {
+        fn check(&self, _sender: String, _action: &'static str, _interactive: bool) -> Checking {
+            let answer = self.0.lock().unwrap().take().unwrap();
+            Box::pin(async move { Ok(answer.await.unwrap_or(false)) })
+        }
+    }
+
+    /// The helper's idle exit watches `asking`: while a password prompt is
+    /// open it is 1, however long ago the call came in, and the answer
+    /// starts the idle minute again.
+    #[tokio::test]
+    async fn a_call_waiting_at_a_password_prompt_keeps_the_helper_from_idling_out() {
+        let (typed, answer) = tokio::sync::oneshot::channel();
+        let service = Service::new(Arc::new(Prompt(std::sync::Mutex::new(Some(answer)))));
+        let (asking, last_call) = (service.asking.clone(), service.last_call.clone());
+        let (a, b) = tokio::net::UnixStream::pair().unwrap();
+        let server = zbus::connection::Builder::unix_stream(a).server(zbus::Guid::generate()).unwrap().p2p().serve_at(OBJECT_PATH, service).unwrap().build();
+        let client = zbus::connection::Builder::unix_stream(b).p2p().build();
+        let (_server, client) = tokio::try_join!(server, client).unwrap();
+        let proxy = ProcManProxy::builder(&client).destination(BUS_NAME).unwrap().path(OBJECT_PATH).unwrap().build().await.unwrap();
+        let call = tokio::spawn(async move { proxy.history_days(true).await });
+        while asking.load(std::sync::atomic::Ordering::SeqCst) == 0 {
+            tokio::task::yield_now().await;
+        }
+        let asked_at = *last_call.lock().await;
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        typed.send(true).unwrap();
+        // What the call then does (here, read the real recorder's root-only
+        // directory) is not this test's question; that polkit's wait held
+        // the helper open is.
+        let _ = call.await.unwrap();
+        assert_eq!(asking.load(std::sync::atomic::Ordering::SeqCst), 0, "answered, so no longer asking");
+        assert!(*last_call.lock().await > asked_at, "the idle minute runs from the answer");
     }
 
     fn sleeper() -> (std::process::Child, Id) {

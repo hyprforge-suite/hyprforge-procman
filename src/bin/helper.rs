@@ -30,12 +30,15 @@ async fn main() -> std::process::ExitCode {
 async fn run() -> zbus::Result<()> {
     let system = zbus::Connection::system().await?;
     let service = Service::new(Arc::new(Polkit { system: system.clone() }));
-    let last_call = service.last_call.clone();
+    let (last_call, asking) = (service.last_call.clone(), service.asking.clone());
     system.object_server().at(OBJECT_PATH, service).await?;
     system.request_name(BUS_NAME).await?;
     loop {
         tokio::time::sleep(IDLE / 4).await;
-        if last_call.lock().await.elapsed() >= IDLE {
+        // Not while someone is at a password prompt: exiting under it
+        // turns the password they typed into "disconnected".
+        let waiting = asking.load(std::sync::atomic::Ordering::SeqCst) > 0;
+        if !waiting && last_call.lock().await.elapsed() >= IDLE {
             tracing::info!("idle for {}s, exiting", IDLE.as_secs());
             return Ok(());
         }
