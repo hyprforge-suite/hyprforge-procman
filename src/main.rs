@@ -7,6 +7,7 @@
 //! this?".
 
 mod details;
+mod menus;
 mod overview;
 mod past;
 mod people;
@@ -287,6 +288,16 @@ pub enum Message {
     Freeze(bool),
     Key(KeyPress),
     Dismiss,
+    /// A right click on a row: select it and open its menu at the pointer.
+    OpenMenu(menus::MenuFor),
+    CloseMenu,
+    /// A menu row chosen: close the menu, then do what its button does.
+    MenuChose(Box<Message>),
+    /// Open file location for a program named outright — a menu's, read
+    /// when it opened, rather than the Details pane's last reading.
+    OpenLocationOf(std::path::PathBuf),
+    Copy(String),
+    Resized(Size),
     Recorded(recorded_view::Msg),
 }
 
@@ -358,6 +369,10 @@ pub struct App {
     /// The last reading's `port:`/`file:` search covered every user's
     /// processes, through the helper — what the Details note says.
     pub lookup_everyone: bool,
+    /// The right-click menu, while one is open.
+    pub menu: Option<menus::OpenMenu>,
+    /// The window's size, which a menu is kept inside.
+    pub window_size: Size,
     reading: bool,
 }
 
@@ -552,6 +567,8 @@ impl App {
             totals: Totals::default(),
             critical: Default::default(),
             lookup_everyone: false,
+            menu: None,
+            window_size: Size::new(1100.0, 720.0),
             reading: true,
         };
         let scan = app.gpu_scan.clone();
@@ -660,7 +677,12 @@ impl App {
 
     fn subscription(&self) -> Subscription<Message> {
         let tick = if self.paused { Subscription::none() } else { iced::time::every(self.interval).map(|_| Message::Tick) };
-        Subscription::batch([tick, keyboard::listen().filter_map(|event| hyprforge_ui::keys::key_press(&event).map(Message::Key))])
+        Subscription::batch([
+            tick,
+            keyboard::listen().filter_map(|event| hyprforge_ui::keys::key_press(&event).map(Message::Key)),
+            hyprforge_ui::widgets::pointer::track(),
+            window::resize_events().map(|(_, size)| Message::Resized(size)),
+        ])
     }
 
     fn update(&mut self, message: Message) -> Task<Message> {
@@ -790,6 +812,23 @@ impl App {
                 }
                 Err(e) => self.notice = Some(format!("Couldn't change its priority: {e}.")),
             },
+            Message::OpenMenu(on) => {
+                let select = match &on {
+                    menus::MenuFor::Process(id) => Message::Select(*id),
+                    menus::MenuFor::Service(name) => Message::SelectService(name.clone()),
+                };
+                let task = self.update(select);
+                self.menu = Some(menus::OpenMenu { on, at: hyprforge_ui::widgets::pointer::last() });
+                return task;
+            }
+            Message::CloseMenu => self.menu = None,
+            Message::MenuChose(message) => {
+                self.menu = None;
+                return self.update(*message);
+            }
+            Message::OpenLocationOf(exe) => show_in_folder(exe),
+            Message::Copy(text) => return iced::clipboard::write(text),
+            Message::Resized(size) => self.window_size = size,
             Message::OpenLocation => {
                 if let Some(exe) = self.details.properties.exe.clone() {
                     show_in_folder(exe);
@@ -993,6 +1032,7 @@ impl App {
     fn key(&mut self, press: KeyPress) -> Task<Message> {
         let ctrl = press.mods.ctrl;
         match press.key {
+            Key::Escape if self.menu.is_some() => self.menu = None,
             Key::Escape if self.confirm.is_some() => self.confirm = None,
             Key::Escape if self.services.confirm.is_some() => self.services.confirm = None,
             Key::Escape if self.sign_out.is_some() => self.sign_out = None,
@@ -1389,6 +1429,17 @@ mod render {
         draw_sized(&app, "overview", &dir, 1420.0);
         app.tab = Tab::Processes;
         draw(&app, "processes", &dir);
+        // A right click on the first app, as if the pointer were half
+        // way down its row — the menu, placed and drawn.
+        if let Some(lead) = app.table.apps.first().map(|a| a.lead.id) {
+            let _ = app.update(Message::OpenMenu(menus::MenuFor::Process(lead)));
+            app.window_size = Size::new(1280.0, 800.0);
+            if let Some(menu) = app.menu.as_mut() {
+                menu.at = (420.0, 140.0);
+            }
+            draw(&app, "processes-menu", &dir);
+            let _ = app.update(Message::CloseMenu);
+        }
 
         app.tab = Tab::Performance;
         draw(&app, "performance", &dir);

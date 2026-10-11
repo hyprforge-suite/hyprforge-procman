@@ -11,3 +11,5 @@ This component is released with the Hyprforge suite and shares its version: see 
 - The recorder: the whole machine every ten seconds into a root-only journal, one file a day, pruned by age and size.
 - `hyprforge-top`: atop's screen live or replayed, and `report` for atopsar's summaries, as text or JSON.
 - Network per process, counted by an eBPF program at the kernel's socket tracepoints.
+- Right-click menus on processes and services: end, kill, freeze, priority, open file location, a service's actions, and copying a process ID or a unit's name.
+- `port:` and `file:` search every user's processes while Show everything is on.

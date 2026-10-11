@@ -165,12 +165,13 @@ impl App {
                 line = line.push(cell(value, w));
             }
         }
-        button(line)
+        let id = e.id;
+        let row = button(line)
             .padding([spacing::XS, 0.0])
             .width(Length::Fill)
-            .on_press(Message::Select(e.id))
-            .style(move |t, status| widgets::selectable_row_style(t, status, selected))
-            .into()
+            .on_press(Message::Select(id))
+            .style(move |t, status| widgets::selectable_row_style(t, status, selected));
+        iced::widget::mouse_area(row).on_right_press(Message::OpenMenu(crate::menus::MenuFor::Process(id))).into()
     }
 
     fn properties<'a>(&'a self, e: &'a Entry, s: FontScale) -> Element<'a, Message> {

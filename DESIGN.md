@@ -251,6 +251,7 @@ as administrator through pkexec.
 - **`hyprforge-top report`:** atopsar's summaries of a day: cpu, mem, disk, net, psi, and top (the programs that used the most CPU time, with their peak memory and I/O). It takes `--from`/`--to`, `--step` and `--json`. Built from the same intervals the screen draws; an interval across a reboot is left out rather than counted from boot.
 
 - **Every user's processes in `port:` and `file:` lookups.** With Show everything on, the helper's `PortHolders` and `FileHolders` search every process as root, and the window adds what they find to its own search. The note under the list says which was searched, from what was searched and not from the switch, so an older helper without those methods reads as "your own processes only". A file lookup sends the helper an absolute path, which it compares with what processes hold open and never opens.
+- **Right-click menus** on every process row (Processes and Details) and every service. A right click selects the row and opens the menu at the pointer; each item sends what the matching button sends, so it goes through the same confirmations and refusals, and an item a button would dim is dimmed rather than left out. The menu is the suite's shared one (`hyprforge_ui::widgets::context_menu`, moved out of Files for this).
 - **The twelfth component** (2026-10-10, released after 0.1.13): the PKGBUILD's `hyprforge-procman`, the installer's `--procman`, Set up's Ctrl+Shift+Escape bind and "Record system history", and the site page.
 
 **Not yet:**

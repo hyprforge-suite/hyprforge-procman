@@ -130,9 +130,15 @@ impl App {
         if let Some((scope, name, action)) = &self.services.confirm {
             return stack![page, widgets::scrim(self.service_confirm_card(*scope, name, *action), Some(Message::ServiceCancelled))].into();
         }
-        match &self.confirm {
-            Some(c) => stack![page, widgets::scrim(self.confirm_card(c), Some(Message::Cancelled))].into(),
-            None => page.into(),
+        if let Some(c) = &self.confirm {
+            return stack![page, widgets::scrim(self.confirm_card(c), Some(Message::Cancelled))].into();
+        }
+        match (self.menu.as_ref(), self.menu_rows()) {
+            (Some(menu), Some(rows)) => {
+                let window = (self.window_size.width, self.window_size.height);
+                stack![page, widgets::menu_overlay(rows, menu.at, window, Message::CloseMenu, s)].into()
+            }
+            _ => page.into(),
         }
     }
 
@@ -314,13 +320,13 @@ impl App {
             container(widgets::meta_text(user, density::ROW_TEXT_BASE, s).color(ink(selected))).width(Length::Fixed(s.apply(USER_W))).padding([0.0, spacing::SM]),
         ]
         .align_y(Alignment::Center);
-        button(line)
+        let row = button(line)
             .padding([spacing::XS, 0.0])
             .width(Length::Fill)
             .height(Length::Shrink)
             .on_press(Message::Select(id))
-            .style(move |t, status| widgets::selectable_row_style(t, status, selected))
-            .into()
+            .style(move |t, status| widgets::selectable_row_style(t, status, selected));
+        iced::widget::mouse_area(row).on_right_press(Message::OpenMenu(crate::menus::MenuFor::Process(id))).into()
     }
 
     fn status(&self, s: FontScale) -> Element<'_, Message> {
@@ -371,7 +377,7 @@ impl App {
     }
 
     /// The selected process's entry, wherever it is listed.
-    fn entry(&self, id: Id) -> Option<&Entry> {
+    pub(crate) fn entry(&self, id: Id) -> Option<&Entry> {
         self.table.apps.iter().flat_map(|a| a.members.iter()).chain(self.table.background.iter()).find(|e| e.id == id)
     }
 
@@ -515,11 +521,14 @@ impl App {
             ]
             .align_y(Alignment::Center);
             list = list.push(
-                button(line)
-                    .padding([spacing::XS, 0.0])
-                    .width(Length::Fill)
-                    .on_press(Message::SelectService(u.name.clone()))
-                    .style(move |t, status| widgets::selectable_row_style(t, status, selected)),
+                iced::widget::mouse_area(
+                    button(line)
+                        .padding([spacing::XS, 0.0])
+                        .width(Length::Fill)
+                        .on_press(Message::SelectService(u.name.clone()))
+                        .style(move |t, status| widgets::selectable_row_style(t, status, selected)),
+                )
+                .on_right_press(Message::OpenMenu(crate::menus::MenuFor::Service(u.name.clone()))),
             );
         }
         let mut page = column![controls, widgets::divider(), heads, widgets::divider(), scrollable(list).height(Length::FillPortion(3))];
