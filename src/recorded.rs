@@ -199,9 +199,13 @@ where
             text
         }
     };
-    let bus = zbus::Connection::system().await.map_err(words)?;
-    let proxy = crate::helper::ProcManProxy::new(&bus).await.map_err(words)?;
-    call(proxy).await.map_err(words)
+    // May prompt for a password, so a person's time — but bounded.
+    crate::bound::within(crate::bound::PROMPT, "the privileged helper", async {
+        let bus = zbus::Connection::system().await.map_err(words)?;
+        let proxy = crate::helper::ProcManProxy::new(&bus).await.map_err(words)?;
+        call(proxy).await.map_err(words)
+    })
+    .await
 }
 
 #[cfg(test)]

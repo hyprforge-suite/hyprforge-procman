@@ -71,7 +71,11 @@ pub struct Polkit {
 impl Authority for Polkit {
     fn check(&self, sender: String, action: &'static str, interactive: bool) -> Checking {
         let system = self.system.clone();
-        Box::pin(async move {
+        // Bounded like every call: the helper stays up while a check is
+        // waiting (see `Service::asking`), so a polkit that never answered
+        // would otherwise keep a root process alive for good.
+        let limit = if interactive { crate::bound::PROMPT } else { crate::bound::QUICK };
+        Box::pin(crate::bound::within(limit, "polkit", async move {
             let subject: (&str, HashMap<&str, Value>) = ("system-bus-name", HashMap::from([("name", Value::from(sender.as_str()))]));
             let details: HashMap<&str, &str> = HashMap::new();
             // AllowUserInteraction = 1.
@@ -89,7 +93,7 @@ impl Authority for Polkit {
             let (authorized, _challenge, _details): (bool, bool, HashMap<String, String>) =
                 reply.body().deserialize().map_err(|e| format!("polkit's answer didn't parse: {e}"))?;
             Ok(authorized)
-        })
+        }))
     }
 }
 

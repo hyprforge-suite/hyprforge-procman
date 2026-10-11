@@ -136,7 +136,7 @@ async fn bus(scope: Scope) -> Result<zbus::Connection, String> {
 
 impl Systemd for Dbus {
     fn list(&self, scope: Scope) -> Pending<Vec<Unit>> {
-        Box::pin(async move {
+        Box::pin(crate::bound::within(crate::bound::QUICK, "systemd", async move {
             let conn = bus(scope).await?;
             let manager = ManagerProxy::new(&conn).await.map_err(|e| e.to_string())?;
             let units = manager.list_units_by_patterns(&[], &["*.service"]).await.map_err(|e| format!("systemd didn't list its units: {e}"))?;
@@ -146,11 +146,12 @@ impl Systemd for Dbus {
                 .filter_map(|(path, state)| Some((Path::new(&path).file_name()?.to_string_lossy().into_owned(), state)))
                 .collect();
             Ok(merge(units.into_iter().map(|u| (u.0, u.1, u.2, u.3, u.4)).collect(), files))
-        })
+        }))
     }
 
     fn act(&self, scope: Scope, name: String, action: Action) -> Pending<()> {
-        Box::pin(async move {
+        // Allowed to prompt, so a person's time.
+        Box::pin(crate::bound::within(crate::bound::PROMPT, "systemd", async move {
             let conn = bus(scope).await?;
             let manager = zbus::Proxy::new(&conn, "org.freedesktop.systemd1", "/org/freedesktop/systemd1", "org.freedesktop.systemd1.Manager")
                 .await
@@ -184,7 +185,7 @@ impl Systemd for Dbus {
                 manager.call_with_flags::<_, _, ()>("Reload", flags, &()).await.map_err(|e| said(&e))?;
             }
             Ok(())
-        })
+        }))
     }
 }
 

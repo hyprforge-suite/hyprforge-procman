@@ -14,6 +14,7 @@ mod recorded_view;
 mod view;
 
 use hyprforge_keys::{Key, KeyPress};
+use hyprforge_procman::bound;
 use hyprforge_procman::helper;
 use hyprforge_procman::history::History;
 use hyprforge_procman::inspect;
@@ -415,9 +416,14 @@ fn read(fs: ProcFs, helper: Option<zbus::Connection>, lookup: Option<inspect::Lo
             let mut everything_lapsed = false;
             let mut held = None;
             if let Some(system) = helper {
-                everything_lapsed = !fill_in(&system, &mut snapshot).await;
-                if let (false, Some(lookup)) = (everything_lapsed, lookup) {
-                    held = holders(&system, &lookup).await.map(|found| (lookup, found));
+                // Bounded: a refresh that never finished would be the last
+                // one, since a new one isn't started while one runs. A
+                // helper that doesn't answer in time leaves this reading
+                // without what it adds — dashes — and isn't a lapse.
+                let filled = tokio::time::timeout(bound::QUICK, fill_in(&system, &mut snapshot)).await;
+                everything_lapsed = filled == Ok(false);
+                if let (Ok(true), Some(lookup)) = (filled, lookup) {
+                    held = tokio::time::timeout(bound::QUICK, holders(&system, &lookup)).await.ok().flatten().map(|found| (lookup, found));
                 }
             }
             Ok(Box::new(Reading { snapshot, gpu, machine, windows, at, nvidia, everything_lapsed, held }))
@@ -474,10 +480,13 @@ async fn fill_in(system: &zbus::Connection, snapshot: &mut Snapshot) -> bool {
 
 /// The helper over the system bus, prompting if polkit wants a password.
 async fn unlock() -> Result<zbus::Connection, String> {
-    let system = zbus::Connection::system().await.map_err(|e| format!("couldn't reach the system bus: {e}"))?;
-    let proxy = helper::ProcManProxy::new(&system).await.map_err(|e| e.to_string())?;
-    proxy.usage(Vec::new(), true).await.map_err(helper_error)?;
-    Ok(system)
+    bound::within(bound::PROMPT, "the privileged helper", async {
+        let system = zbus::Connection::system().await.map_err(|e| format!("couldn't reach the system bus: {e}"))?;
+        let proxy = helper::ProcManProxy::new(&system).await.map_err(|e| e.to_string())?;
+        proxy.usage(Vec::new(), true).await.map_err(helper_error)?;
+        Ok(system)
+    })
+    .await
 }
 
 /// The helper's refusals in words.
@@ -764,11 +773,11 @@ impl App {
                     return self.update(Message::Niced(result));
                 }
                 return Task::perform(
-                    async move {
+                    bound::within(bound::PROMPT, "the privileged helper", async move {
                         let system = zbus::Connection::system().await.map_err(|e| e.to_string())?;
                         let proxy = helper::ProcManProxy::new(&system).await.map_err(|e| e.to_string())?;
                         proxy.set_nice(id.pid, id.start, nice, true).await.map_err(helper_error)
-                    },
+                    }),
                     Message::Niced,
                 );
             }
@@ -952,11 +961,11 @@ impl App {
                         How::Force => libc::SIGKILL,
                     };
                     return Task::perform(
-                        async move {
+                        bound::within(bound::PROMPT, "the privileged helper", async move {
                             let system = zbus::Connection::system().await.map_err(|e| e.to_string())?;
                             let proxy = helper::ProcManProxy::new(&system).await.map_err(|e| e.to_string())?;
                             proxy.signal(c.id.pid, c.id.start, signal, true).await.map_err(helper_error)
-                        },
+                        }),
                         Message::EndedAsAdmin,
                     );
                 }

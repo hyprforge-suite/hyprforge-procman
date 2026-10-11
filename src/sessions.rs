@@ -57,6 +57,10 @@ trait LoginSession {
 
 /// Every sign-in session.
 pub async fn list() -> Result<Vec<Session>, String> {
+    crate::bound::within(crate::bound::QUICK, "logind", listed()).await
+}
+
+async fn listed() -> Result<Vec<Session>, String> {
     let system = zbus::Connection::system().await.map_err(|e| format!("couldn't reach logind: {e}"))?;
     let login = LoginProxy::new(&system).await.map_err(|e| e.to_string())?;
     let mut out = Vec::new();
@@ -92,8 +96,12 @@ pub enum SessionAction {
     SignOut,
 }
 
-/// Locks or ends session `id`.
+/// Locks or ends session `id` — allowed to prompt, so a person's time.
 pub async fn act(id: String, action: SessionAction) -> Result<(), String> {
+    crate::bound::within(crate::bound::PROMPT, "logind", acted(id, action)).await
+}
+
+async fn acted(id: String, action: SessionAction) -> Result<(), String> {
     let system = zbus::Connection::system().await.map_err(|e| e.to_string())?;
     let manager = zbus::Proxy::new(&system, "org.freedesktop.login1", "/org/freedesktop/login1", "org.freedesktop.login1.Manager")
         .await

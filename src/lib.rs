@@ -8,6 +8,8 @@
 //! never one that merely reused its number. The window is `main.rs`.
 
 pub mod app_history;
+#[cfg(feature = "dbus")]
+pub mod bound;
 pub mod cgroups;
 pub mod exits;
 pub mod gpu;
