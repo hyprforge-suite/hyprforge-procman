@@ -1,6 +1,6 @@
 [package]
 name = "hyprforge-procman"
-version = "0.1.12"
+version = "0.1.13"
 edition = "2021"
 license = "MIT"
 description = "A process manager for Hyprland: what is running, what it costs, and which window it belongs to — read from /proc, drawn in the suite's look."
