@@ -1362,8 +1362,8 @@ mod render {
     #[test]
     #[ignore = "draws this machine's processes to $SHOTS"]
     fn render_every_tab() {
-        // check.sh runs every ignored test; this one is a tool, so with
-        // nowhere to draw it skips rather than fails.
+        // A tool, not a check (the suite's `manual` tier): with nowhere
+        // to draw it skips rather than fails.
         let Ok(dir) = std::env::var("SHOTS") else {
             eprintln!("HYPRFORGE-SKIP: render_every_tab draws only with $SHOTS set");
             return;
