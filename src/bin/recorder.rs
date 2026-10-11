@@ -8,6 +8,14 @@
 //!
 //! `--once [--dir PATH]` takes one sample and exits — for checking by
 //! hand, as any user (it then sees what that user may read).
+//!
+//! `--self-test` proves, from inside whatever sandbox it was started
+//! in, the three things the unit's sandbox can silently take away:
+//! that exits arrive, that the network counter loads, and that a sample
+//! can be taken and written. The suite's `tools/hf sandbox` runs it
+//! under the unit file's own properties. It exists because the unit
+//! once had `PrivateNetwork=yes`, which hides every exit, and every
+//! test passed — they ran outside the sandbox.
 
 use hyprforge_procman::exits::Listener;
 use hyprforge_procman::recorder::{self, Config, Recorder};
@@ -39,6 +47,9 @@ fn main() -> std::process::ExitCode {
     };
     if let Some(dir) = value("--dir") {
         config.directory = dir.into();
+    }
+    if flag("--self-test").is_some() {
+        return self_test(config);
     }
     if flag("--once").is_some() {
         return match Recorder::new(config).tick(chrono::Local::now(), Vec::new) {
@@ -103,6 +114,45 @@ fn run(config: Config) -> std::process::ExitCode {
     }
     tracing::info!("stopped");
     std::process::ExitCode::SUCCESS
+}
+
+/// See the crate doc. Each failure names itself; the exit status is the
+/// verdict.
+fn self_test(mut config: Config) -> std::process::ExitCode {
+    let mut failed = false;
+    match Listener::start() {
+        Ok(_) => println!("ok: exits arrive"),
+        Err(e) => {
+            println!("FAILED: exits: {e}");
+            failed = true;
+        }
+    }
+    // A sample written somewhere this sandbox lets it write: the unit's
+    // PrivateTmp gives it a /tmp of its own.
+    let dir = std::env::temp_dir().join(format!("hyprforge-recorder-self-test-{}", std::process::id()));
+    config.directory = dir.clone();
+    let mut recorder = Recorder::new(config);
+    match &recorder.net_missing {
+        None => println!("ok: the network counter loaded"),
+        Some(why) if cfg!(feature = "netbpf") => {
+            println!("FAILED: network counter: {why}");
+            failed = true;
+        }
+        Some(why) => println!("skip: network counter not built in ({why})"),
+    }
+    match recorder.tick(chrono::Local::now(), Vec::new) {
+        Ok(()) => println!("ok: a sample was taken and written"),
+        Err(e) => {
+            println!("FAILED: sample: {e}");
+            failed = true;
+        }
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+    if failed {
+        std::process::ExitCode::FAILURE
+    } else {
+        std::process::ExitCode::SUCCESS
+    }
 }
 
 /// Sleeps to the next multiple of `interval` on the wall clock, so
