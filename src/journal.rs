@@ -345,31 +345,36 @@ pub fn day_file(dir: &Path, at: chrono::DateTime<chrono::Local>) -> PathBuf {
     dir.join(format!("{}.hfr", at.format("%Y-%m-%d")))
 }
 
-/// Deletes the oldest day files until at most `keep_days` remain and
-/// together they take at most `max_bytes`. Today's file is never
-/// deleted. Returns what was removed.
+/// Deletes the oldest days until at most `keep_days` remain and together
+/// they take at most `max_bytes`. A day is its `.hfr` file and any kept
+/// aside beside it (`.hfr.old`, `.hfr.old.2`, …), which go with it and
+/// count towards the size — left out, they were never deleted at all.
+/// Today is never deleted. Returns what was removed.
 pub fn prune(dir: &Path, keep_days: usize, max_bytes: u64, today: &Path) -> io::Result<Vec<PathBuf>> {
-    let mut files: Vec<(PathBuf, u64)> = std::fs::read_dir(dir)?
-        .flatten()
-        .map(|e| e.path())
-        .filter(|p| p.extension().is_some_and(|x| x == "hfr"))
-        .map(|p| {
-            let size = std::fs::metadata(&p).map(|m| m.len()).unwrap_or(0);
-            (p, size)
-        })
-        .collect();
-    // YYYY-MM-DD sorts by date.
-    files.sort();
-    let mut total: u64 = files.iter().map(|(_, s)| s).sum();
+    let today = today.file_name().and_then(|n| n.to_str()).and_then(|n| n.get(..10)).unwrap_or_default().to_owned();
+    let mut days: std::collections::BTreeMap<String, Vec<(PathBuf, u64)>> = Default::default();
+    for e in std::fs::read_dir(dir)?.flatten() {
+        let Ok(name) = e.file_name().into_string() else { continue };
+        let Some(day) = name.get(..10).filter(|d| is_day(d)) else { continue };
+        let rest = &name[10..];
+        if rest == ".hfr" || rest.starts_with(".hfr.old") {
+            let size = e.metadata().map(|m| m.len()).unwrap_or(0);
+            days.entry(day.to_owned()).or_default().push((e.path(), size));
+        }
+    }
+    let mut total: u64 = days.values().flatten().map(|(_, s)| s).sum();
     let mut removed = Vec::new();
-    while let Some((oldest, size)) = files.first().cloned() {
-        if oldest == today || (files.len() <= keep_days && total <= max_bytes) {
+    // YYYY-MM-DD sorts by date, so the map's first is the oldest.
+    while let Some((day, files)) = days.first_key_value().map(|(d, f)| (d.clone(), f.clone())) {
+        if day == today || (days.len() <= keep_days && total <= max_bytes) {
             break;
         }
-        std::fs::remove_file(&oldest)?;
-        total -= size;
-        removed.push(oldest);
-        files.remove(0);
+        for (path, size) in files {
+            std::fs::remove_file(&path)?;
+            total -= size;
+            removed.push(path);
+        }
+        days.remove(&day);
     }
     Ok(removed)
 }
@@ -639,5 +644,21 @@ mod tests {
         let removed = prune(t.path(), 30, 150, &today).unwrap();
         assert_eq!(removed, [t.path().join("2026-10-03.hfr")], "over the byte budget");
         assert!(prune(t.path(), 0, 0, &today).unwrap().is_empty(), "today is never removed");
+    }
+
+    /// A day's set-aside files go with it and count towards the budget;
+    /// before, they were never deleted at all.
+    #[test]
+    fn a_days_set_aside_files_are_pruned_with_it() {
+        let t = tempfile::tempdir().unwrap();
+        for name in ["2026-10-01.hfr", "2026-10-01.hfr.old", "2026-10-01.hfr.old.2", "2026-10-02.hfr.old", "2026-10-02.hfr", "notes.txt"] {
+            std::fs::write(t.path().join(name), vec![0u8; 100]).unwrap();
+        }
+        let today = t.path().join("2026-10-02.hfr");
+        let mut removed = prune(t.path(), 1, u64::MAX, &today).unwrap();
+        removed.sort();
+        assert_eq!(removed, ["2026-10-01.hfr", "2026-10-01.hfr.old", "2026-10-01.hfr.old.2"].map(|n| t.path().join(n)));
+        assert!(t.path().join("2026-10-02.hfr.old").exists(), "today's, kept");
+        assert!(t.path().join("notes.txt").exists(), "nothing that isn't a journal");
     }
 }
