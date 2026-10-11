@@ -85,6 +85,7 @@ const OFF_WRITE_BYTES: usize = 256;
 const OFF_CANCELLED: usize = 264;
 const OFF_NVCSW: usize = 272;
 const OFF_NIVCSW: usize = 280;
+const OFF_TGID: usize = 368;
 
 /// `struct taskstats` → [`Exit`]. Fields past the end of a shorter
 /// (older) record read as zero.
@@ -192,16 +193,31 @@ fn messages(mut b: &[u8]) -> Vec<(u16, &[u8])> {
     out
 }
 
-/// The exits in one taskstats message. A whole process's end arrives as
-/// `AGGR_TGID` (all its threads summed); one thread's as `AGGR_PID`.
-/// `whole` keeps only the former.
+/// The exits in one taskstats message. A thread's end arrives as
+/// `AGGR_PID`; when it was the last of a group of several, the same
+/// message also carries `AGGR_TGID`, all the threads summed. `whole`
+/// keeps whole processes only.
+///
+/// A process that only ever had one thread gets *no* `AGGR_TGID`: the
+/// kernel keeps group totals only once a second thread exists
+/// (`taskstats_tgid_alloc` returns the empty `sig->stats` for a lone
+/// thread), so its end is the `AGGR_PID` alone. This once read
+/// `AGGR_TGID` only, from a fixture written from memory of the protocol,
+/// and so heard no single-threaded exit at all — `sh`, `true`, most of
+/// what a machine runs. The root test against the real kernel is what
+/// found it. A lone `AGGR_PID` counts as a whole process when its thread
+/// group is itself (`ac_tgid == ac_pid`), or when the record is too old
+/// to say; a group's main thread ending before its siblings looks the
+/// same, and is rare enough to accept.
 pub fn parse_message(payload: &[u8], whole: bool) -> Vec<Exit> {
     let Some(genl_attrs) = payload.get(4..) else { return Vec::new() };
+    let all = attrs(genl_attrs);
+    let has_group = all.iter().any(|(kind, _)| *kind == TASKSTATS_TYPE_AGGR_TGID);
     let mut out = Vec::new();
-    for (kind, nested) in attrs(genl_attrs) {
+    for (kind, nested) in all {
         let wanted = match kind {
             TASKSTATS_TYPE_AGGR_TGID => true,
-            TASKSTATS_TYPE_AGGR_PID => !whole,
+            TASKSTATS_TYPE_AGGR_PID => !whole || (!has_group && leads_its_group(nested)),
             _ => false,
         };
         if !wanted {
@@ -224,6 +240,19 @@ pub fn parse_message(payload: &[u8], whole: bool) -> Vec<Exit> {
         }
     }
     out
+}
+
+/// Whether an `AGGR_PID`'s record is its own thread group's — a process
+/// with one thread. A record from before `ac_tgid` existed can't say, and
+/// is taken as one: dropping every exit is the worse mistake.
+fn leads_its_group(nested: &[u8]) -> bool {
+    attrs(nested).into_iter().filter(|(k, _)| *k == TASKSTATS_TYPE_STATS).all(|(_, v)| {
+        let u32_at = |o: usize| v.get(o..o + 4).map(|s| u32::from_ne_bytes(s.try_into().unwrap()));
+        match (u32_at(OFF_PID), u32_at(OFF_TGID)) {
+            (Some(pid), Some(tgid)) => tgid == 0 || tgid == pid,
+            _ => true,
+        }
+    })
 }
 
 /// A taskstats netlink socket.
@@ -526,6 +555,61 @@ mod tests {
         let exits = parse_message(parsed[0].1, true);
         assert_eq!(exits.len(), 1);
         assert_eq!(exits[0].pid, 4300, "the tgid, not the last thread's pid");
+    }
+
+    fn nested(id_kind: u16, id: u32, stats: &[u8]) -> Vec<u8> {
+        let mut nested = Vec::new();
+        for (k, v) in [(id_kind, &id.to_ne_bytes()[..]), (TASKSTATS_TYPE_STATS, stats)] {
+            nested.extend_from_slice(&((4 + v.len()) as u16).to_ne_bytes());
+            nested.extend_from_slice(&k.to_ne_bytes());
+            nested.extend_from_slice(v);
+            nested.resize(align4(nested.len()), 0);
+        }
+        nested
+    }
+
+    fn stats_for(pid: u32, tgid: u32) -> Vec<u8> {
+        let mut stats = record();
+        stats.resize(stats.len().max(OFF_TGID + 4), 0);
+        stats[OFF_PID..OFF_PID + 4].copy_from_slice(&pid.to_ne_bytes());
+        stats[OFF_TGID..OFF_TGID + 4].copy_from_slice(&tgid.to_ne_bytes());
+        stats
+    }
+
+    /// What the kernel sends when `sh -c 'exit 3'` ends: one `AGGR_PID`
+    /// and nothing else, because a lone thread has no group totals.
+    #[test]
+    fn a_single_threaded_process_ends_as_a_lone_pid_record_and_counts() {
+        let msg = message(30, 2, &[(TASKSTATS_TYPE_AGGR_PID, &nested(TASKSTATS_TYPE_PID, 4400, &stats_for(4400, 4400)))]);
+        let exits = parse_message(messages(&msg)[0].1, true);
+        assert_eq!(exits.len(), 1, "a single-threaded exit must be heard");
+        assert_eq!(exits[0].pid, 4400);
+    }
+
+    /// One worker thread of a still-running process ending is not a
+    /// process ending.
+    #[test]
+    fn a_thread_ending_alone_is_not_a_whole_process() {
+        let msg = message(30, 2, &[(TASKSTATS_TYPE_AGGR_PID, &nested(TASKSTATS_TYPE_PID, 4401, &stats_for(4401, 4300)))]);
+        assert!(parse_message(messages(&msg)[0].1, true).is_empty());
+        assert_eq!(parse_message(messages(&msg)[0].1, false).len(), 1);
+    }
+
+    /// The last thread of a group: the message carries both, and only the
+    /// group's summed record counts — never the thread's as well.
+    #[test]
+    fn the_last_thread_of_a_group_counts_once_as_the_group() {
+        let msg = message(
+            30,
+            2,
+            &[
+                (TASKSTATS_TYPE_AGGR_PID, &nested(TASKSTATS_TYPE_PID, 4300, &stats_for(4300, 4300))[..]),
+                (TASKSTATS_TYPE_AGGR_TGID, &nested(TASKSTATS_TYPE_TGID, 4300, &record())[..]),
+            ],
+        );
+        let exits = parse_message(messages(&msg)[0].1, true);
+        assert_eq!(exits.len(), 1);
+        assert_eq!(exits[0].pid, 4300);
     }
 
     /// The real kernel, about this very process: the family resolves and
