@@ -22,7 +22,7 @@ use hyprforge_procman::model::{self, Column, Table, View};
 use hyprforge_procman::proc::{ProcFs, Snapshot};
 use hyprforge_procman::sample::{self, Id};
 use hyprforge_procman::services::{self, Action, Dbus, Scope, Systemd, Unit};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use hyprforge_procman::sessions::{self, Session, SessionAction};
 use hyprforge_procman::signal::{self, How};
 use hyprforge_procman::startup;
@@ -212,6 +212,10 @@ pub struct Reading {
     /// minutes ran out. The window locks again rather than prompting
     /// once a second.
     everything_lapsed: bool,
+    /// What the helper found for the `port:`/`file:` search this reading
+    /// was asked with, among every user's processes — `None` when there
+    /// was no search, Show everything was off, or the helper couldn't say.
+    held: Option<(inspect::Lookup, Vec<(i32, u64)>)>,
 }
 
 /// Whether the helper is filling in what this user cannot read.
@@ -350,6 +354,9 @@ pub struct App {
     /// This window's own process and everything it runs under — never
     /// frozen, and named in an End confirmation.
     pub critical: std::collections::HashSet<i32>,
+    /// The last reading's `port:`/`file:` search covered every user's
+    /// processes, through the helper — what the Details note says.
+    pub lookup_everyone: bool,
     reading: bool,
 }
 
@@ -386,7 +393,7 @@ pub fn search_id() -> WidgetId {
     WidgetId::new("procman-search")
 }
 
-fn read(fs: ProcFs, helper: Option<zbus::Connection>, scan: GpuScan, ask_nvidia: bool, drive_temperatures: bool) -> Task<Message> {
+fn read(fs: ProcFs, helper: Option<zbus::Connection>, lookup: Option<inspect::Lookup>, scan: GpuScan, ask_nvidia: bool, drive_temperatures: bool) -> Task<Message> {
     Task::perform(
         async move {
             let (mut snapshot, machine, windows, gpu, nvidia) = tokio::task::spawn_blocking(move || {
@@ -406,13 +413,28 @@ fn read(fs: ProcFs, helper: Option<zbus::Connection>, scan: GpuScan, ask_nvidia:
             .map_err(|e| e.to_string())??;
             let at = std::time::Instant::now();
             let mut everything_lapsed = false;
+            let mut held = None;
             if let Some(system) = helper {
                 everything_lapsed = !fill_in(&system, &mut snapshot).await;
+                if let (false, Some(lookup)) = (everything_lapsed, lookup) {
+                    held = holders(&system, &lookup).await.map(|found| (lookup, found));
+                }
             }
-            Ok(Box::new(Reading { snapshot, gpu, machine, windows, at, nvidia, everything_lapsed }))
+            Ok(Box::new(Reading { snapshot, gpu, machine, windows, at, nvidia, everything_lapsed, held }))
         },
         Message::Read,
     )
+}
+
+/// The helper's answer to a `port:`/`file:` search, over every user's
+/// processes; `None` when it couldn't give one (an older helper, or a
+/// path it won't take), so the window says it looked at yours alone.
+async fn holders(system: &zbus::Connection, lookup: &inspect::Lookup) -> Option<Vec<(i32, u64)>> {
+    let proxy = helper::ProcManProxy::new(system).await.ok()?;
+    match lookup {
+        inspect::Lookup::Port(port) => proxy.port_holders(*port, false).await.ok(),
+        inspect::Lookup::File(path) => proxy.file_holders(path.to_str()?, false).await.ok(),
+    }
 }
 
 /// Asks the helper for what this user could not read, without a prompt.
@@ -520,10 +542,11 @@ impl App {
             net_rates: Vec::new(),
             totals: Totals::default(),
             critical: Default::default(),
+            lookup_everyone: false,
             reading: true,
         };
         let scan = app.gpu_scan.clone();
-        (app, read(fs, None, scan, false, false))
+        (app, read(fs, None, None, scan, false, false))
     }
 
     fn load_services(&mut self) -> Task<Message> {
@@ -605,6 +628,12 @@ impl App {
         matches!(self.everything, Everything::Open(_))
     }
 
+    /// The `port:` or `file:` search the box holds, if it holds one.
+    fn lookup(&self) -> Option<inspect::Lookup> {
+        let home = std::env::var_os("HOME").map(std::path::PathBuf::from).unwrap_or_default();
+        inspect::Lookup::parse(&self.view.query, &home)
+    }
+
     fn helper(&self) -> Option<zbus::Connection> {
         match &self.everything {
             Everything::Open(system) => Some(system.clone()),
@@ -638,7 +667,7 @@ impl App {
                         let list = self.load_services();
                         if !self.reading {
                             self.reading = true;
-                            return Task::batch([list, read(self.fs.clone(), self.helper(), self.gpu_scan.clone(), self.ask_nvidia(), self.ask_drive_temperatures())]);
+                            return Task::batch([list, read(self.fs.clone(), self.helper(), self.lookup(), self.gpu_scan.clone(), self.ask_nvidia(), self.ask_drive_temperatures())]);
                         }
                         return list;
                     }
@@ -647,7 +676,7 @@ impl App {
                 // machine gets fewer refreshes, not a queue of them.
                 if !self.reading {
                     self.reading = true;
-                    return read(self.fs.clone(), self.helper(), self.gpu_scan.clone(), self.ask_nvidia(), self.ask_drive_temperatures());
+                    return read(self.fs.clone(), self.helper(), self.lookup(), self.gpu_scan.clone(), self.ask_nvidia(), self.ask_drive_temperatures());
                 }
             }
             Message::Read(result) => {
@@ -747,7 +776,7 @@ impl App {
                 Ok(()) => {
                     if !self.reading {
                         self.reading = true;
-                        return read(self.fs.clone(), self.helper(), self.gpu_scan.clone(), self.ask_nvidia(), self.ask_drive_temperatures());
+                        return read(self.fs.clone(), self.helper(), self.lookup(), self.gpu_scan.clone(), self.ask_nvidia(), self.ask_drive_temperatures());
                     }
                 }
                 Err(e) => self.notice = Some(format!("Couldn't change its priority: {e}.")),
@@ -859,7 +888,7 @@ impl App {
                 self.notice = (refused > 0).then(|| format!("{refused} of the processes under {} weren't yours to end.", c.name));
                 if !self.reading {
                     self.reading = true;
-                    return read(self.fs.clone(), self.helper(), self.gpu_scan.clone(), self.ask_nvidia(), self.ask_drive_temperatures());
+                    return read(self.fs.clone(), self.helper(), self.lookup(), self.gpu_scan.clone(), self.ask_nvidia(), self.ask_drive_temperatures());
                 }
             }
             Message::Confirmed => {
@@ -871,7 +900,7 @@ impl App {
                             // the next tick would.
                             if !self.reading {
                                 self.reading = true;
-                                return read(self.fs.clone(), self.helper(), self.gpu_scan.clone(), self.ask_nvidia(), self.ask_drive_temperatures());
+                                return read(self.fs.clone(), self.helper(), self.lookup(), self.gpu_scan.clone(), self.ask_nvidia(), self.ask_drive_temperatures());
                             }
                         }
                         Err(signal::Refused::NotAllowed) => {
@@ -897,7 +926,7 @@ impl App {
                         self.notice = Some(format!("Couldn't {} it: {e}", if frozen { "freeze" } else { "resume" }));
                     } else if !self.reading {
                         self.reading = true;
-                        return read(self.fs.clone(), self.helper(), self.gpu_scan.clone(), self.ask_nvidia(), self.ask_drive_temperatures());
+                        return read(self.fs.clone(), self.helper(), self.lookup(), self.gpu_scan.clone(), self.ask_nvidia(), self.ask_drive_temperatures());
                     }
                 }
             }
@@ -937,7 +966,7 @@ impl App {
                     self.notice = None;
                     if !self.reading {
                         self.reading = true;
-                        return read(self.fs.clone(), self.helper(), self.gpu_scan.clone(), self.ask_nvidia(), self.ask_drive_temperatures());
+                        return read(self.fs.clone(), self.helper(), self.lookup(), self.gpu_scan.clone(), self.ask_nvidia(), self.ask_drive_temperatures());
                     }
                 }
                 Err(e) => self.notice = Some(format!("Couldn't end it: {e}.")),
@@ -989,7 +1018,7 @@ impl App {
     }
 
     fn take(&mut self, reading: Reading) {
-        let Reading { snapshot, gpu, mut machine, windows, at, nvidia, everything_lapsed } = reading;
+        let Reading { snapshot, gpu, mut machine, windows, at, nvidia, everything_lapsed, held } = reading;
         // Temperatures read now and then are kept between reads.
         for d in &mut machine.disks {
             match d.celsius {
@@ -1157,11 +1186,22 @@ impl App {
         self.critical = model::ancestry(&snapshot, std::process::id() as i32);
         self.critical.extend(snapshot.procs.iter().filter(|p| p.name == "Hyprland" && p.uid == self.me).map(|p| p.pid));
         // A `port:`/`file:` search is answered again with every reading,
-        // since what holds a port changes.
-        let home = std::env::var_os("HOME").map(std::path::PathBuf::from).unwrap_or_default();
-        self.view.only = inspect::Lookup::parse(&self.view.query, &home).map(|lookup| {
+        // since what holds a port changes. What this user can read is
+        // searched here; with Show everything on, the helper searched the
+        // rest — counted only if it answered the search the box still
+        // holds, and only for processes that are still the ones it saw.
+        self.lookup_everyone = false;
+        self.view.only = self.lookup().map(|lookup| {
             let pids: Vec<i32> = snapshot.procs.iter().filter(|p| !p.kernel).map(|p| p.pid).collect();
-            inspect::who(std::path::Path::new("/proc"), &pids, &lookup)
+            let mut found = inspect::who(std::path::Path::new("/proc"), &pids, &lookup);
+            if let Some((asked, held)) = &held {
+                if *asked == lookup {
+                    self.lookup_everyone = true;
+                    let seen: HashSet<(i32, u64)> = snapshot.procs.iter().map(|p| (p.pid, p.start)).collect();
+                    found.extend(held.iter().filter(|id| seen.contains(id)).map(|&(pid, _)| pid));
+                }
+            }
+            found
         });
         // What the Details tab shows of the selected process.
         self.details.properties = match self.selected {
@@ -1275,7 +1315,7 @@ mod render {
         let gpu = scan.lock().unwrap().read(std::path::Path::new("/proc"), &pids);
         // The NVIDIA card is not asked here: each failed ask is a kernel
         // log line, and a dozen readings would be a dozen lines.
-        Reading { snapshot, gpu, machine: { let mut sys = SysFs::default(); sys.drive_temperatures = true; sys.read() }, windows: windows::read(), at: std::time::Instant::now(), nvidia: None, everything_lapsed: false }
+        Reading { snapshot, gpu, machine: { let mut sys = SysFs::default(); sys.drive_temperatures = true; sys.read() }, windows: windows::read(), at: std::time::Instant::now(), nvidia: None, everything_lapsed: false, held: None }
     }
 
     fn draw(app: &App, name: &str, dir: &std::path::Path) {

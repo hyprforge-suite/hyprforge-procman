@@ -78,8 +78,12 @@ impl App {
         let lines = model::details(&self.table, &self.view, self.details.tree);
         let mut list = column![].spacing(1.0).padding([spacing::XS, spacing::SM]);
         if self.view.only.is_some() {
-            let note = if self.everything_open() {
+            // Claimed from what was searched, not from whether Show
+            // everything is on: an older helper can be on and not search.
+            let note = if self.lookup_everyone {
                 "Looking at every process."
+            } else if self.everything_open() {
+                "Looking at your own processes only — the helper couldn't search the rest."
             } else {
                 "Looking at your own processes only — Show everything to search the rest."
             };

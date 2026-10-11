@@ -314,7 +314,12 @@ impl ProcFs {
 /// When `pid` started, in clock ticks since boot, or `None` if there is
 /// no such process now.
 pub fn start_time(pid: i32) -> Option<u64> {
-    parse_stat(&fs::read_to_string(format!("/proc/{pid}/stat")).ok()?).map(|s| s.start)
+    start_time_in(Path::new("/proc"), pid)
+}
+
+/// [`start_time`] under another `/proc`, for a test's stand-in.
+pub fn start_time_in(root: &Path, pid: i32) -> Option<u64> {
+    parse_stat(&fs::read_to_string(root.join(pid.to_string()).join("stat")).ok()?).map(|s| s.start)
 }
 
 /// Whether a `/proc/<pid>/stat` line is a kernel thread's.

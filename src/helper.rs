@@ -13,7 +13,9 @@
 //!
 //! - **Arguments are typed.** A process is a pid and its start time; a
 //!   signal is one of four; a priority is a number in range. It never
-//!   takes a path, a command or a string to run.
+//!   takes a command or a string to run. The one path it takes, a
+//!   `file:` search's, is compared with what processes hold open and
+//!   never opened itself.
 //! - **A process is the one that was chosen.** The start time is checked
 //!   after a pidfd is open, as `signal.rs` does for the window.
 //! - **Some processes are never acted on, administrator or not:** pid 1
@@ -154,6 +156,21 @@ impl Service {
         }
     }
 
+    /// What `lookup` finds among every process, with each one's start
+    /// time so the caller can tell a reused pid from the one it saw.
+    fn holders(&self, lookup: &crate::inspect::Lookup) -> Vec<(i32, u64)> {
+        let pids: Vec<i32> = std::fs::read_dir(&self.proc_root)
+            .map(|d| d.flatten().filter_map(|e| e.file_name().to_str()?.parse().ok()).collect())
+            .unwrap_or_default();
+        let found = crate::inspect::who(&self.proc_root, &pids, lookup);
+        let mut out: Vec<(i32, u64)> = found
+            .into_iter()
+            .filter_map(|pid| crate::proc::start_time_in(&self.proc_root, pid).map(|start| (pid, start)))
+            .collect();
+        out.sort_unstable();
+        out
+    }
+
     /// The refusals that hold for an administrator too.
     fn never(&self, id: Id) -> zbus::fdo::Result<()> {
         if id.pid <= 1 {
@@ -233,6 +250,28 @@ impl Service {
         Ok(processes.into_iter().filter_map(|(pid, start)| crate::proc::usage(&self.proc_root, Id { pid, start })).collect())
     }
 
+    /// Every process holding a socket with `port` at either end, as
+    /// (pid, start) — the `port:` search, over every user's processes.
+    async fn port_holders(&self, port: u16, interactive: bool, #[zbus(header)] header: Header<'_>) -> zbus::fdo::Result<Vec<(i32, u64)>> {
+        self.allow(&header, action::READ_ALL, interactive).await?;
+        Ok(self.holders(&crate::inspect::Lookup::Port(port)))
+    }
+
+    /// Every process holding `path` open, or anything under it when it is
+    /// a folder, as (pid, start) — the `file:` search, over every user's
+    /// processes. The path is compared with each descriptor's target and
+    /// never opened, so asking about a file says nothing of what is in it.
+    /// It has to be absolute: `~` is the caller's, and the helper's would
+    /// be root's.
+    async fn file_holders(&self, path: String, interactive: bool, #[zbus(header)] header: Header<'_>) -> zbus::fdo::Result<Vec<(i32, u64)>> {
+        let path = std::path::PathBuf::from(path);
+        if !path.is_absolute() {
+            return Err(zbus::fdo::Error::InvalidArgs(format!("{} isn't an absolute path", path.display())));
+        }
+        self.allow(&header, action::READ_ALL, interactive).await?;
+        Ok(self.holders(&crate::inspect::Lookup::File(path)))
+    }
+
     /// Network bytes in and out for each of `processes` (pid, start), as
     /// (pid, start, received, sent), counted since the helper first loaded
     /// its eBPF counter. A process that ended, or a pid that now names
@@ -252,6 +291,8 @@ pub trait ProcMan {
     fn set_nice(&self, pid: i32, start: u64, nice: i32, interactive: bool) -> zbus::Result<()>;
     fn usage(&self, processes: Vec<(i32, u64)>, interactive: bool) -> zbus::Result<Vec<Usage>>;
     fn net_usage(&self, processes: Vec<(i32, u64)>, interactive: bool) -> zbus::Result<Vec<(i32, u64, u64, u64)>>;
+    fn port_holders(&self, port: u16, interactive: bool) -> zbus::Result<Vec<(i32, u64)>>;
+    fn file_holders(&self, path: &str, interactive: bool) -> zbus::Result<Vec<(i32, u64)>>;
     fn history_days(&self, interactive: bool) -> zbus::Result<Vec<(String, u64)>>;
     fn open_history(&self, day: &str, interactive: bool) -> zbus::Result<zbus::zvariant::OwnedFd>;
 }
@@ -390,6 +431,35 @@ mod tests {
         assert_eq!(usage.len(), 1);
         assert!(usage[0].open_files >= 3, "stdin, stdout, stderr at least");
         assert_eq!(says.asked.lock().unwrap().as_slice(), [(action::READ_ALL, false)]);
+    }
+
+    /// The helper's searches find this test by the file and the port it
+    /// holds, each with its start time, and only after polkit's yes.
+    #[tokio::test]
+    async fn a_port_or_a_file_finds_whoever_holds_it() {
+        let (proxy, says, _s, _c) = connect(true).await;
+        let me = std::process::id() as i32;
+        let start = crate::proc::start_time(me).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("prophecy.txt");
+        let _held = std::fs::File::create(&file).unwrap();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        assert!(proxy.port_holders(port, false).await.unwrap().contains(&(me, start)));
+        assert!(proxy.file_holders(file.to_str().unwrap(), false).await.unwrap().contains(&(me, start)));
+        assert!(proxy.file_holders(dir.path().to_str().unwrap(), false).await.unwrap().contains(&(me, start)), "a folder finds what is open in it");
+        assert_eq!(says.asked.lock().unwrap().as_slice(), [(action::READ_ALL, false); 3]);
+    }
+
+    /// `~` would be root's home to the helper, so a relative path is
+    /// refused before polkit is even asked.
+    #[tokio::test]
+    async fn a_relative_path_is_refused_without_asking() {
+        let (proxy, says, _s, _c) = connect(true).await;
+        assert!(proxy.file_holders("~/notes.txt", false).await.is_err());
+        assert!(says.asked.lock().unwrap().is_empty());
+        let (proxy, _says, _s, _c) = connect(false).await;
+        assert!(proxy.file_holders("/tmp", false).await.is_err(), "and without polkit's yes, nothing is searched");
     }
 
     #[tokio::test]

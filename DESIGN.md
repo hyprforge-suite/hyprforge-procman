@@ -250,9 +250,10 @@ as administrator through pkexec.
 - **Per-process network** (`netbpf`): a small eBPF program (`bpf/net.bpf.c`, compiled by clang at build time and loaded with aya) counts each process's bytes on Internet sockets at the kernel's `sock_send_length` and `sock_recv_length` tracepoints. That counts TCP and UDP, so QUIC too; Unix sockets and `MSG_PEEK` are left out. The recorder loads it as root, and the journal moved to format 2 to carry it. A day begun in format 1 is kept aside as `.old` and the day starts a new file. `hyprforge-top` has atop's `n` view and `N` sort under sudo; reports and the Recorded tab gain network columns. The window's Processes tab has a Network column, filled while Show everything is on: the helper's `NetUsage` loads the counter on first use and keeps it as long as it runs. That is a method of its own, so a window newer than a running older helper shows a dash rather than losing Show everything. Where nothing was counting, every view shows a dash, never a zero.
 - **`hyprforge-top report`:** atopsar's summaries of a day: cpu, mem, disk, net, psi, and top (the programs that used the most CPU time, with their peak memory and I/O). It takes `--from`/`--to`, `--step` and `--json`. Built from the same intervals the screen draws; an interval across a reboot is left out rather than counted from boot.
 
+- **Every user's processes in `port:` and `file:` lookups.** With Show everything on, the helper's `PortHolders` and `FileHolders` search every process as root, and the window adds what they find to its own search. The note under the list says which was searched, from what was searched and not from the switch, so an older helper without those methods reads as "your own processes only". A file lookup sends the helper an absolute path, which it compares with what processes hold open and never opens.
+- **The twelfth component** (2026-10-10, released after 0.1.13): the PKGBUILD's `hyprforge-procman`, the installer's `--procman`, Set up's Ctrl+Shift+Escape bind and "Record system history", and the site page.
+
 **Not yet:**
-- Other users' processes in `port:` and `file:` lookups, through the helper.
 - Choosing a GPU per app. That moved to the GPU broker idea in the suite's vision.md.
-- The packaging step: PKGBUILD, installer, Set up's Ctrl+Shift+Escape bind, the site page, becoming the twelfth component.
 
 **Seen only offscreen so far.** `render_every_tab` (an ignored test) draws every tab from live readings with the software renderer. The window itself has not yet been opened with its user watching.
