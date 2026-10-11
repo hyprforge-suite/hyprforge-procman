@@ -1313,7 +1313,13 @@ mod render {
     #[test]
     #[ignore = "draws this machine's processes to $SHOTS"]
     fn render_every_tab() {
-        let dir = std::path::PathBuf::from(std::env::var("SHOTS").expect("SHOTS"));
+        // check.sh runs every ignored test; this one is a tool, so with
+        // nowhere to draw it skips rather than fails.
+        let Ok(dir) = std::env::var("SHOTS") else {
+            eprintln!("HYPRFORGE-SKIP: render_every_tab draws only with $SHOTS set");
+            return;
+        };
+        let dir = std::path::PathBuf::from(dir);
         hyprforge_ui::theme::init(hyprforge_appearance::look::resolve());
         let runtime = tokio::runtime::Runtime::new().unwrap();
         let (mut app, _) = App::new();
@@ -1379,8 +1385,11 @@ mod render {
     #[test]
     #[ignore = "draws the journal at $JOURNAL to $SHOTS"]
     fn render_recorded() {
-        let dir = std::path::PathBuf::from(std::env::var("SHOTS").expect("SHOTS"));
-        let journal = std::path::PathBuf::from(std::env::var("JOURNAL").expect("JOURNAL"));
+        let (Ok(dir), Ok(journal)) = (std::env::var("SHOTS"), std::env::var("JOURNAL")) else {
+            eprintln!("HYPRFORGE-SKIP: render_recorded draws only with $SHOTS and $JOURNAL set");
+            return;
+        };
+        let (dir, journal) = (std::path::PathBuf::from(dir), std::path::PathBuf::from(journal));
         hyprforge_ui::theme::init(hyprforge_appearance::look::resolve());
         let (mut app, _) = App::new();
         app.tab = Tab::Recorded;

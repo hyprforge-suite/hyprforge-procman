@@ -506,6 +506,14 @@ mod tests {
     #[test]
     #[ignore = "needs root (CAP_NET_ADMIN) to listen"]
     fn a_short_lived_process_is_caught_as_it_exits() {
+        // The kernel takes the listen and refuses on the first read, so
+        // without root this would wait out the deadline and blame the
+        // code; the test beside this one covers the refusal itself.
+        // SAFETY: geteuid cannot fail.
+        if unsafe { libc::geteuid() } != 0 {
+            eprintln!("HYPRFORGE-SKIP: listening for every exit needs root");
+            return;
+        }
         let socket = Taskstats::open().unwrap();
         if let Err(e) = socket.listen(&all_cpus()) {
             eprintln!("HYPRFORGE-SKIP: can't listen for exits: {e}");
