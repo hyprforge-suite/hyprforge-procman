@@ -99,6 +99,10 @@ pub fn value_at(points: &[(i64, f32)], at_ms: i64) -> Option<f32> {
 /// where it can be, and slid in from an edge where it can't, so ten
 /// minutes is always ten minutes.
 pub fn window(at_ms: i64, span_ms: i64, first_ms: i64, last_ms: i64) -> (i64, i64) {
+    // A clock stepped back during the day can leave the last sample
+    // stamped before the first; `clamp` panics on bounds the wrong way
+    // round, so the day is never shorter than nothing.
+    let last_ms = last_ms.max(first_ms);
     let span = span_ms.min(last_ms - first_ms).max(0);
     let from = (at_ms - span / 2).clamp(first_ms, last_ms - span);
     (from, from + span)
@@ -212,6 +216,11 @@ where
 mod tests {
     use super::*;
     use crate::report::{CpuLine, MemLine, Pressure, PsiLine};
+
+    #[test]
+    fn a_day_whose_clock_went_backwards_still_has_a_window() {
+        assert_eq!(window(5_000, 600_000, 10_000, 2_000), (10_000, 10_000));
+    }
 
     fn report() -> Report {
         let cpu = |at_ms, idle, wait| CpuLine { at_ms, idle, wait, ..CpuLine::default() };
