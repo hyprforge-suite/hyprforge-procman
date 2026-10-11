@@ -82,6 +82,9 @@ pub struct Writer {
     file: File,
     keyframe: Option<Vec<u8>>,
     since_key: u32,
+    /// Where the last whole record ends — what a failed write is cut
+    /// back to.
+    end: u64,
 }
 
 impl Writer {
@@ -107,22 +110,20 @@ impl Writer {
             match Reader::open(path) {
                 // Cut a torn tail so new records follow a whole one.
                 Ok(r) => file.set_len(r.end)?,
-                // A day begun by a recorder of another format: kept, under
-                // a name of its own, and the day starts a fresh file — a
-                // recorder that refused to write until midnight would
-                // lose the day to an upgrade.
+                // A day begun by a recorder of another format, or whose
+                // header never reached the disk whole: kept, under a name
+                // of its own, and the day starts a fresh file — a recorder
+                // that refused to write until midnight would lose the day.
                 Err(e) if e.kind() == io::ErrorKind::InvalidData => {
                     drop(file);
-                    let mut aside = path.as_os_str().to_owned();
-                    aside.push(".old");
-                    std::fs::rename(path, &aside)?;
+                    std::fs::rename(path, aside(path))?;
                     return Writer::open(path, header);
                 }
                 Err(e) => return Err(e),
             }
         }
-        file.seek(SeekFrom::End(0))?;
-        Ok(Writer { file, keyframe: None, since_key: 0 })
+        let end = file.seek(SeekFrom::End(0))?;
+        Ok(Writer { file, keyframe: None, since_key: 0, end })
     }
 
     pub fn write(&mut self, frame: &Frame) -> io::Result<()> {
@@ -130,15 +131,9 @@ impl Writer {
         let (kind, payload) = match (&self.keyframe, self.since_key < KEYFRAME_EVERY) {
             (Some(key), true) => {
                 let mut c = zstd::bulk::Compressor::with_dictionary(LEVEL, key)?;
-                self.since_key += 1;
                 (KIND_DELTA, c.compress(&raw)?)
             }
-            _ => {
-                let compressed = zstd::bulk::compress(&raw, LEVEL)?;
-                self.keyframe = Some(raw);
-                self.since_key = 1;
-                (KIND_KEY, compressed)
-            }
+            _ => (KIND_KEY, zstd::bulk::compress(&raw, LEVEL)?),
         };
         let mut record = Vec::with_capacity(RECORD_HEAD + payload.len());
         record.extend_from_slice(&(payload.len() as u32).to_le_bytes());
@@ -148,8 +143,54 @@ impl Writer {
         record.extend_from_slice(&payload);
         let sum = crc(&record[8..]);
         record[4..8].copy_from_slice(&sum.to_le_bytes());
-        self.file.write_all(&record)?;
-        self.file.sync_data()
+        match self.file.write_all(&record).and_then(|()| self.file.sync_data()) {
+            Ok(()) => {
+                self.end += record.len() as u64;
+                // Only now is this the keyframe the next deltas are
+                // made against: one that didn't reach the disk would
+                // leave them decoding against the one before it.
+                if kind == KIND_KEY {
+                    self.keyframe = Some(raw);
+                    self.since_key = 1;
+                } else {
+                    self.since_key += 1;
+                }
+                Ok(())
+            }
+            Err(e) => {
+                self.roll_back();
+                Err(e)
+            }
+        }
+    }
+
+    /// After a failed write — a full disk, an I/O error — cut the file
+    /// back to its last whole record and start the next with a keyframe.
+    /// A half-written record left in place would end every reader's index
+    /// there, and the rest of the day, written after it, could not be
+    /// read at all.
+    fn roll_back(&mut self) {
+        if let Err(e) = self.file.set_len(self.end).and_then(|()| self.file.seek(SeekFrom::Start(self.end)).map(drop)) {
+            tracing::warn!("couldn't cut a failed record back off the journal: {e}");
+        }
+        self.keyframe = None;
+        self.since_key = 0;
+    }
+}
+
+/// A free name beside `path` to keep a file that can't be appended to:
+/// `.old`, then `.old.2` and on, so a second such file in a day doesn't
+/// replace the first.
+fn aside(path: &Path) -> std::path::PathBuf {
+    let mut n = 1;
+    loop {
+        let mut name = path.as_os_str().to_owned();
+        name.push(if n == 1 { ".old".to_string() } else { format!(".old.{n}") });
+        let candidate = std::path::PathBuf::from(name);
+        if !candidate.exists() {
+            return candidate;
+        }
+        n += 1;
     }
 }
 
@@ -188,18 +229,29 @@ impl Reader {
     /// A journal already open — one the helper handed over as a file
     /// descriptor, for a reader who may not open the path itself.
     pub fn from_file(mut file: File) -> io::Result<Reader> {
+        // A file that ends inside its own header was torn as it began —
+        // power lost on a day's first sample. That is not "unreadable for
+        // now" but "never going to be whole", so it reads as InvalidData,
+        // which the writer sets aside rather than failing on all day.
+        let torn = |e: io::Error| if e.kind() == io::ErrorKind::UnexpectedEof { io::Error::new(io::ErrorKind::InvalidData, "the journal's header is cut short") } else { e };
+        let size = file.metadata()?.len();
         let mut magic = [0u8; 8];
-        file.read_exact(&mut magic)?;
+        file.read_exact(&mut magic).map_err(torn)?;
         if &magic != MAGIC {
             let why = if magic.starts_with(FAMILY) { format!("a journal of format {}, and this reads {}", magic[7] as char, MAGIC[7] as char) } else { "not a procman journal".into() };
             return Err(io::Error::new(io::ErrorKind::InvalidData, why));
         }
         let mut len = [0u8; 4];
-        file.read_exact(&mut len)?;
-        let mut head = vec![0u8; u32::from_le_bytes(len) as usize];
-        file.read_exact(&mut head)?;
+        file.read_exact(&mut len).map_err(torn)?;
+        let len = u64::from(u32::from_le_bytes(len));
+        // Checked against the file before allocating: a garbled length
+        // could otherwise ask for 4 GiB.
+        if 12 + len > size {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "the journal's header is cut short"));
+        }
+        let mut head = vec![0u8; len as usize];
+        file.read_exact(&mut head).map_err(torn)?;
         let header: Header = postcard::from_bytes(&head).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-        let size = file.metadata()?.len();
         let mut entries = Vec::new();
         let mut offset = 8 + 4 + head.len() as u64;
         let mut end = offset;
@@ -407,6 +459,79 @@ mod tests {
         assert_eq!(r.entries.len(), 4);
         assert!(r.entries[3].keyframe, "a new writer starts with a keyframe");
         assert_eq!(r.frame(3).unwrap().at_ms, 40_000);
+    }
+
+    /// A write that failed partway — a full disk — is cut back off, so
+    /// the records written after it can still be read.
+    #[test]
+    fn a_failed_write_is_cut_back_off_and_the_day_stays_readable() {
+        let t = tempfile::tempdir().unwrap();
+        let path = t.path().join("d.hfr");
+        let mut w = Writer::open(&path, &header()).unwrap();
+        for i in 0..3 {
+            w.write(&frame(i * 10_000, 0)).unwrap();
+        }
+        // What a short write leaves: the start of a record and no more.
+        w.file.write_all(&[200, 0, 0, 0, 9, 9]).unwrap();
+        w.roll_back();
+        for i in 3..6 {
+            w.write(&frame(i * 10_000, i as u64)).unwrap();
+        }
+        let mut r = Reader::open(&path).unwrap();
+        assert_eq!(r.entries.len(), 6, "nothing after the failure was lost");
+        assert!(r.entries[3].keyframe, "and the frame after it starts afresh");
+        assert_eq!(r.frame(5).unwrap(), frame(50_000, 5));
+    }
+
+    /// A keyframe that never reached the disk is not what the next
+    /// frames are compressed against: they'd decode against the one
+    /// before it, as an error or as wrong figures.
+    #[test]
+    fn a_keyframe_that_failed_to_write_is_not_the_next_frames_dictionary() {
+        let t = tempfile::tempdir().unwrap();
+        let path = t.path().join("d.hfr");
+        let mut w = Writer::open(&path, &header()).unwrap();
+        w.write(&frame(0, 0)).unwrap();
+        w.since_key = KEYFRAME_EVERY; // the next frame is a keyframe
+        let writable = std::mem::replace(&mut w.file, File::open(&path).unwrap());
+        assert!(w.write(&frame(10_000, 1)).is_err(), "a read-only file refuses the write");
+        w.file = writable;
+        w.write(&frame(20_000, 2)).unwrap();
+        w.write(&frame(30_000, 3)).unwrap();
+        let mut r = Reader::open(&path).unwrap();
+        assert_eq!(r.entries.len(), 3);
+        assert!(r.entries[1].keyframe);
+        assert_eq!(r.frame(2).unwrap(), frame(30_000, 3), "decoded against the keyframe that was written");
+    }
+
+    /// Power lost while a day's first header was going out: the stub is
+    /// kept aside and the day is recorded, rather than every sample
+    /// failing until midnight.
+    #[test]
+    fn a_header_torn_as_it_was_written_is_kept_aside_and_the_day_goes_on() {
+        let t = tempfile::tempdir().unwrap();
+        let path = t.path().join("2026-10-10.hfr");
+        let mut stub = MAGIC.to_vec();
+        stub.extend_from_slice(&[40, 0]);
+        std::fs::write(&path, &stub).unwrap();
+        let mut w = Writer::open(&path, &header()).unwrap();
+        w.write(&frame(0, 0)).unwrap();
+        assert_eq!(Reader::open(&path).unwrap().entries.len(), 1);
+        assert_eq!(std::fs::read(t.path().join("2026-10-10.hfr.old")).unwrap(), stub);
+        // A second in the same day takes the next name, not the first's.
+        std::fs::write(&path, &stub).unwrap();
+        Writer::open(&path, &header()).unwrap();
+        assert!(t.path().join("2026-10-10.hfr.old.2").exists());
+    }
+
+    #[test]
+    fn a_garbled_header_length_is_refused_before_anything_is_allocated() {
+        let t = tempfile::tempdir().unwrap();
+        let path = t.path().join("d.hfr");
+        let mut bytes = MAGIC.to_vec();
+        bytes.extend_from_slice(&u32::MAX.to_le_bytes());
+        std::fs::write(&path, bytes).unwrap();
+        assert_eq!(Reader::open(&path).err().unwrap().kind(), io::ErrorKind::InvalidData);
     }
 
     #[test]
