@@ -100,7 +100,7 @@ pub fn header(screen: &Screen) -> Vec<Line<'static>> {
             field("sleep", s.sleeping.to_string()),
             styled_field("blk", s.blocked.to_string(), level(s.blocked as f32, 2.0, 10.0)),
             styled_field("zomb", s.zombies.to_string(), level(s.zombies as f32, 1.0, 50.0)),
-            field("exit", s.exited.to_string()),
+            field("exit", s.ended()),
         ],
     ));
 
@@ -412,7 +412,7 @@ fn bits(bytes: u64, seconds: f64) -> String {
 fn process_cells(view: View, r: &Row, totals: &Totals) -> Vec<Cell<'static>> {
     let (total_memory, disk_total) = (totals.memory, totals.disk);
     let pid = right(r.id.pid.to_string());
-    let ms = |v: f64| right(format!("{v:.0}ms"));
+    let ms = |v: Option<f64>| right(v.map_or_else(|| "?".into(), |v| format!("{v:.0}ms")));
     match view {
         View::Generic => vec![
             pid,
@@ -480,8 +480,8 @@ fn process_cells(view: View, r: &Row, totals: &Totals) -> Vec<Cell<'static>> {
                 right(r.nice.to_string()),
                 right(r.priority.to_string()),
                 right(r.processor.to_string()),
-                ms(r.run_delay_ms).style(level(r.run_delay_ms as f32, 100.0, 1000.0)),
-                ms(r.blkio_delay_ms).style(level(r.blkio_delay_ms as f32, 100.0, 1000.0)),
+                ms(r.run_delay_ms).style(level(r.run_delay_ms.unwrap_or(0.0) as f32, 100.0, 1000.0)),
+                ms(r.blkio_delay_ms).style(level(r.blkio_delay_ms.unwrap_or(0.0) as f32, 100.0, 1000.0)),
                 right(r.voluntary.map_or_else(|| "?".into(), count)),
                 right(r.forced.map_or_else(|| "?".into(), count)),
                 Cell::from(r.state.to_string()),

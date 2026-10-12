@@ -500,7 +500,7 @@ mod tests {
         let start = crate::proc::start_time(me).unwrap();
         let usage = proxy.usage(vec![(me, start), (me, start + 1)], false).await.unwrap();
         assert_eq!(usage.len(), 1);
-        assert!(usage[0].open_files >= 3, "stdin, stdout, stderr at least");
+        assert!(usage[0].open_files().is_some_and(|n| n >= 3), "stdin, stdout, stderr at least");
         assert_eq!(says.asked.lock().unwrap().as_slice(), [(action::READ_ALL, false)]);
     }
 

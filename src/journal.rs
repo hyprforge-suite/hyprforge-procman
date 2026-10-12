@@ -34,8 +34,13 @@ use std::path::{Path, PathBuf};
 
 /// The format's name and version. A frame is postcard, which has no field
 /// names, so any change to what a frame holds is a new version — 2 added
-/// each process's network.
-pub const MAGIC: &[u8; 8] = b"HFPROCJ2";
+/// each process's network, 3 whether delay accounting was on and whether
+/// every exit was heard ([`Frame::delay_accounting`], [`Frame::exits_heard`]).
+pub const MAGIC: &[u8; 8] = b"HFPROCJ3";
+/// The one older format still read: version 2's frames are read and given
+/// version 3's new fields as "not known", so the days recorded before an
+/// upgrade stay readable. Older still is refused, as before.
+const MAGIC_2: &[u8; 8] = b"HFPROCJ2";
 /// Every version's magic starts with this.
 const FAMILY: &[u8; 7] = b"HFPROCJ";
 /// A keyframe every this many frames.
@@ -58,6 +63,25 @@ pub struct Header {
     pub command_lines: bool,
 }
 
+/// Whether a frame's [`Frame::exits`] are every process that ended since
+/// the frame before — the difference between "nothing ended" and "nothing
+/// was listening".
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum ExitsHeard {
+    /// Not recorded: a frame from a journal older than format 3.
+    #[default]
+    Unknown,
+    /// Nothing was listening — no root, or the listener could not start —
+    /// so processes that started and ended between two frames are in
+    /// neither.
+    NotListening,
+    /// Every exit the kernel sent arrived.
+    Heard,
+    /// The kernel dropped some (`ENOBUFS`: more ended at once than the
+    /// socket could hold), so this frame's exits are a lower bound.
+    Dropped,
+}
+
 /// One moment.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct Frame {
@@ -71,6 +95,40 @@ pub struct Frame {
     pub cgroups: Vec<Cgroup>,
     /// Processes that ended since the last frame.
     pub exits: Vec<Exit>,
+    /// Whether `kernel.task_delayacct` was on as this frame was read.
+    /// Off, every process's block-I/O delay reads 0 — which is "not
+    /// measured", and a reader must not show it as "no delay". `None`
+    /// when the knob could not be read, or the frame is from format 2.
+    pub delay_accounting: Option<bool>,
+    /// Whether `exits` is all of them — see [`ExitsHeard`].
+    pub exits_heard: ExitsHeard,
+}
+
+/// A format 2 frame: [`Frame`] without its last two fields, which is all
+/// postcard's field order needs to read one.
+#[derive(Deserialize)]
+struct Frame2 {
+    at_ms: i64,
+    boot_id: String,
+    snapshot: Snapshot,
+    machine: Machine,
+    cgroups: Vec<Cgroup>,
+    exits: Vec<Exit>,
+}
+
+impl From<Frame2> for Frame {
+    fn from(f: Frame2) -> Frame {
+        Frame {
+            at_ms: f.at_ms,
+            boot_id: f.boot_id,
+            snapshot: f.snapshot,
+            machine: f.machine,
+            cgroups: f.cgroups,
+            exits: f.exits,
+            delay_accounting: None,
+            exits_heard: ExitsHeard::Unknown,
+        }
+    }
 }
 
 fn crc(bytes: &[u8]) -> u32 {
@@ -109,7 +167,15 @@ impl Writer {
         } else {
             match Reader::open(path) {
                 // Cut a torn tail so new records follow a whole one.
-                Ok(r) => file.set_len(r.end)?,
+                Ok(r) if r.version == MAGIC[7] => file.set_len(r.end)?,
+                // A day begun by the format before this one: readable, but
+                // never to be appended to — its records and these would
+                // be read as one format. Set aside like any other.
+                Ok(_) => {
+                    drop(file);
+                    std::fs::rename(path, aside(path))?;
+                    return Writer::open(path, header);
+                }
                 // A day begun by a recorder of another format, or whose
                 // header never reached the disk whole: kept, under a name
                 // of its own, and the day starts a fresh file — a recorder
@@ -212,6 +278,8 @@ pub struct Entry {
 pub struct Reader {
     file: File,
     pub header: Header,
+    /// The format's version, as its magic's last byte: `b'3'` or `b'2'`.
+    pub version: u8,
     pub entries: Vec<Entry>,
     /// Where the last whole record ends.
     end: u64,
@@ -237,7 +305,7 @@ impl Reader {
         let size = file.metadata()?.len();
         let mut magic = [0u8; 8];
         file.read_exact(&mut magic).map_err(torn)?;
-        if &magic != MAGIC {
+        if &magic != MAGIC && &magic != MAGIC_2 {
             let why = if magic.starts_with(FAMILY) { format!("a journal of format {}, and this reads {}", magic[7] as char, MAGIC[7] as char) } else { "not a procman journal".into() };
             return Err(io::Error::new(io::ErrorKind::InvalidData, why));
         }
@@ -282,7 +350,7 @@ impl Reader {
             offset += RECORD_HEAD as u64 + u64::from(plen);
             end = offset;
         }
-        Ok(Reader { file, header, entries, end, keyed: None })
+        Ok(Reader { file, header, version: magic[7], entries, end, keyed: None })
     }
 
     fn payload(&mut self, e: Entry) -> io::Result<Vec<u8>> {
@@ -309,7 +377,11 @@ impl Reader {
             let (_, d) = self.keyed.as_mut().expect("primed above");
             d.decompress(&body, MAX)?
         };
-        postcard::from_bytes(&raw).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+        let invalid = |e| io::Error::new(io::ErrorKind::InvalidData, e);
+        if self.version == MAGIC_2[7] {
+            return postcard::from_bytes::<Frame2>(&raw).map(Frame::from).map_err(invalid);
+        }
+        postcard::from_bytes(&raw).map_err(invalid)
     }
 
     /// The index of the last frame at or before `at_ms`.
@@ -550,7 +622,7 @@ mod tests {
         let mut bytes = std::fs::read(&path).unwrap();
         bytes[7] = b'1';
         std::fs::write(&path, &bytes).unwrap();
-        let refused = Reader::open(&path).err().expect("a reader of format 2 cannot read format 1");
+        let refused = Reader::open(&path).err().expect("a reader of format 3 cannot read format 1");
         assert!(refused.to_string().contains("format 1"), "{refused}");
 
         let mut w = Writer::open(&path, &header()).unwrap();
@@ -558,6 +630,71 @@ mod tests {
         assert_eq!(Reader::open(&path).unwrap().entries.len(), 1, "a fresh file");
         assert_eq!(std::fs::read(t.path().join("2026-10-10.hfr.old")).unwrap(), bytes, "the old one untouched");
         assert_eq!(days(t.path()).unwrap().len(), 1, "and not listed as a day");
+    }
+
+    /// A day written by the format before this one, built byte for byte
+    /// as that recorder wrote it: a format-2 frame is this one without
+    /// its last two fields.
+    fn format_2_day(path: &Path, frames: &[Frame]) {
+        #[derive(Serialize)]
+        struct Out<'a> {
+            at_ms: i64,
+            boot_id: &'a str,
+            snapshot: &'a Snapshot,
+            machine: &'a Machine,
+            cgroups: &'a [Cgroup],
+            exits: &'a [Exit],
+        }
+        let head = postcard::to_allocvec(&header()).unwrap();
+        let mut bytes = MAGIC_2.to_vec();
+        bytes.extend_from_slice(&(head.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(&head);
+        for f in frames {
+            let raw = postcard::to_allocvec(&Out { at_ms: f.at_ms, boot_id: &f.boot_id, snapshot: &f.snapshot, machine: &f.machine, cgroups: &f.cgroups, exits: &f.exits }).unwrap();
+            let payload = zstd::bulk::compress(&raw, LEVEL).unwrap();
+            let mut record = (payload.len() as u32).to_le_bytes().to_vec();
+            record.extend_from_slice(&[0; 4]);
+            record.push(KIND_KEY);
+            record.extend_from_slice(&f.at_ms.to_le_bytes());
+            record.extend_from_slice(&payload);
+            let sum = crc(&record[8..]);
+            record[4..8].copy_from_slice(&sum.to_le_bytes());
+            bytes.extend_from_slice(&record);
+        }
+        std::fs::write(path, bytes).unwrap();
+    }
+
+    /// The days recorded before an upgrade stay readable, and say they
+    /// cannot tell what format 3 records — not "off" and not "all heard".
+    #[test]
+    fn a_format_2_day_is_still_read_with_its_new_fields_unknown() {
+        let t = tempfile::tempdir().unwrap();
+        let path = t.path().join("2026-10-10.hfr");
+        let written = frame(10_000, 5);
+        format_2_day(&path, std::slice::from_ref(&written));
+        let mut r = Reader::open(&path).unwrap();
+        assert_eq!(r.version, b'2');
+        let read = r.frame(0).unwrap();
+        assert_eq!(read.snapshot, written.snapshot);
+        assert_eq!(read.delay_accounting, None);
+        assert_eq!(read.exits_heard, ExitsHeard::Unknown);
+    }
+
+    /// Readable is not appendable: today's format-2 file is set aside,
+    /// or its records and the new ones would be read as one format.
+    #[test]
+    fn todays_format_2_file_is_set_aside_not_appended_to() {
+        let t = tempfile::tempdir().unwrap();
+        let path = t.path().join("2026-10-10.hfr");
+        format_2_day(&path, &[frame(0, 0)]);
+        let before = std::fs::read(&path).unwrap();
+        let mut w = Writer::open(&path, &header()).unwrap();
+        let now = Frame { delay_accounting: Some(true), exits_heard: ExitsHeard::Dropped, ..frame(10_000, 0) };
+        w.write(&now).unwrap();
+        let mut r = Reader::open(&path).unwrap();
+        assert_eq!((r.version, r.entries.len()), (b'3', 1));
+        assert_eq!(r.frame(0).unwrap(), now, "the new fields round-trip");
+        assert_eq!(std::fs::read(t.path().join("2026-10-10.hfr.old")).unwrap(), before);
     }
 
     #[test]
@@ -599,6 +736,8 @@ mod tests {
                 machine: sys.read(),
                 cgroups: crate::cgroups::all(Path::new("/sys/fs/cgroup"), 6),
                 exits: Vec::new(),
+                delay_accounting: crate::recorder::delay_accounting(),
+                exits_heard: ExitsHeard::NotListening,
             };
             w.write(&frame).unwrap();
             if i + 1 < frames {

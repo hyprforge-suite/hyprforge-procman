@@ -326,7 +326,7 @@ impl App {
         if let Some(p) = &at.pressure {
             headline.push_str(&format!(" · I/O pressure {:.0} % · memory pressure {:.0} %", p.io_some.avg10, p.memory_some.avg10));
         }
-        headline.push_str(&format!(" · {} processes, {} ended", m.system.processes, m.system.exited));
+        headline.push_str(&format!(" · {} processes, {} ended", m.system.processes, m.system.ended()));
         let mut rows: Vec<&Row> = m.rows.iter().filter(|r| r.cpu_pct > 0.0 || r.read.unwrap_or(0) + r.written.unwrap_or(0) > 0 || r.exit.is_some()).collect();
         rows.sort_by(|a, b| b.cpu_pct.total_cmp(&a.cpu_pct).then(b.resident_bytes.cmp(&a.resident_bytes)));
         let mut table = column![header(&["Process", "PID", "User", "CPU", "Memory", "Read", "Written", "Network"], s)].spacing(spacing::SM);

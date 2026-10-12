@@ -15,6 +15,7 @@
 //! ever grows at its end, so an older kernel's shorter record is read
 //! for whatever fields it is long enough to hold.
 
+use crate::journal::ExitsHeard;
 use std::io;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 
@@ -402,6 +403,8 @@ pub fn all_cpus() -> String {
 /// recorder and `hyprforge-top` (as root) both run between samples.
 pub struct Listener {
     heard: std::sync::Arc<std::sync::Mutex<Vec<Exit>>>,
+    /// The kernel dropped exits since the last [`Listener::heard`].
+    dropped: std::sync::Arc<std::sync::atomic::AtomicBool>,
     stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
@@ -414,8 +417,8 @@ impl Listener {
         use std::sync::atomic::Ordering;
         let socket = Taskstats::open()?;
         socket.listen(&all_cpus())?;
-        let listener = Listener { heard: Default::default(), stop: Default::default() };
-        let (heard, stop) = (listener.heard.clone(), listener.stop.clone());
+        let listener = Listener { heard: Default::default(), dropped: Default::default(), stop: Default::default() };
+        let (heard, dropped, stop) = (listener.heard.clone(), listener.dropped.clone(), listener.stop.clone());
         let (verdict, wait) = std::sync::mpsc::channel::<io::Result<()>>();
         std::thread::Builder::new().name("exits".into()).spawn(move || {
             let mut verdict = Some(verdict);
@@ -428,6 +431,15 @@ impl Listener {
                         if !exits.is_empty() {
                             heard.lock().unwrap_or_else(|e| e.into_inner()).extend(exits);
                         }
+                    }
+                    // More ended at once than the socket could hold, and
+                    // the kernel threw the rest away. Not a failure of the
+                    // listener — the next receive works — but the frame
+                    // has to say its exits are incomplete. Straight back
+                    // to receiving: pausing here, as for a real failure,
+                    // is how a burst of exits drops more of them.
+                    Err(e) if e.raw_os_error() == Some(libc::ENOBUFS) => {
+                        dropped.store(true, Ordering::SeqCst);
                     }
                     // The socket's five-second bound: nothing ended, and
                     // nothing refused either.
@@ -488,6 +500,20 @@ impl Listener {
     pub fn take(&self) -> Vec<Exit> {
         std::mem::take(&mut *self.heard.lock().unwrap_or_else(|e| e.into_inner()))
     }
+
+    /// What was heard since the last call, and whether that is all of it.
+    pub fn heard(&self) -> (Vec<Exit>, ExitsHeard) {
+        let exits = self.take();
+        let dropped = self.dropped.swap(false, std::sync::atomic::Ordering::SeqCst);
+        (exits, if dropped { ExitsHeard::Dropped } else { ExitsHeard::Heard })
+    }
+}
+
+/// What a frame's exits are from `listener`: what it heard, or — with
+/// no listener — nothing, said as nothing listening rather than nothing
+/// ending.
+pub fn heard(listener: Option<&Listener>) -> (Vec<Exit>, ExitsHeard) {
+    listener.map_or((Vec::new(), ExitsHeard::NotListening), Listener::heard)
 }
 
 impl Drop for Listener {

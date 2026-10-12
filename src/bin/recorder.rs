@@ -52,7 +52,7 @@ fn main() -> std::process::ExitCode {
         return self_test(config);
     }
     if flag("--once").is_some() {
-        return match Recorder::new(config).tick(chrono::Local::now(), Vec::new) {
+        return match Recorder::new(config).tick(chrono::Local::now(), || hyprforge_procman::exits::heard(None)) {
             Ok(()) => std::process::ExitCode::SUCCESS,
             Err(e) => {
                 tracing::error!("couldn't take a sample: {e}");
@@ -100,7 +100,7 @@ fn run(config: Config) -> std::process::ExitCode {
         if STOP.load(Ordering::SeqCst) {
             break;
         }
-        let heard = || exits.as_ref().map(Listener::take).unwrap_or_default();
+        let heard = || hyprforge_procman::exits::heard(exits.as_ref());
         if let Err(e) = recorder.tick(chrono::Local::now(), heard) {
             // One failed sample is a gap in the journal, not a reason to
             // stop recording.
@@ -140,7 +140,7 @@ fn self_test(mut config: Config) -> std::process::ExitCode {
         }
         Some(why) => println!("skip: network counter not built in ({why})"),
     }
-    match recorder.tick(chrono::Local::now(), Vec::new) {
+    match recorder.tick(chrono::Local::now(), || hyprforge_procman::exits::heard(None)) {
         Ok(()) => println!("ok: a sample was taken and written"),
         Err(e) => {
             println!("FAILED: sample: {e}");

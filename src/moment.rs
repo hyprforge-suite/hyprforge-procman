@@ -10,7 +10,7 @@
 //! used is all its life so far. One that exited during it comes from its
 //! taskstats record, less what the earlier frame had already seen.
 
-use crate::journal::Frame;
+use crate::journal::{ExitsHeard, Frame};
 use crate::proc::{Proc, ThreadStates};
 use crate::sample::Id;
 use crate::users::Users;
@@ -32,9 +32,11 @@ pub struct Row {
     pub cpu_pct: f32,
     pub user_pct: f32,
     pub system_pct: f32,
-    /// Waiting for a CPU, and for block I/O, during the interval (ms).
-    pub run_delay_ms: f64,
-    pub blkio_delay_ms: f64,
+    /// Waiting for a CPU, and for block I/O, during the interval (ms) —
+    /// `None` where it was not measured: no `schedstat` to read, or delay
+    /// accounting off. Never 0 for that: 0 says "no delay".
+    pub run_delay_ms: Option<f64>,
+    pub blkio_delay_ms: Option<f64>,
     pub private_bytes: u64,
     pub resident_bytes: u64,
     pub vsize: u64,
@@ -103,6 +105,10 @@ pub struct System {
     pub seconds: f64,
     /// Processes, threads by state, zombies, and how many exited.
     pub processes: usize,
+    /// Whether `exited` is every process that ended — see [`ExitsHeard`].
+    pub exits_heard: ExitsHeard,
+    /// Whether block-I/O delay was measured in this interval.
+    pub delay_accounting: bool,
     pub threads: u64,
     pub running: u64,
     pub sleeping: u64,
@@ -141,6 +147,27 @@ pub struct Moment {
     pub rows: Vec<Row>,
 }
 
+/// Whether `frame`'s block-I/O delays are measurements. A frame that
+/// says is believed; one from before the journal said (format 2) is
+/// judged by its numbers — any process with a delay means accounting was
+/// on, and all zeros cannot be told from off, so they are not shown as
+/// measured.
+fn delays_measured(frame: &Frame) -> bool {
+    frame.delay_accounting.unwrap_or_else(|| frame.snapshot.procs.iter().any(|p| p.blkio_ticks > 0))
+}
+
+impl System {
+    /// How many processes ended, as far as it is known: `12`, `12+` when
+    /// the kernel dropped some, `?` when nothing was listening.
+    pub fn ended(&self) -> String {
+        match self.exits_heard {
+            ExitsHeard::NotListening => "?".into(),
+            ExitsHeard::Dropped => format!("{}+", self.exited),
+            ExitsHeard::Heard | ExitsHeard::Unknown => self.exited.to_string(),
+        }
+    }
+}
+
 fn delta(now: u64, then: u64) -> u64 {
     now.saturating_sub(then)
 }
@@ -159,6 +186,7 @@ pub fn between(prev: &Frame, now: &Frame, ticks_per_second: u64, users: &mut Use
     let total_ticks = delta(now.snapshot.cpu.total, prev.snapshot.cpu.total).max(1) as f64;
     let pct = |ticks: f64| (ticks / total_ticks * 100.0).min(100.0) as f32;
     let earlier: HashMap<Id, &Proc> = prev.snapshot.procs.iter().map(|p| (Id { pid: p.pid, start: p.start }, p)).collect();
+    let delays = delays_measured(now);
 
     let mut rows: Vec<Row> = now
         .snapshot
@@ -187,8 +215,8 @@ pub fn between(prev: &Frame, now: &Frame, ticks_per_second: u64, users: &mut Use
                 cpu_pct: pct(delta(p.ticks, b0.ticks) as f64),
                 user_pct: pct(delta(p.user_ticks, b0.user_ticks) as f64),
                 system_pct: pct(delta(p.system_ticks, b0.system_ticks) as f64),
-                run_delay_ms: delta(p.run_delay_ns.unwrap_or(0), b0.run_delay_ns.unwrap_or(0)) as f64 / 1e6,
-                blkio_delay_ms: delta(p.blkio_ticks, b0.blkio_ticks) as f64 / tps * 1000.0,
+                run_delay_ms: opt(p.run_delay_ns, b0.run_delay_ns).map(|ns| ns as f64 / 1e6),
+                blkio_delay_ms: delays.then(|| delta(p.blkio_ticks, b0.blkio_ticks) as f64 / tps * 1000.0),
                 private_bytes: p.private_bytes,
                 resident_bytes: p.resident_bytes,
                 vsize: p.vsize,
@@ -265,6 +293,8 @@ pub fn between(prev: &Frame, now: &Frame, ticks_per_second: u64, users: &mut Use
         threads: s.procs.iter().map(|p| u64::from(p.threads)).sum(),
         zombies: s.procs.iter().filter(|p| p.state == 'Z').count(),
         exited: now.exits.len(),
+        exits_heard: now.exits_heard,
+        delay_accounting: delays,
         cpu: split.map(|f| f * 100.0),
         cores: s
             .cores
@@ -432,4 +462,39 @@ mod tests {
         assert!(fours[0].exit.is_some(), "the exit stands for it");
         assert_eq!(fours[0].cpu_pct, 3.0, "130 ticks in all, 100 already counted, of 1000");
     }
+
+    /// Delay accounting off is "not measured", not "no delay": the
+    /// block-I/O delay is `None`. On, it is a number, 0 included. A
+    /// process with no `schedstat` has no run delay either, not 0.
+    #[test]
+    fn a_delay_that_was_not_measured_is_none_and_not_zero() {
+        let p = Proc { blkio_ticks: 0, run_delay_ns: None, ..proc(1, 1, 10) };
+        let a = Frame { delay_accounting: Some(false), ..frame(0, 0, vec![p.clone()], vec![]) };
+        let b = Frame { delay_accounting: Some(false), ..frame(10_000, 1000, vec![p.clone()], vec![]) };
+        let m = between(&a, &b, 100, &mut Users::default());
+        assert_eq!((m.rows[0].blkio_delay_ms, m.rows[0].run_delay_ms), (None, None));
+        assert!(!m.system.delay_accounting);
+        let b = Frame { delay_accounting: Some(true), ..b };
+        assert_eq!(between(&a, &b, 100, &mut Users::default()).rows[0].blkio_delay_ms, Some(0.0));
+        // A format-2 frame doesn't say: any delay at all is the evidence.
+        let busy = Proc { blkio_ticks: 5, ..p };
+        let b = Frame { delay_accounting: None, ..frame(10_000, 1000, vec![busy], vec![]) };
+        assert_eq!(between(&a, &b, 100, &mut Users::default()).rows[0].blkio_delay_ms, Some(50.0));
+    }
+
+    /// The count of ended processes says when it is a lower bound, and
+    /// when nothing was counting.
+    #[test]
+    fn the_ended_count_says_when_it_is_not_all_of_them() {
+        let a = frame(0, 0, vec![], vec![]);
+        let exits = vec![Exit { pid: 9, ..Exit::default() }];
+        let mut b = frame(10_000, 1000, vec![], exits);
+        b.exits_heard = ExitsHeard::Dropped;
+        assert_eq!(between(&a, &b, 100, &mut Users::default()).system.ended(), "1+");
+        b.exits_heard = ExitsHeard::Heard;
+        assert_eq!(between(&a, &b, 100, &mut Users::default()).system.ended(), "1");
+        b.exits_heard = ExitsHeard::NotListening;
+        assert_eq!(between(&a, &b, 100, &mut Users::default()).system.ended(), "?");
+    }
+
 }

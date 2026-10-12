@@ -337,7 +337,23 @@ pub struct Usage {
     /// Bytes it caused to be read from and written to storage.
     pub read_bytes: u64,
     pub write_bytes: u64,
+    /// How many files it has open, or [`Usage::UNKNOWN`] when its `fd`
+    /// directory could not be read — never 0 for that, which would read
+    /// as a process with nothing open. A sentinel rather than an
+    /// `Option` because this crosses D-Bus, and changing its signature
+    /// would break every window talking to a helper of the other age.
+    /// Read it through [`Usage::open_files`].
     pub open_files: u32,
+}
+
+impl Usage {
+    /// What [`Usage::open_files`] holds when it could not be counted.
+    pub const UNKNOWN: u32 = u32::MAX;
+
+    /// How many files it has open, when that could be counted.
+    pub fn open_files(&self) -> Option<u32> {
+        (self.open_files != Usage::UNKNOWN).then_some(self.open_files)
+    }
 }
 
 /// What root can read about `id` that its owner's window may not: storage
@@ -350,7 +366,7 @@ pub fn usage(root: &Path, id: crate::sample::Id) -> Option<Usage> {
         return None;
     }
     let (read_bytes, write_bytes) = parse_io(&fs::read_to_string(dir.join("io")).ok()?)?;
-    let open_files = fs::read_dir(dir.join("fd")).map(|d| d.count() as u32).unwrap_or(0);
+    let open_files = fs::read_dir(dir.join("fd")).map_or(Usage::UNKNOWN, |d| d.count() as u32);
     Some(Usage { pid: id.pid, start: id.start, read_bytes, write_bytes, open_files })
 }
 
@@ -772,4 +788,29 @@ mod tests {
         drop(named);
         worker.join().unwrap();
     }
+
+    /// A process whose `fd` directory can't be read has an unknown number
+    /// of files open, not none. Built from this process's own `stat` and
+    /// `io`, copied somewhere with no `fd` beside them.
+    #[test]
+    fn open_files_that_cannot_be_counted_are_unknown_not_zero() {
+        let me = std::process::id() as i32;
+        let real = Path::new("/proc").join(me.to_string());
+        let stat = fs::read_to_string(real.join("stat")).unwrap();
+        let start = parse_stat(&stat).unwrap().start;
+        let t = tempfile::tempdir().unwrap();
+        let dir = t.path().join(me.to_string());
+        fs::create_dir(&dir).unwrap();
+        fs::write(dir.join("stat"), &stat).unwrap();
+        fs::write(dir.join("io"), "read_bytes: 1\nwrite_bytes: 2\n").unwrap();
+        let u = usage(t.path(), crate::sample::Id { pid: me, start }).unwrap();
+        assert_eq!(u.open_files(), None);
+        let counted = usage(Path::new("/proc"), crate::sample::Id { pid: me, start });
+        // Reading our own /proc/self/io can be refused in a sandbox; the
+        // claim here is only about the fallback.
+        if let Some(u) = counted {
+            assert!(u.open_files().is_some_and(|n| n >= 3));
+        }
+    }
+
 }

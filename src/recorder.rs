@@ -5,7 +5,7 @@
 //! can be tested — and its cost measured — without running as a service.
 
 use crate::exits::Exit;
-use crate::journal::{self, Frame, Header, Writer};
+use crate::journal::{self, ExitsHeard, Frame, Header, Writer};
 use crate::machine::SysFs;
 use crate::proc::ProcFs;
 use serde::Deserialize;
@@ -153,7 +153,7 @@ impl Recorder {
     /// once `/proc` has been read (see [`Recorder::collect`]) — written to
     /// `now`'s day file. A new day opens a new file and prunes the old
     /// ones.
-    pub fn tick(&mut self, now: chrono::DateTime<chrono::Local>, exits: impl FnOnce() -> Vec<Exit>) -> io::Result<()> {
+    pub fn tick(&mut self, now: chrono::DateTime<chrono::Local>, exits: impl FnOnce() -> (Vec<Exit>, ExitsHeard)) -> io::Result<()> {
         let frame = self.collect(now, exits)?;
         let path = journal::day_file(&self.config.directory, now);
         if self.writer.as_ref().is_none_or(|(p, _)| *p != path) {
@@ -176,9 +176,9 @@ impl Recorder {
     /// interval. Taken after, every process that ends was read alive in
     /// some frame first; one that ends between the read and the take is
     /// in both, and `moment::between` lets the exit stand for it.
-    pub fn collect(&mut self, now: chrono::DateTime<chrono::Local>, exits: impl FnOnce() -> Vec<Exit>) -> io::Result<Frame> {
+    pub fn collect(&mut self, now: chrono::DateTime<chrono::Local>, exits: impl FnOnce() -> (Vec<Exit>, ExitsHeard)) -> io::Result<Frame> {
         let mut snapshot = self.fs.snapshot()?;
-        let exits = exits();
+        let (exits, exits_heard) = exits();
         #[cfg(feature = "netbpf")]
         if let Some(counter) = &mut self.net {
             counter.fill(&mut snapshot.procs);
@@ -199,13 +199,23 @@ impl Recorder {
             machine: self.sys.read(),
             cgroups: crate::cgroups::all(Path::new("/sys/fs/cgroup"), 6),
             exits,
+            // Read every frame, not once: anyone may switch it while the
+            // recorder runs, and the recorder's own switch can fail.
+            delay_accounting: delay_accounting(),
+            exits_heard,
         })
     }
 }
 
+const KNOB: &str = "/proc/sys/kernel/task_delayacct";
+
+/// Whether delay accounting is on now; `None` when that can't be read.
+pub fn delay_accounting() -> Option<bool> {
+    std::fs::read_to_string(KNOB).ok().map(|s| s.trim() == "1")
+}
+
 /// Delay accounting: what it was, so it can be put back.
 pub fn set_delay_accounting(on: bool) -> io::Result<bool> {
-    const KNOB: &str = "/proc/sys/kernel/task_delayacct";
     let was = std::fs::read_to_string(KNOB)?.trim() == "1";
     std::fs::write(KNOB, if on { "1" } else { "0" })?;
     Ok(was)
@@ -244,12 +254,14 @@ mod tests {
         let config = Config { directory: t.path().to_path_buf(), record_cmdlines: false, threads: false, ..Config::default() };
         let mut r = Recorder::new(config);
         let now = chrono::Local::now();
-        r.tick(now, Vec::new).unwrap();
-        r.tick(now + chrono::Duration::seconds(10), || vec![Exit { pid: 7, comm: "sleep".into(), ..Exit::default() }]).unwrap();
+        r.tick(now, || (Vec::new(), ExitsHeard::NotListening)).unwrap();
+        r.tick(now + chrono::Duration::seconds(10), || (vec![Exit { pid: 7, comm: "sleep".into(), ..Exit::default() }], ExitsHeard::Dropped)).unwrap();
         let mut reader = journal::Reader::open(&journal::day_file(t.path(), now)).unwrap();
         assert_eq!(reader.entries.len(), 2);
         let f = reader.frame(1).unwrap();
         assert_eq!(f.exits[0].comm, "sleep");
+        assert_eq!(f.exits_heard, ExitsHeard::Dropped, "the frame says its exits are incomplete");
+        assert_eq!(f.delay_accounting, delay_accounting());
         assert!(f.snapshot.procs.iter().all(|p| p.command.is_empty()), "no command lines kept");
         assert!(!f.boot_id.is_empty() && !f.cgroups.is_empty());
         assert!(!reader.header.command_lines);
@@ -278,11 +290,11 @@ mod tests {
             let us = |t: libc::timeval| t.tv_sec as f64 * 1e6 + t.tv_usec as f64;
             us(u.ru_utime) + us(u.ru_stime)
         };
-        r.tick(chrono::Local::now(), Vec::new).unwrap();
+        r.tick(chrono::Local::now(), || (Vec::new(), ExitsHeard::NotListening)).unwrap();
         let before = cpu();
         let n = 10;
         for i in 0..n {
-            r.tick(chrono::Local::now() + chrono::Duration::seconds(i + 1), Vec::new).unwrap();
+            r.tick(chrono::Local::now() + chrono::Duration::seconds(i + 1), || (Vec::new(), ExitsHeard::NotListening)).unwrap();
         }
         let per_tick_ms = (cpu() - before) / n as f64 / 1000.0;
         eprintln!("a tick: {per_tick_ms:.1} ms of CPU ({:.2} % of a core at 10 s)", per_tick_ms / 100.0);
