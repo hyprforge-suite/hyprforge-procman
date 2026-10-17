@@ -191,10 +191,27 @@ impl App {
             widgets::fact("Folder", p.cwd.as_ref().map_or(hidden.to_string(), |x| x.display().to_string()), s),
             widgets::fact("Runs in", p.unit.clone().unwrap_or_else(|| "—".to_string()), s),
             widgets::fact("Started", started, s),
-            widgets::fact("Memory", format!("{} private · {} resident", bytes(e.private_bytes), bytes(e.resident_bytes)), s),
-            widgets::fact("Open files", p.open_files.map_or(hidden.to_string(), |n| n.to_string()), s),
         ]
         .spacing(spacing::XS);
+        // The kernel's exact split where it may be read; the quick
+        // estimate the Processes tab shows where it may not.
+        match &p.memory {
+            Some(m) => {
+                facts = facts
+                    .push(widgets::fact("Memory", format!("{} its own — what ending it gives back", bytes(m.own())), s))
+                    .push(widgets::fact("", format!("{} shared with other programs, {} of it counted as its share", bytes(m.shared), bytes(m.share_of_shared())), s));
+                if m.swapped > 0 {
+                    facts = facts.push(widgets::fact("", format!("{} swapped out, which no resident figure includes", bytes(m.swapped)), s));
+                }
+                facts = facts.push(widgets::fact(
+                    "",
+                    format!("{} counted as its in all: {} it allocated, {} of files, {} shared memory", bytes(m.proportional), bytes(m.anon), bytes(m.file), bytes(m.shmem)),
+                    s,
+                ));
+            }
+            None => facts = facts.push(widgets::fact("Memory", format!("{} private · {} resident", bytes(e.private_bytes), bytes(e.resident_bytes)), s)),
+        }
+        facts = facts.push(widgets::fact("Open files", p.open_files.map_or(hidden.to_string(), |n| n.to_string()), s));
         match &p.sockets {
             None => facts = facts.push(widgets::fact("Network", hidden, s)),
             Some(sockets) if sockets.is_empty() => facts = facts.push(widgets::fact("Network", "nothing open", s)),

@@ -33,6 +33,76 @@ pub fn unit(root: &Path, pid: i32) -> Option<String> {
     path.rsplit('/').find(|part| part.ends_with(".service") || part.ends_with(".scope")).map(str::to_owned)
 }
 
+/// Where a process's memory is, from `smaps_rollup`: the kernel's exact
+/// counts, where the Processes tab's Memory column is a quick estimate
+/// from `statm`. In bytes.
+///
+/// The figures that make the usual ones stop contradicting each other:
+/// what is the process's alone ([`own`](Memory::own)), what it shares
+/// with other programs (libraries, mostly), its fair share of those
+/// shared pages (`pss − own`), and what was pushed out to swap — which
+/// no resident figure includes, so a program can "use" 200 MB and hold
+/// 2 GB.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Memory {
+    pub resident: u64,
+    /// Proportional: its own pages, plus each shared page divided by how
+    /// many processes share it. Summing this over processes adds up to
+    /// what is really in use; summing `resident` counts libraries again
+    /// for every program that maps them.
+    pub proportional: u64,
+    pub own_clean: u64,
+    pub own_dirty: u64,
+    pub shared: u64,
+    pub swapped: u64,
+    /// Of `proportional`: memory it allocated, file contents it mapped,
+    /// and shared memory (`/dev/shm`, GPU buffers handed between
+    /// programs).
+    pub anon: u64,
+    pub file: u64,
+    pub shmem: u64,
+}
+
+impl Memory {
+    /// Pages no other process maps: what ending it would give back.
+    pub fn own(&self) -> u64 {
+        self.own_clean + self.own_dirty
+    }
+
+    /// Its share of the pages it shares with others.
+    pub fn share_of_shared(&self) -> u64 {
+        self.proportional.saturating_sub(self.own())
+    }
+}
+
+/// `smaps_rollup`'s `Key:   N kB` lines. A missing line reads as 0, the
+/// way the kernel omits ones a kernel version did not have — but a file
+/// with no `Rss:` at all is not one, and is `None`.
+pub fn parse_smaps_rollup(text: &str) -> Option<Memory> {
+    let field = |key: &str| -> Option<u64> {
+        text.lines().find_map(|l| l.strip_prefix(key)?.strip_prefix(':')?.split_whitespace().next()?.parse::<u64>().ok()).map(|k| k * 1024)
+    };
+    let or0 = |key: &str| field(key).unwrap_or(0);
+    Some(Memory {
+        resident: field("Rss")?,
+        proportional: or0("Pss"),
+        own_clean: or0("Private_Clean"),
+        own_dirty: or0("Private_Dirty"),
+        shared: or0("Shared_Clean") + or0("Shared_Dirty"),
+        swapped: or0("Swap"),
+        anon: or0("Pss_Anon"),
+        file: or0("Pss_File"),
+        shmem: or0("Pss_Shmem"),
+    })
+}
+
+/// [`Memory`] for one process, if this user may read it — the kernel
+/// walks its page tables to answer, so it is asked of the selected
+/// process only, never of every row.
+pub fn memory(root: &Path, pid: i32) -> Option<Memory> {
+    parse_smaps_rollup(&fs::read_to_string(root.join(pid.to_string()).join("smaps_rollup")).ok()?)
+}
+
 /// What each open descriptor points at, or `None` when they are not
 /// this user's to read.
 pub fn open(root: &Path, pid: i32) -> Option<Vec<String>> {
@@ -212,6 +282,54 @@ pub fn who(root: &Path, pids: &[i32], lookup: &Lookup) -> HashSet<i32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// This machine's own `smaps_rollup`, for a shell: 2.2 MB resident,
+    /// almost all of it libraries shared with everything else.
+    const ROLLUP: &str = "5586b14a7000-7ffe2a902000 ---p 00000000 00:00 0                          [rollup]
+Rss:                2292 kB
+Pss:                 191 kB
+Pss_Dirty:           108 kB
+Pss_Anon:            108 kB
+Pss_File:             83 kB
+Pss_Shmem:             0 kB
+Shared_Clean:       2136 kB
+Shared_Dirty:          0 kB
+Private_Clean:        48 kB
+Private_Dirty:       108 kB
+Referenced:         2292 kB
+Anonymous:           108 kB
+KSM:                   0 kB
+LazyFree:              0 kB
+AnonHugePages:         0 kB
+ShmemPmdMapped:        0 kB
+FilePmdMapped:         0 kB
+Shared_Hugetlb:        0 kB
+Private_Hugetlb:       0 kB
+Swap:                  0 kB
+SwapPss:               0 kB
+Locked:                0 kB
+";
+
+    /// The point of the breakdown: 2.2 MB resident is 156 KB of its own
+    /// and a 35 KB share of 2.1 MB of libraries. `Pss_Dirty` must not be
+    /// read as `Pss`, which a prefix match without the colon would do.
+    #[test]
+    fn resident_memory_splits_into_its_own_and_its_share_of_the_shared() {
+        let m = parse_smaps_rollup(ROLLUP).unwrap();
+        assert_eq!(m.resident, 2292 * 1024);
+        assert_eq!(m.proportional, 191 * 1024, "Pss, not Pss_Dirty");
+        assert_eq!(m.own(), 156 * 1024);
+        assert_eq!(m.shared, 2136 * 1024);
+        assert_eq!(m.share_of_shared(), 35 * 1024);
+        assert_eq!((m.anon, m.file, m.shmem, m.swapped), (108 * 1024, 83 * 1024, 0, 0));
+        assert_eq!(parse_smaps_rollup("Pss: 1 kB\n"), None, "no Rss line is not a rollup");
+    }
+
+    #[test]
+    fn this_processs_own_memory_reads() {
+        let m = memory(Path::new("/proc"), std::process::id() as i32).expect("its own is readable");
+        assert!(m.own() > 0 && m.resident >= m.own());
+    }
 
     /// Lines copied from this machine's `/proc/net/tcp` and `udp`.
     const TCP: &str = "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n   0: 0B00A8C0:C930 9F8AB936:22B3 01 00000000:00000000 00:00000000 00000000  1000        0 365968 1 00000000192409de 35 4 30 2 2\n   1: 0100007F:8847 0100007F:E81E 01 00000000:00000000 00:00000000 00000000  1000        0 384121 1 000000000f8bad01 20 4 30 10 -1\n";

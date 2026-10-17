@@ -122,6 +122,8 @@ pub struct Properties {
     /// `None`: not this user's to see.
     pub open_files: Option<usize>,
     pub sockets: Option<Vec<inspect::Socket>>,
+    /// Where its memory is; `None` when not this user's to read.
+    pub memory: Option<inspect::Memory>,
 }
 
 #[derive(Debug, Default)]
@@ -1336,6 +1338,7 @@ impl App {
                     unit: inspect::unit(root, id.pid),
                     open_files: inspect::open(root, id.pid).map(|o| o.len()),
                     sockets: inspect::sockets(root, id.pid),
+                    memory: inspect::memory(root, id.pid),
                 }
             }
             None => Properties::default(),
