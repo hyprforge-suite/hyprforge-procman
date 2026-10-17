@@ -302,6 +302,22 @@ as administrator through pkexec.
   services. Memory is `MemoryMax` with `MemoryHigh` at nine tenths, so
   the app is slowed before it is stopped.
 
+- **Efficiency mode** (2026-10-17, `efficiency.rs`, its own user
+  service). A CPU weight on the app's cgroup, not a nice value: this
+  user's `RLIMIT_NICE` is 0, so a process niced down could never be
+  given its priority back, and a weight only matters when the CPU is
+  contended. Background is "no window on screen", worked out from the
+  monitors' workspaces, because Hyprland's `visible` was true for
+  windows on workspaces nobody was looking at. A background app's unit
+  gets weight 20 against the default 100, set back to unset when it
+  returns; an app sharing the desktop's unit (which has no `cpu`
+  controller) is moved into a scope of its own first, and only when it
+  goes off screen. Windowed apps only, so the compositor is never
+  touched. Event-driven from Hyprland's socket, settled for 300 ms;
+  SIGTERM, SIGINT or the socket closing give every weight back.
+  `--dry-run` was run against this desktop: Ghostty on screen, left
+  alone; Files moved and weighed; Claude's own scope weighed.
+
 **Not yet:**
 - Choosing a GPU per app. That moved to the GPU broker idea in the suite's vision.md.
 

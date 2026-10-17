@@ -311,6 +311,12 @@ pub enum Message {
     RemoveLimits,
     LimitsDone(Result<(), String>),
     CloseLimits,
+    /// Switch efficiency mode on or off: its user service, enabled and
+    /// started, or stopped and disabled.
+    Efficiency(bool),
+    EfficiencySwitched(Result<(), String>),
+    /// Whether its service is running; `None` when it isn't installed.
+    EfficiencyState(Option<bool>),
     /// A menu row chosen: close the menu, then do what its button does.
     MenuChose(Box<Message>),
     /// Open file location for a program named outright — a menu's, read
@@ -366,6 +372,11 @@ pub struct App {
     pub limits: Option<limits_view::Dialog>,
     /// Who sets them: the user's systemd, or a mock in a test.
     pub limiter: std::sync::Arc<dyn hyprforge_procman::limits::Limiter>,
+    /// Efficiency mode's service: running, stopped, or `None` for not
+    /// installed (or not known yet).
+    pub efficiency: Option<bool>,
+    /// Waiting on systemd to switch it.
+    pub efficiency_busy: bool,
     /// Wakeups a second, by process, averaged over about ten seconds.
     pub wakeups: HashMap<Id, f64>,
     /// Each process's share of what the machine did, in percent,
@@ -444,6 +455,27 @@ type GpuScan = std::sync::Arc<std::sync::Mutex<hyprforge_procman::gpu::Scan>>;
 
 pub fn search_id() -> WidgetId {
     WidgetId::new("procman-search")
+}
+
+/// Efficiency mode's user unit — see `src/bin/efficiency.rs`.
+const EFFICIENCY_UNIT: &str = "hyprforge-procman-efficiency.service";
+
+/// Asks systemd whether efficiency mode's service is there and running.
+fn efficiency_state() -> Task<Message> {
+    Task::perform(
+        async {
+            let units = Dbus.list(Scope::User).await.ok()?;
+            units.iter().find(|u| u.name == EFFICIENCY_UNIT).map(|u| u.active == "active").or_else(|| {
+                // Listed only once loaded: an installed unit nobody has
+                // started is not in the list, and its file says it's there.
+                let home = std::env::var_os("HOME")?;
+                let local = std::path::Path::new(&home).join(".config/systemd/user").join(EFFICIENCY_UNIT);
+                let packaged = std::path::Path::new("/usr/lib/systemd/user").join(EFFICIENCY_UNIT);
+                (local.exists() || packaged.exists()).then_some(false)
+            })
+        },
+        Message::EfficiencyState,
+    )
 }
 
 fn read(fs: ProcFs, helper: Option<zbus::Connection>, lookup: Option<inspect::Lookup>, scan: GpuScan, ask_nvidia: bool, drive_temperatures: bool) -> Task<Message> {
@@ -590,6 +622,8 @@ impl App {
             crash_days: 7,
             limits: None,
             limiter: std::sync::Arc::new(hyprforge_procman::limits::UserSystemd),
+            efficiency: None,
+            efficiency_busy: false,
             wakeups: HashMap::new(),
             activity: HashMap::new(),
             watts: HashMap::new(),
@@ -618,7 +652,7 @@ impl App {
             reading: true,
         };
         let scan = app.gpu_scan.clone();
-        (app, read(fs, None, None, scan, false, false))
+        (app, Task::batch([read(fs, None, None, scan, false, false), efficiency_state()]))
     }
 
     fn load_services(&mut self) -> Task<Message> {
@@ -933,6 +967,29 @@ impl App {
                 }
             }
             Message::CloseLimits => self.limits = None,
+            Message::Efficiency(on) => {
+                self.efficiency_busy = true;
+                return Task::perform(
+                    async move {
+                        // Enabled as well as started, so it comes back at
+                        // the next sign-in; stopping gives every weight back.
+                        let steps = if on { [Action::Enable, Action::Start] } else { [Action::Stop, Action::Disable] };
+                        for step in steps {
+                            Dbus.act(Scope::User, EFFICIENCY_UNIT.to_string(), step).await?;
+                        }
+                        Ok::<(), String>(())
+                    },
+                    Message::EfficiencySwitched,
+                );
+            }
+            Message::EfficiencySwitched(result) => {
+                self.efficiency_busy = false;
+                if let Err(e) = result {
+                    self.notice = Some(format!("Efficiency mode couldn't be switched: {e}."));
+                }
+                return efficiency_state();
+            }
+            Message::EfficiencyState(state) => self.efficiency = state,
             Message::MenuChose(message) => {
                 self.menu = None;
                 return self.update(*message);

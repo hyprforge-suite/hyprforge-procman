@@ -50,6 +50,13 @@ other Hyprforge component to start.
   memory and I/O pressure, strained stretches marked; pick a moment and
   see what was busiest, and what the hour around it added up to.
 
+**Efficiency mode** (`hyprforge-procman-efficiency`, a user service,
+off until switched on from the Processes tab) gives an app with no
+window on screen less CPU while something on screen wants it, through
+its cgroup's CPU weight: on an idle machine nothing changes. It listens
+to Hyprland's events rather than polling, and stopping it gives every
+weight back. `--dry-run` says what it would do and does none of it.
+
 **`hyprforge-top`** is atop's screen in a terminal — its header lines,
 its views (`g m d n s v c u p j`, and `y` for threads and `e` for GPU use live), its keys and sorts — live, or replaying
 the recorder's history with `-r DAY -b HH:MM`. `hyprforge-top report

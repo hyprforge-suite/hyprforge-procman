@@ -128,9 +128,9 @@ impl App {
         d.error = None;
         let limiter = self.limiter.clone();
         let pending = match d.plan.clone() {
-            Plan::Unit(unit) => limiter.set(unit, wanted, cores()),
+            Plan::Unit(unit) => limiter.set(unit, wanted.properties(cores())),
             Plan::NewScope { name, pids } => {
-                limiter.new_scope(name, format!("{} (limited by Processes)", d.name), pids.into_iter().map(|p| p as u32).collect(), wanted, cores())
+                limiter.new_scope(name, format!("{} (limited by Processes)", d.name), pids.into_iter().map(|p| p as u32).collect(), wanted.properties(cores()))
             }
             Plan::Refuse(_) => return iced::Task::none(),
         };
@@ -203,7 +203,7 @@ fn frame<'a>(card: iced::widget::Column<'a, Message>, s: FontScale) -> Element<'
 #[cfg(test)]
 mod tests {
     use super::*;
-    use hyprforge_procman::limits::{Limiter, Pending};
+    use hyprforge_procman::limits::{Limiter, Pending, Properties};
     use std::sync::{Arc, Mutex};
 
     /// systemd in memory, answering yes, keeping what it was asked.
@@ -211,12 +211,12 @@ mod tests {
     struct Mock(Mutex<Vec<String>>);
 
     impl Limiter for Mock {
-        fn set(&self, unit: String, l: Limits, _: u32) -> Pending<()> {
-            self.0.lock().unwrap().push(format!("set {unit} {l:?}"));
+        fn set(&self, unit: String, p: Properties) -> Pending<()> {
+            self.0.lock().unwrap().push(format!("set {unit} {p:?}"));
             Box::pin(async { Ok(()) })
         }
-        fn new_scope(&self, name: String, _: String, pids: Vec<u32>, l: Limits, _: u32) -> Pending<()> {
-            self.0.lock().unwrap().push(format!("scope {name} {} {l:?}", pids.len()));
+        fn new_scope(&self, name: String, _: String, pids: Vec<u32>, p: Properties) -> Pending<()> {
+            self.0.lock().unwrap().push(format!("scope {name} {} {p:?}", pids.len()));
             Box::pin(async { Ok(()) })
         }
     }

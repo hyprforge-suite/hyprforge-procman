@@ -9,11 +9,60 @@
 use serde::Deserialize;
 use std::process::Command;
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Default)]
 pub struct Window {
     pub pid: i32,
     pub class: String,
     pub title: String,
+    /// The workspace it is on. Whether that is on screen is the monitors'
+    /// to say ([`shown_workspaces`]): Hyprland's own `visible` is true for
+    /// a window on a workspace nobody is looking at — every one of this
+    /// machine's windows said so on 2026-10-17, three of them on
+    /// workspaces 3 and 4 with the only monitor on 2.
+    #[serde(default)]
+    pub workspace: WorkspaceRef,
+    #[serde(default)]
+    pub hidden: bool,
+    /// 0 for the focused window, then how long ago each was.
+    #[serde(default, rename = "focusHistoryID")]
+    pub focus: i64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
+pub struct WorkspaceRef {
+    pub id: i64,
+}
+
+impl Window {
+    /// On a workspace a monitor is showing, and not hidden.
+    pub fn on_screen(&self, shown: &std::collections::HashSet<i64>) -> bool {
+        !self.hidden && shown.contains(&self.workspace.id)
+    }
+}
+
+/// The workspaces on screen, from `hyprctl monitors -j`: each monitor's
+/// active one, and its special workspace when one is open over it — a
+/// special workspace's id is negative, and `0` means none.
+pub fn shown_workspaces(json: &[u8]) -> Result<std::collections::HashSet<i64>, String> {
+    #[derive(Deserialize)]
+    struct Monitor {
+        #[serde(rename = "activeWorkspace")]
+        active: WorkspaceRef,
+        #[serde(default, rename = "specialWorkspace")]
+        special: WorkspaceRef,
+    }
+    let monitors: Vec<Monitor> = serde_json::from_slice(json).map_err(|e| format!("hyprctl's monitor list didn't parse: {e}"))?;
+    Ok(monitors.iter().flat_map(|m| [m.active.id, m.special.id]).filter(|id| *id != 0).collect())
+}
+
+/// [`shown_workspaces`], asked of Hyprland.
+pub fn read_shown() -> Result<std::collections::HashSet<i64>, String> {
+    let out = hyprforge_process::output(Command::new("hyprctl").args(["monitors", "-j"]), hyprforge_process::TIMEOUT)
+        .map_err(|e| format!("hyprctl didn't answer: {e}"))?;
+    if !out.status.success() {
+        return Err("hyprctl couldn't reach Hyprland".into());
+    }
+    shown_workspaces(&out.stdout)
 }
 
 /// The windows Hyprland has, or why there are none to show.
@@ -59,7 +108,21 @@ mod tests {
     fn a_window_list_reads_its_pid_class_and_title() {
         let json = fixture::clients(&[(4242, "firefox", "The Daily Prophet"), (-1, "ghost", "")]);
         let windows = parse(&json).unwrap();
-        assert_eq!(windows, [Window { pid: 4242, class: "firefox".into(), title: "The Daily Prophet".into() }]);
+        assert_eq!(windows, [Window { pid: 4242, class: "firefox".into(), title: "The Daily Prophet".into(), workspace: WorkspaceRef { id: 1 }, hidden: false, focus: 0 }]);
+    }
+
+    /// This machine's monitor on 2026-10-17, and the window list's own
+    /// `visible`, which said true for workspaces nobody could see.
+    #[test]
+    fn on_screen_is_the_monitors_workspaces_not_hyprlands_visible() {
+        let shown = shown_workspaces(br#"[{"activeWorkspace":{"id":2,"name":"2"},"specialWorkspace":{"id":0,"name":""}}]"#).unwrap();
+        assert_eq!(shown, [2].into_iter().collect());
+        let at = |ws: i64| Window { workspace: WorkspaceRef { id: ws }, ..Window::default() };
+        assert!(at(2).on_screen(&shown));
+        assert!(!at(3).on_screen(&shown), "visible:true in hyprctl, and off screen");
+        let with_special = shown_workspaces(br#"[{"activeWorkspace":{"id":2},"specialWorkspace":{"id":-98,"name":"special:term"}}]"#).unwrap();
+        assert!(at(-98).on_screen(&with_special), "a special workspace open over the monitor is on screen");
+        assert!(!Window { hidden: true, ..at(2) }.on_screen(&shown));
     }
 
     #[test]

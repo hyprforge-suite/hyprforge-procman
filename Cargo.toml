@@ -55,6 +55,13 @@ name = "hyprforge-top"
 path = "src/bin/top.rs"
 required-features = ["tui"]
 
+# Efficiency mode: a user service that gives apps off screen less CPU.
+# Off unless switched on; the package never enables it.
+[[bin]]
+name = "hyprforge-procman-efficiency"
+path = "src/bin/efficiency.rs"
+required-features = ["dbus"]
+
 # Samples the machine every ten seconds into a private journal, as root.
 # No features: it links neither iced nor zbus.
 [[bin]]

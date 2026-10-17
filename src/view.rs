@@ -366,6 +366,12 @@ impl App {
                 let allowed = chosen.filter(|id| !self.critical.contains(&id.pid));
                 widgets::secondary_button("Freeze").on_press_maybe(allowed.map(|_| Message::Freeze(true)))
             };
+            // Efficiency mode, when its service is installed: apps with no
+            // window on screen give way for CPU to the ones that have.
+            if let Some(on) = self.efficiency {
+                let toggle = widgets::toggle(on, s).label("Efficiency mode");
+                bar = bar.push(if self.efficiency_busy { toggle } else { toggle.on_toggle(Message::Efficiency) });
+            }
             bar = bar
                 .push(widgets::toggle(self.view.show_kernel, s).label("Kernel threads").on_toggle(Message::ShowKernel))
                 .push(freeze)

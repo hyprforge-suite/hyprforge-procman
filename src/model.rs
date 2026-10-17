@@ -549,7 +549,7 @@ mod tests {
     }
 
     fn window(pid: i32, class: &str, title: &str) -> Window {
-        Window { pid, class: class.into(), title: title.into() }
+        Window { pid, class: class.into(), title: title.into(), ..Window::default() }
     }
 
     /// Flatseal as this machine ran it: bwrap under bwrap under

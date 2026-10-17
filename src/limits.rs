@@ -215,18 +215,22 @@ pub use client::*;
 
 #[cfg(feature = "dbus")]
 mod client {
-    use super::Limits;
     use std::future::Future;
     use std::pin::Pin;
 
     pub type Pending<T> = Pin<Box<dyn Future<Output = Result<T, String>> + Send>>;
 
+    /// Unit properties in systemd's own names and units — what
+    /// [`super::Limits::properties`] and efficiency mode's CPU weight both are.
+    pub type Properties = Vec<(&'static str, u64)>;
+
     /// What setting a limit needs of systemd: the user's own manager,
     /// which asks nothing of polkit for a user's own units.
     pub trait Limiter: Send + Sync {
-        fn set(&self, unit: String, limits: Limits, cores: u32) -> Pending<()>;
-        /// Moves `pids` into a new scope named `name`, with `limits`.
-        fn new_scope(&self, name: String, description: String, pids: Vec<u32>, limits: Limits, cores: u32) -> Pending<()>;
+        /// Sets `properties` on `unit`, at runtime only.
+        fn set(&self, unit: String, properties: Properties) -> Pending<()>;
+        /// Moves `pids` into a new scope named `name`, with `properties`.
+        fn new_scope(&self, name: String, description: String, pids: Vec<u32>, properties: Properties) -> Pending<()>;
     }
 
     pub struct UserSystemd;
@@ -238,25 +242,25 @@ mod client {
             .map_err(|e| e.to_string())
     }
 
-    fn props(limits: &Limits, cores: u32) -> Vec<(String, zbus::zvariant::OwnedValue)> {
-        limits.properties(cores).into_iter().map(|(k, v)| (k.to_string(), zbus::zvariant::OwnedValue::from(v))).collect()
+    fn props(properties: Properties) -> Vec<(String, zbus::zvariant::OwnedValue)> {
+        properties.into_iter().map(|(k, v)| (k.to_string(), zbus::zvariant::OwnedValue::from(v))).collect()
     }
 
     impl Limiter for UserSystemd {
-        fn set(&self, unit: String, limits: Limits, cores: u32) -> Pending<()> {
+        fn set(&self, unit: String, properties: Properties) -> Pending<()> {
             Box::pin(crate::bound::within(crate::bound::QUICK, "systemd", async move {
                 let m = manager().await?;
                 // `true`: runtime only, gone at reboot.
-                m.call::<_, _, ()>("SetUnitProperties", &(&unit, true, props(&limits, cores)))
+                m.call::<_, _, ()>("SetUnitProperties", &(&unit, true, props(properties)))
                     .await
                     .map_err(|e| format!("systemd refused the limit: {e}"))
             }))
         }
 
-        fn new_scope(&self, name: String, description: String, pids: Vec<u32>, limits: Limits, cores: u32) -> Pending<()> {
+        fn new_scope(&self, name: String, description: String, pids: Vec<u32>, properties: Properties) -> Pending<()> {
             Box::pin(crate::bound::within(crate::bound::QUICK, "systemd", async move {
                 let m = manager().await?;
-                let mut p = props(&limits, cores);
+                let mut p = props(properties);
                 p.push(("PIDs".into(), zbus::zvariant::OwnedValue::try_from(zbus::zvariant::Value::from(pids)).map_err(|e| e.to_string())?));
                 p.push(("Description".into(), zbus::zvariant::OwnedValue::try_from(zbus::zvariant::Value::from(description)).map_err(|e| e.to_string())?));
                 let aux: Vec<(String, Vec<(String, zbus::zvariant::OwnedValue)>)> = Vec::new();
@@ -278,13 +282,13 @@ mod client {
 
     #[cfg(test)]
     impl Limiter for Mock {
-        fn set(&self, unit: String, limits: Limits, cores: u32) -> Pending<()> {
-            self.calls.lock().unwrap().push(format!("set {unit} {:?}", limits.properties(cores)));
+        fn set(&self, unit: String, properties: Properties) -> Pending<()> {
+            self.calls.lock().unwrap().push(format!("set {unit} {properties:?}"));
             let refuse = self.refuse;
             Box::pin(async move { if refuse { Err("no".into()) } else { Ok(()) } })
         }
-        fn new_scope(&self, name: String, _: String, pids: Vec<u32>, limits: Limits, cores: u32) -> Pending<()> {
-            self.calls.lock().unwrap().push(format!("scope {name} {pids:?} {:?}", limits.properties(cores)));
+        fn new_scope(&self, name: String, _: String, pids: Vec<u32>, properties: Properties) -> Pending<()> {
+            self.calls.lock().unwrap().push(format!("scope {name} {pids:?} {properties:?}"));
             Box::pin(async { Ok(()) })
         }
     }

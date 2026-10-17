@@ -1,0 +1,19 @@
+# hyprforge-procman's efficiency mode: apps with no window on screen get
+# less CPU while something on screen wants it. Installed to
+# /usr/lib/systemd/user/; switched on from the Processes tab's
+# Efficiency mode, never by the package. Stopping it gives back every
+# weight it set.
+[Unit]
+Description=Hyprforge efficiency mode
+Documentation=https://github.com/hyprforge-suite/hyprforge-procman
+PartOf=graphical-session.target
+After=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=%h/.cargo/bin/hyprforge-procman-efficiency
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=graphical-session.target

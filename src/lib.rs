@@ -11,6 +11,7 @@ pub mod app_history;
 #[cfg(feature = "dbus")]
 pub mod bound;
 pub mod cgroups;
+pub mod efficiency;
 pub mod exits;
 pub mod flatpak;
 pub mod gpu;

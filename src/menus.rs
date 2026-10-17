@@ -256,6 +256,23 @@ pub mod tests {
         assert!(app.activity[&me()] > 99.0, "the share is still shown plugged in");
     }
 
+    /// Switching is a wait on systemd: the toggle holds still until it
+    /// answers, a refusal is said in words, and the state shown is asked
+    /// of systemd again rather than assumed from what was asked for.
+    #[test]
+    fn efficiency_mode_shows_what_systemd_says_not_what_was_asked() {
+        let mut app = window();
+        app.efficiency = Some(false);
+        let _ = app.update(Message::Efficiency(true));
+        assert!(app.efficiency_busy);
+        assert_eq!(app.efficiency, Some(false), "not on until systemd says so");
+        let _ = app.update(Message::EfficiencySwitched(Err("no such unit".into())));
+        assert!(!app.efficiency_busy);
+        assert!(app.notice.as_deref().is_some_and(|n| n.contains("no such unit")));
+        let _ = app.update(Message::EfficiencyState(Some(true)));
+        assert_eq!(app.efficiency, Some(true));
+    }
+
     /// Wakeups cost a file per thread, so only the page that shows them
     /// pays for them.
     #[test]
