@@ -17,7 +17,8 @@ other Hyprforge component to start.
   then background processes and kernel threads. A Flatpak app is one
   group with its whole sandbox — the `bwrap` layers and its D-Bus proxy —
   window or not, read from the systemd scope Flatpak starts it in. CPU, memory, disk,
-  network and GPU per process, with the card it uses. End, Kill, Freeze,
+  network and GPU per process (the card, each engine and its video
+  memory in Details). End, Kill, Freeze,
   Resume, priority, End process tree — and a warning before ending
   anything the session itself runs on.
 - **Performance**: CPU and every core, memory and swap, every disk, every

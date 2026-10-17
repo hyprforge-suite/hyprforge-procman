@@ -1214,6 +1214,8 @@ impl App {
             }
             let ids: HashMap<i32, Id> = snapshot.procs.iter().map(|p| (p.pid, Id { pid: p.pid, start: p.start })).collect();
             usage.gpu = hyprforge_procman::gpu::shares(&self.last_gpu, &gpu, &ids, seconds);
+            usage.gpu_engines = hyprforge_procman::gpu::engines(&self.last_gpu, &gpu, &ids, seconds);
+            usage.gpu_vram = gpu.iter().filter_map(|(pid, u)| Some((*ids.get(pid)?, u.vram))).filter(|(_, v)| *v > 0).collect();
             // A card's maker, from its driver; NVIDIA's own device files
             // name no PCI address.
             let maker = |card: &str| hyprforge_procman::gpu::maker(card, &self.machine.gpus).to_string();

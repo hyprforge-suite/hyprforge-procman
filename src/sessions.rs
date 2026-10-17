@@ -177,6 +177,8 @@ mod tests {
             net: None,
             gpu: None,
             gpu_cards: Vec::new(),
+            gpu_engines: Vec::new(),
+            gpu_vram: None,
             private_bytes: bytes,
             threads: 1,
             state: 'S',

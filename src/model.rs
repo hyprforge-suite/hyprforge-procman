@@ -19,7 +19,7 @@ use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 
 /// One process, ready to draw.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct Entry {
     pub id: Id,
     pub name: String,
@@ -42,6 +42,10 @@ pub struct Entry {
     pub gpu: Option<f32>,
     /// The GPUs it has open, by maker: "AMD", "NVIDIA", "Intel".
     pub gpu_cards: Vec<String>,
+    /// Its engines, busiest first, and the video memory it holds —
+    /// what the GPU column's one number was the busiest of.
+    pub gpu_engines: Vec<(String, f32)>,
+    pub gpu_vram: Option<u64>,
     pub private_bytes: u64,
     pub threads: u32,
     pub state: char,
@@ -145,6 +149,8 @@ pub fn table(
             net: usage.net.get(&id).copied(),
             gpu: usage.gpu.get(&id).copied(),
             gpu_cards: usage.gpu_cards.get(&id).cloned().unwrap_or_default(),
+            gpu_engines: usage.gpu_engines.get(&id).cloned().unwrap_or_default(),
+            gpu_vram: usage.gpu_vram.get(&id).copied(),
             private_bytes: p.private_bytes,
             threads: p.threads,
             state: p.state,

@@ -23,7 +23,7 @@ pub const NAME_PORTION: u16 = 6;
 pub const CPU_W: f32 = 84.0;
 pub const MEM_W: f32 = 104.0;
 pub const DISK_W: f32 = 104.0;
-pub const GPU_W: f32 = 170.0;
+pub const GPU_W: f32 = 84.0;
 pub const PID_W: f32 = 84.0;
 pub const USER_W: f32 = 120.0;
 
@@ -75,25 +75,17 @@ pub fn rate(per_second: Option<f64>) -> String {
     }
 }
 
-/// The GPU column: `AMD 5.0 %`, `AMD 0.4 % · NVIDIA`, or blank. The load
-/// is measured from fdinfo, which NVIDIA's driver does not write, so it
-/// sits beside the first card that is not NVIDIA's — never after a list,
-/// where it would read as the whole list's.
+/// The GPU column: one number, like CPU's — the busiest engine on any
+/// card it measures. A process holding only a card that can't say what
+/// each program uses (NVIDIA's driver) is a dash, never a 0 it was not
+/// measured at; one holding no GPU is blank. Which card and which engine
+/// are in Details, and in Advanced's GPU engine column.
 pub fn gpu_cell((load, cards): &(Option<f32>, Vec<String>)) -> String {
-    let mut parts: Vec<String> = Vec::new();
-    let mut placed = false;
-    let mut ordered: Vec<&String> = cards.iter().filter(|c| *c != "NVIDIA").collect();
-    ordered.extend(cards.iter().filter(|c| *c == "NVIDIA"));
-    for card in ordered {
-        match load {
-            Some(l) if !placed && card != "NVIDIA" => {
-                parts.push(format!("{card} {}", percent(Some(*l))));
-                placed = true;
-            }
-            _ => parts.push(card.clone()),
-        }
+    match load {
+        Some(l) => percent(Some(*l)),
+        None if !cards.is_empty() => "—".to_string(),
+        None => String::new(),
     }
-    parts.join(" · ")
 }
 
 /// A share, or a dash while there is only one reading to go on.
@@ -945,11 +937,14 @@ impl App {
 mod tests {
     use super::*;
 
+    /// One number, as CPU is: measured, unmeasurable, or no GPU at all —
+    /// and never two lines in a row of one.
     #[test]
-    fn a_gpu_load_sits_beside_the_card_it_was_measured_on() {
+    fn the_gpu_column_is_a_figure_a_dash_or_nothing() {
         let cards = |c: &[&str]| c.iter().map(|s| s.to_string()).collect::<Vec<_>>();
-        assert_eq!(gpu_cell(&(Some(0.4), cards(&["AMD", "NVIDIA"]))), "AMD 0.4 % · NVIDIA");
-        assert_eq!(gpu_cell(&(None, cards(&["NVIDIA"]))), "NVIDIA");
+        assert_eq!(gpu_cell(&(Some(0.4), cards(&["AMD", "NVIDIA"]))), "0.4 %");
+        assert_eq!(gpu_cell(&(Some(0.0), cards(&["AMD"]))), "0 %", "open and idle is measured idle");
+        assert_eq!(gpu_cell(&(None, cards(&["NVIDIA"]))), "—", "NVIDIA can't say, which is not 0");
         assert_eq!(gpu_cell(&(None, Vec::new())), "");
     }
 

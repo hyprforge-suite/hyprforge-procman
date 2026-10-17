@@ -178,12 +178,50 @@ pub fn shares(before: &HashMap<i32, DrmUse>, now: &HashMap<i32, DrmUse>, ids: &H
     out
 }
 
+/// Each process's engines, busiest first, as a percent of each one's
+/// time: `[("gfx", 2.4), ("compute", 0.0)]`. Only a process read at both
+/// readings has them; one with its GPU open but idle has them at 0, which
+/// is how idle is told apart from "no GPU".
+pub fn engines(before: &HashMap<i32, DrmUse>, now: &HashMap<i32, DrmUse>, ids: &HashMap<i32, Id>, seconds: f64) -> HashMap<Id, Vec<(String, f32)>> {
+    let mut out = HashMap::new();
+    if seconds <= 0.0 {
+        return out;
+    }
+    for (pid, u) in now {
+        let (Some(b), Some(id)) = (before.get(pid), ids.get(pid)) else { continue };
+        let mut list: Vec<(String, f32)> = u
+            .engines
+            .iter()
+            .map(|(engine, ns)| {
+                let busy = ns.saturating_sub(b.engines.get(engine).copied().unwrap_or(*ns));
+                (engine.clone(), (busy as f64 / (seconds * 1e9) * 100.0).min(100.0) as f32)
+            })
+            .collect();
+        list.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
+        out.insert(*id, list);
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     /// The drm lines of Hyprland's render descriptor on this machine.
     const FDINFO: &str = "pos:\t0\nflags:\t02100002\nmnt_id:\t26\nino:\t1061\ndrm-driver:\tamdgpu\ndrm-client-id:\t27\ndrm-pdev:\t0000:c3:00.0\ndrm-total-vram:\t351636 KiB\ndrm-resident-vram:\t319496 KiB\ndrm-memory-vram:\t319496 KiB\ndrm-memory-gtt: \t46496 KiB\ndrm-engine-gfx:\t472202451596 ns\ndrm-engine-compute:\t241757698 ns\n";
+
+    /// gfx busy for a quarter of a second in one second; compute idle.
+    /// Idle is a 0, not a missing engine.
+    #[test]
+    fn each_engine_has_its_own_share_busiest_first() {
+        let use_of = |gfx: u64, compute: u64| DrmUse { engines: HashMap::from([("gfx".into(), gfx), ("compute".into(), compute)]), ..DrmUse::default() };
+        let before = HashMap::from([(7, use_of(1_000_000_000, 5))]);
+        let now = HashMap::from([(7, use_of(1_250_000_000, 5))]);
+        let id = Id { pid: 7, start: 1 };
+        let e = &engines(&before, &now, &HashMap::from([(7, id)]), 1.0)[&id];
+        assert_eq!(e[0], ("gfx".to_string(), 25.0));
+        assert_eq!(e[1], ("compute".to_string(), 0.0));
+    }
 
     #[test]
     fn an_fdinfo_reads_its_client_engines_and_video_memory() {

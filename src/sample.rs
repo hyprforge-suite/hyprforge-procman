@@ -174,6 +174,10 @@ pub struct Use {
     pub gpu: HashMap<Id, f32>,
     /// Which cards it has open, by name ("AMD", "NVIDIA").
     pub gpu_cards: HashMap<Id, Vec<String>>,
+    /// Every engine's share, busiest first — see [`crate::gpu::engines`].
+    pub gpu_engines: HashMap<Id, Vec<(String, f32)>>,
+    /// Video memory it holds, in bytes.
+    pub gpu_vram: HashMap<Id, u64>,
     /// The Advanced view's rates; empty when it is off.
     pub detail: HashMap<Id, Detail>,
     /// Wakeups a second — see [`wakeup_rates`].

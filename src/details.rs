@@ -12,8 +12,51 @@ use iced::{Alignment, Background, Border, Element, Length};
 
 const NICE_W: f32 = 70.0;
 /// The Advanced columns, after Priority.
-const ADVANCED: [(&str, f32); 7] =
-    [("user · sys", 110.0), ("Swap", 84.0), ("Faults/s", 100.0), ("Switches/s", 116.0), ("Core", 60.0), ("Policy", 92.0), ("Virtual", 96.0)];
+const ADVANCED: [(&str, f32); 8] = [
+    ("user · sys", 110.0),
+    ("Swap", 84.0),
+    ("Faults/s", 100.0),
+    ("Switches/s", 116.0),
+    ("Core", 60.0),
+    ("Policy", 92.0),
+    ("Virtual", 96.0),
+    ("GPU engine", 150.0),
+];
+
+/// The Advanced GPU engine column: which engine the GPU figure is the
+/// busiest of, and on which maker's card — `AMD gfx`. The figure itself
+/// is in the GPU column already.
+pub fn gpu_engine(e: &Entry) -> String {
+    let maker = e.gpu_cards.iter().find(|c| *c != "NVIDIA");
+    match (maker, e.gpu_engines.first()) {
+        (Some(m), Some((engine, _))) => format!("{m} {engine}"),
+        _ if e.gpu_cards.iter().any(|c| c == "NVIDIA") => "NVIDIA".to_string(),
+        _ => "—".to_string(),
+    }
+}
+
+/// Details' GPU lines: each card it has open, a measured one's engines
+/// and video memory, and NVIDIA said plainly to be unmeasured rather
+/// than shown at 0.
+pub fn gpu_lines(e: &Entry) -> Vec<String> {
+    let mut out = Vec::new();
+    for card in &e.gpu_cards {
+        if card == "NVIDIA" {
+            out.push("NVIDIA — open; its driver doesn't say how much each program uses".to_string());
+            continue;
+        }
+        let engines: Vec<String> = e.gpu_engines.iter().map(|(n, p)| format!("{n} {}", percent(Some(*p)))).collect();
+        let mut line = card.clone();
+        if !engines.is_empty() {
+            line.push_str(&format!(" — {}", engines.join(", ")));
+        }
+        if let Some(v) = e.gpu_vram {
+            line.push_str(&format!(" · {} video memory", bytes(v)));
+        }
+        out.push(line);
+    }
+    out
+}
 /// The name column when the table scrolls sideways and cannot fill.
 const ADVANCED_NAME_W: f32 = 320.0;
 
@@ -160,6 +203,7 @@ impl App {
                 if e.processor >= 0 { e.processor.to_string() } else { "—".to_string() },
                 policy(e.policy).to_string(),
                 bytes(e.vsize),
+                gpu_engine(&e),
             ];
             for (value, (_, w)) in values.into_iter().zip(ADVANCED) {
                 line = line.push(cell(value, w));
@@ -210,6 +254,9 @@ impl App {
                 ));
             }
             None => facts = facts.push(widgets::fact("Memory", format!("{} private · {} resident", bytes(e.private_bytes), bytes(e.resident_bytes)), s)),
+        }
+        for (i, line) in gpu_lines(e).into_iter().enumerate() {
+            facts = facts.push(widgets::fact(if i == 0 { "GPU" } else { "" }, line, s));
         }
         facts = facts.push(widgets::fact("Open files", p.open_files.map_or(hidden.to_string(), |n| n.to_string()), s));
         match &p.sockets {
@@ -265,6 +312,33 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn with_gpu(cards: &[&str], engines: &[(&str, f32)], vram: Option<u64>) -> Entry {
+        Entry {
+            gpu_cards: cards.iter().map(|c| c.to_string()).collect(),
+            gpu_engines: engines.iter().map(|(n, p)| (n.to_string(), *p)).collect(),
+            gpu_vram: vram,
+            ..Entry::default()
+        }
+    }
+
+    /// Hyprland's case on this machine: the AMD card measured, NVIDIA
+    /// held open and unmeasurable. Each says what it is, on its own line.
+    #[test]
+    fn details_name_each_card_its_engines_and_say_when_nvidia_cannot_be_measured() {
+        let e = with_gpu(&["AMD", "NVIDIA"], &[("gfx", 1.3), ("compute", 0.0)], Some(312 * 1024 * 1024));
+        let lines = gpu_lines(&e);
+        assert_eq!(lines[0], "AMD — gfx 1.3 %, compute 0 % · 312 MB video memory");
+        assert!(lines[1].starts_with("NVIDIA — open;"), "{lines:?}");
+        assert!(gpu_lines(&Entry::default()).is_empty(), "no GPU, no lines");
+    }
+
+    #[test]
+    fn the_engine_column_says_which_engine_on_which_card() {
+        assert_eq!(gpu_engine(&with_gpu(&["AMD", "NVIDIA"], &[("gfx", 2.4)], None)), "AMD gfx");
+        assert_eq!(gpu_engine(&with_gpu(&["NVIDIA"], &[], None)), "NVIDIA");
+        assert_eq!(gpu_engine(&Entry::default()), "—");
+    }
 
     #[test]
     fn policies_read_as_words() {
