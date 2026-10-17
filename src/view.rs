@@ -265,9 +265,15 @@ impl App {
                     .on_press(Message::Toggle(id))
                     .style(|t, status| widgets::selectable_row_style(t, status, false));
                 let mut name = column![widgets::scaled_text(app.lead.name.clone(), density::ROW_TEXT_BASE, s)];
-                if !app.title.is_empty() {
-                    let windows = if app.windows > 1 { format!(" · {} windows", app.windows) } else { String::new() };
-                    name = name.push(widgets::clamped_text(format!("{}{windows}", app.title), 1).size(s.apply(density::META_TEXT_BASE)).width(Length::Fill).color(ink(selected)));
+                let windows = if app.windows > 1 { format!(" · {} windows", app.windows) } else { String::new() };
+                let sandbox = match (&app.flatpak, app.windows) {
+                    (Some(_), 0) => "Flatpak · no window".to_string(),
+                    (Some(_), _) => " · Flatpak".to_string(),
+                    (None, _) => String::new(),
+                };
+                let caption = format!("{}{windows}{sandbox}", app.title);
+                if !caption.is_empty() {
+                    name = name.push(widgets::clamped_text(caption, 1).size(s.apply(density::META_TEXT_BASE)).width(Length::Fill).color(ink(selected)));
                 }
                 let name = row![chevron, name].spacing(spacing::XS).align_y(Alignment::Center);
                 let count = app.members.len();
@@ -354,7 +360,7 @@ impl App {
         }
         if self.tab == Tab::Processes {
             let chosen = self.selected;
-            let is_app = chosen.is_some_and(|id| self.table.apps.iter().any(|a| a.lead.id == id));
+            let is_app = chosen.is_some_and(|id| self.table.apps.iter().any(|a| a.lead.id == id && a.windows > 0));
             if is_app {
                 bar = bar.push(widgets::secondary_button("Switch to").on_press(Message::SwitchTo));
             }

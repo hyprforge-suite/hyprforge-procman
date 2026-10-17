@@ -67,9 +67,12 @@ pub struct App {
     /// first window, when a process has several.
     pub class: String,
     pub title: String,
+    /// 0 for a Flatpak app with no window, grouped by its scope alone.
     pub windows: usize,
     /// The lead first, then the rest in tree order.
     pub members: Vec<Entry>,
+    /// Its Flatpak app id, when it runs in one's sandbox.
+    pub flatpak: Option<String>,
 }
 
 impl App {
@@ -114,11 +117,13 @@ pub struct Table {
 }
 
 /// Builds the table from one refresh. `user_name` turns a uid into a
-/// name; `me` is the uid running this.
+/// name; `me` is the uid running this; `flatpaks` is each sandboxed
+/// process's app id ([`crate::flatpak::scopes`]).
 pub fn table(
     snapshot: &Snapshot,
     usage: &Use,
     windows: &[Window],
+    flatpaks: &HashMap<i32, String>,
     me: u32,
     user_name: &mut dyn FnMut(u32) -> String,
 ) -> Table {
@@ -188,8 +193,47 @@ pub fn table(
                 stack.extend(kids);
             }
         }
+        // A Flatpak's window belongs to the app inside the sandbox; the
+        // bwrap layers above it and its D-Bus proxy beside it share its
+        // scope and are the same app.
+        let flatpak = flatpaks.get(&pid).cloned();
+        if let Some(app_id) = &flatpak {
+            let mut more: Vec<i32> = flatpaks.iter().filter(|(p, id)| *id == app_id && !claimed.contains(p) && !leads.contains(p)).map(|(p, _)| *p).collect();
+            more.sort_unstable();
+            for p in more {
+                if let Some(proc_) = by_pid.get(&p) {
+                    claimed.insert(p);
+                    members.push(entry(proc_));
+                }
+            }
+        }
         let lead = members[0].clone();
-        apps.push(App { lead, class: window.class.clone(), title: window.title.clone(), windows: count, members });
+        apps.push(App { lead, class: window.class.clone(), title: window.title.clone(), windows: count, members, flatpak });
+    }
+    // A Flatpak with no window — a background service, a command run
+    // in its sandbox — is still one app, not five loose bwrap rows: its
+    // lead is the outermost process of its scope, named after the app.
+    let mut sandboxed: HashMap<&str, Vec<i32>> = HashMap::new();
+    for (pid, app_id) in flatpaks {
+        if !claimed.contains(pid) && by_pid.contains_key(pid) {
+            sandboxed.entry(app_id.as_str()).or_default().push(*pid);
+        }
+    }
+    let mut sandboxed: Vec<(&str, Vec<i32>)> = sandboxed.into_iter().collect();
+    sandboxed.sort();
+    for (app_id, mut pids) in sandboxed {
+        pids.sort_unstable();
+        let inside: HashSet<i32> = pids.iter().copied().collect();
+        let lead_pid = pids.iter().copied().find(|p| !inside.contains(&by_pid[p].ppid)).unwrap_or(pids[0]);
+        pids.retain(|p| *p != lead_pid);
+        pids.insert(0, lead_pid);
+        let members: Vec<Entry> = pids.iter().map(|p| entry(by_pid[p])).collect();
+        claimed.extend(pids.iter().copied());
+        // The group's row is named after the app; its members keep their
+        // own names, so the open group still says which one is bwrap.
+        let mut lead = members[0].clone();
+        lead.name = crate::flatpak::short_name(app_id).to_string();
+        apps.push(App { lead, class: app_id.to_string(), title: String::new(), windows: 0, members, flatpak: Some(app_id.to_string()) });
     }
     let background = snapshot.procs.iter().filter(|p| !claimed.contains(&p.pid)).map(&mut entry).collect();
     Table { apps, background }
@@ -502,6 +546,59 @@ mod tests {
         Window { pid, class: class.into(), title: title.into() }
     }
 
+    /// Flatseal as this machine ran it: bwrap under bwrap under
+    /// `flatpak run`, a D-Bus proxy beside them, the app at the bottom —
+    /// and the same tree with a window on the app.
+    fn flatseal(with_window: bool) -> Table {
+        let snapshot = Snapshot {
+            procs: vec![
+                proc(1, 0, "systemd", 0),
+                proc(830279, 1, "flatpak", 1000),
+                proc(830281, 830279, "bwrap", 1000),
+                proc(830302, 1, "bwrap", 1000),
+                proc(830303, 830302, "xdg-dbus-proxy", 1000),
+                proc(830306, 830281, "bwrap", 1000),
+                proc(830307, 830306, "flatseal", 1000),
+                proc(500, 1, "ghostty", 1000),
+            ],
+            cpu: CpuTimes::default(),
+            ..Snapshot::default()
+        };
+        let flatpaks: HashMap<i32, String> = [830281, 830302, 830303, 830306, 830307].into_iter().map(|p| (p, "com.github.tchx84.Flatseal".to_string())).collect();
+        let windows = if with_window { vec![window(830307, "com.github.tchx84.Flatseal", "Flatseal")] } else { Vec::new() };
+        table(&snapshot, &Use::default(), &windows, &flatpaks, 1000, &mut |_| "voldemort".into())
+    }
+
+    /// Five processes in one sandbox are one app, named after it — and
+    /// its members keep their own names, so the open group still says
+    /// which is bwrap. With no window there is nothing to switch to.
+    #[test]
+    fn a_flatpak_with_no_window_is_one_app_named_after_it() {
+        let t = flatseal(false);
+        let app = t.apps.iter().find(|a| a.flatpak.is_some()).expect("grouped");
+        assert_eq!(app.lead.name, "Flatseal");
+        assert_eq!(app.windows, 0);
+        assert_eq!(app.members.len(), 5);
+        assert_eq!(app.lead.id.pid, 830281, "the outermost of the scope, whose parent is outside it");
+        assert_eq!(app.members[0].name, "bwrap");
+        assert!(!t.background.iter().any(|e| e.name == "bwrap" || e.name == "xdg-dbus-proxy"));
+        assert!(t.background.iter().any(|e| e.name == "flatpak"), "flatpak run is outside the sandbox and stays where it was");
+    }
+
+    /// With a window, the sandbox layers above the app and the proxy
+    /// beside it join the window's app instead of the background.
+    #[test]
+    fn a_flatpak_window_takes_its_whole_sandbox_with_it() {
+        let t = flatseal(true);
+        assert_eq!(t.apps.len(), 1);
+        let app = &t.apps[0];
+        assert_eq!((app.lead.id.pid, app.windows), (830307, 1));
+        assert_eq!(app.flatpak.as_deref(), Some("com.github.tchx84.Flatseal"));
+        let mut pids: Vec<i32> = app.members.iter().map(|m| m.id.pid).collect();
+        pids.sort();
+        assert_eq!(pids, [830281, 830302, 830303, 830306, 830307]);
+    }
+
     /// systemd, a browser with two content processes, a terminal with a
     /// shell that launched an editor with a window of its own, and a
     /// daemon.
@@ -522,7 +619,7 @@ mod tests {
             ..Snapshot::default()
         };
         let windows = [window(100, "firefox", "The Daily Prophet"), window(200, "kitty", "~"), window(202, "gedit", "spells.txt"), window(100, "firefox", "Owl Post")];
-        table(&snapshot, &usage, &windows, 1000, &mut |uid| if uid == 0 { "root".into() } else { "voldemort".into() })
+        table(&snapshot, &usage, &windows, &HashMap::new(), 1000, &mut |uid| if uid == 0 { "root".into() } else { "voldemort".into() })
     }
 
     fn pids(app: &App) -> Vec<i32> {

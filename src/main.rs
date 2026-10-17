@@ -1030,7 +1030,7 @@ impl App {
                 }
             }
             Message::SwitchTo => {
-                if let Some(id) = self.selected.filter(|id| self.table.apps.iter().any(|a| a.lead.id == *id)) {
+                if let Some(id) = self.selected.filter(|id| self.table.apps.iter().any(|a| a.lead.id == *id && a.windows > 0)) {
                     switch_to(id.pid);
                 }
             }
@@ -1243,7 +1243,8 @@ impl App {
         }
         self.take_power(&usage, snapshot.cores.len(), seconds);
         let users = &mut self.users;
-        self.table = model::table(&snapshot, &usage, &windows, self.me, &mut |uid| users.name(uid));
+        let flatpaks = hyprforge_procman::flatpak::scopes(std::path::Path::new("/sys/fs/cgroup"));
+        self.table = model::table(&snapshot, &usage, &windows, &flatpaks, self.me, &mut |uid| users.name(uid));
 
         let m = snapshot.memory;
         let cpu = self.last.as_ref().map(|before| sample::busy(before.cpu, snapshot.cpu));

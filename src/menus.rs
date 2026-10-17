@@ -44,7 +44,9 @@ impl App {
     /// The menu for the process `id`, as its buttons would offer it.
     pub fn process_menu(&self, id: Id) -> Vec<MenuRow<Message>> {
         let Some(e) = self.entry(id) else { return Vec::new() };
-        let is_app = self.table.apps.iter().any(|a| a.lead.id == id);
+        // Switch to needs a window: a Flatpak grouped by its scope alone
+        // has none.
+        let is_app = self.table.apps.iter().any(|a| a.lead.id == id && a.windows > 0);
         let frozen = matches!(e.state, 'T' | 't');
         let critical = self.critical.contains(&id.pid);
         let mut rows = Vec::new();

@@ -14,7 +14,9 @@ other Hyprforge component to start.
 **The window** (`hyprforge-procman`) is Windows Task Manager as the floor:
 
 - **Processes**, grouped by the window they belong to (asked of Hyprland),
-  then background processes and kernel threads. CPU, memory, disk,
+  then background processes and kernel threads. A Flatpak app is one
+  group with its whole sandbox — the `bwrap` layers and its D-Bus proxy —
+  window or not, read from the systemd scope Flatpak starts it in. CPU, memory, disk,
   network and GPU per process, with the card it uses. End, Kill, Freeze,
   Resume, priority, End process tree — and a warning before ending
   anything the session itself runs on.

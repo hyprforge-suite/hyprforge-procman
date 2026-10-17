@@ -12,6 +12,7 @@ pub mod app_history;
 pub mod bound;
 pub mod cgroups;
 pub mod exits;
+pub mod flatpak;
 pub mod gpu;
 #[cfg(feature = "gui")]
 pub mod graph;
