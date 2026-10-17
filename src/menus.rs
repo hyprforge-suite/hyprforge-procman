@@ -57,6 +57,7 @@ impl App {
         rows.push(item("End task", Message::Ask(How::Ask)).hint("Delete"));
         rows.push(item("Kill", Message::Ask(How::Force)).hint("Ctrl+Delete"));
         rows.push(item("End process tree", Message::EndTree));
+        rows.push(item("Set limits…", Message::OpenLimits(id)));
         rows.push(MenuRow::Separator);
         rows.push(if frozen {
             item("Resume", Message::Freeze(false))
@@ -105,7 +106,7 @@ impl App {
 }
 
 #[cfg(test)]
-mod tests {
+pub mod tests {
     use super::*;
     use std::collections::HashMap;
     use hyprforge_procman::proc::ProcFs;
@@ -128,6 +129,15 @@ mod tests {
             held: None,
         });
         app
+    }
+
+    /// The window and this process's id, for other modules' tests.
+    pub fn tests_window() -> App {
+        window()
+    }
+
+    pub fn tests_me() -> Id {
+        me()
     }
 
     fn me() -> Id {
@@ -155,7 +165,7 @@ mod tests {
         let names: Vec<&str> = rows.iter().map(|(l, _)| l.as_str()).collect();
         assert_eq!(
             names,
-            ["End task", "Kill", "End process tree", "Freeze", "Lower priority", "Raise priority", "Open file location", "Show in Details", "Copy process ID"],
+            ["End task", "Kill", "End process tree", "Set limits…", "Freeze", "Lower priority", "Raise priority", "Open file location", "Show in Details", "Copy process ID"],
             "a test runner has no window, so no Switch to"
         );
         assert!(rows.contains(&("Freeze".into(), false)), "{rows:?}");

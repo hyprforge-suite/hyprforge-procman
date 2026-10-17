@@ -287,6 +287,21 @@ as administrator through pkexec.
   one meaning against the other. The window doesn't show run delay and
   doesn't pay for reading it.
 
+- **Limits per app** (2026-10-17, `limits.rs`): memory and CPU, set
+  as systemd cgroup properties at runtime. Every fact was tried on this
+  machine first: `u64::MAX` unsets each property; memory and CPU reach
+  the kernel's files; `IOWeight` is accepted on a user scope and does
+  nothing, since the user manager is delegated `cpu memory pids` and not
+  `io`, so what is offered is read from `cgroup.controllers`. Apps
+  Hyprland launched share `wayland-wm@hyprland.desktop.service` with the
+  compositor, so one that shares its unit is moved into a scope of its
+  own (`StartTransientUnit` with its pids) before it is limited; a unit
+  holding only the app is limited where it is. The compositor and the
+  rest of what the session runs on — the windowless part of the
+  window's ancestry — are refused, as are other users' apps and system
+  services. Memory is `MemoryMax` with `MemoryHigh` at nine tenths, so
+  the app is slowed before it is stopped.
+
 **Not yet:**
 - Choosing a GPU per app. That moved to the GPU broker idea in the suite's vision.md.
 

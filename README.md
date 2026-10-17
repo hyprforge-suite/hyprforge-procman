@@ -18,7 +18,9 @@ other Hyprforge component to start.
   group with its whole sandbox — the `bwrap` layers and its D-Bus proxy —
   window or not, read from the systemd scope Flatpak starts it in. CPU, memory, disk,
   network and GPU per process (the card, each engine and its video
-  memory in Details). End, Kill, Freeze,
+  memory in Details). End, Kill, Freeze, **Limits…** (cap an app's
+  memory and CPU, enforced by the kernel through systemd — an app that
+  shares the desktop's unit is moved into a scope of its own first),
   Resume, priority, End process tree — and a warning before ending
   anything the session itself runs on.
 - **Performance**: CPU and every core, memory and swap, every disk, every

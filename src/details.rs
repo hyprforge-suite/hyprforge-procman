@@ -255,6 +255,16 @@ impl App {
             }
             None => facts = facts.push(widgets::fact("Memory", format!("{} private · {} resident", bytes(e.private_bytes), bytes(e.resident_bytes)), s)),
         }
+        if let Some(l) = p.limits {
+            let mut parts = Vec::new();
+            if let Some(m) = l.memory {
+                parts.push(format!("memory {}", bytes(m)));
+            }
+            if let Some(c) = l.cpu_percent {
+                parts.push(format!("CPU {c} % of the machine"));
+            }
+            facts = facts.push(widgets::fact("Limited to", parts.join(" · "), s));
+        }
         for (i, line) in gpu_lines(e).into_iter().enumerate() {
             facts = facts.push(widgets::fact(if i == 0 { "GPU" } else { "" }, line, s));
         }
@@ -291,6 +301,7 @@ impl App {
             } else {
                 widgets::secondary_button("Freeze").on_press_maybe((!critical).then_some(Message::Freeze(true)))
             },
+            widgets::secondary_button("Limits…").on_press(Message::OpenLimits(e.id)),
             widgets::secondary_button("End process tree").on_press(Message::EndTree),
             widgets::primary_button("End").on_press(Message::Ask(How::Ask)),
         ]

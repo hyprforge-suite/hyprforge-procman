@@ -20,6 +20,7 @@ pub mod graph;
 pub mod helper;
 pub mod inspect;
 pub mod journal;
+pub mod limits;
 pub mod history;
 pub mod incidents;
 pub mod machine;

@@ -126,6 +126,9 @@ impl App {
         if let Some(c) = &self.confirm {
             return stack![page, widgets::scrim(self.confirm_card(c), Some(Message::Cancelled))].into();
         }
+        if let Some(d) = &self.limits {
+            return stack![page, widgets::scrim(self.limits_card(d), Some(Message::CloseLimits))].into();
+        }
         match (self.menu.as_ref(), self.menu_rows()) {
             (Some(menu), Some(rows)) => {
                 let window = (self.window_size.width, self.window_size.height);

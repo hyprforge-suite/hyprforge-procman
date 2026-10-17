@@ -8,6 +8,7 @@
 
 mod crashes_view;
 mod details;
+mod limits_view;
 mod menus;
 mod overview;
 mod past;
@@ -124,6 +125,8 @@ pub struct Properties {
     pub sockets: Option<Vec<inspect::Socket>>,
     /// Where its memory is; `None` when not this user's to read.
     pub memory: Option<inspect::Memory>,
+    /// What the kernel holds its unit to, when anything.
+    pub limits: Option<hyprforge_procman::limits::Limits>,
 }
 
 #[derive(Debug, Default)]
@@ -300,6 +303,14 @@ pub enum Message {
     /// Open one incident's details, or close them with `None`.
     CrashSelect(Option<i64>),
     CrashRange(usize),
+    /// The limits card: open it on a process's app, edit, apply, close.
+    OpenLimits(Id),
+    LimitsMemory(String),
+    LimitsCpu(String),
+    ApplyLimits,
+    RemoveLimits,
+    LimitsDone(Result<(), String>),
+    CloseLimits,
     /// A menu row chosen: close the menu, then do what its button does.
     MenuChose(Box<Message>),
     /// Open file location for a program named outright — a menu's, read
@@ -351,6 +362,10 @@ pub struct App {
     /// The open incident, by its journal timestamp.
     pub crash_selected: Option<i64>,
     pub crash_days: usize,
+    /// The limits card, while it is open.
+    pub limits: Option<limits_view::Dialog>,
+    /// Who sets them: the user's systemd, or a mock in a test.
+    pub limiter: std::sync::Arc<dyn hyprforge_procman::limits::Limiter>,
     /// Wakeups a second, by process, averaged over about ten seconds.
     pub wakeups: HashMap<Id, f64>,
     /// Each process's share of what the machine did, in percent,
@@ -573,6 +588,8 @@ impl App {
             crashes: None,
             crash_selected: None,
             crash_days: 7,
+            limits: None,
+            limiter: std::sync::Arc::new(hyprforge_procman::limits::UserSystemd),
             wakeups: HashMap::new(),
             activity: HashMap::new(),
             watts: HashMap::new(),
@@ -891,6 +908,31 @@ impl App {
             Message::CrashesLoaded(data) => self.crashes = Some(*data),
             Message::CrashSelect(at) => self.crash_selected = at,
             Message::CrashRange(days) => self.crash_days = days,
+            Message::OpenLimits(id) => self.open_limits(id),
+            Message::LimitsMemory(text) => {
+                if let Some(d) = self.limits.as_mut() {
+                    d.memory = text;
+                }
+            }
+            Message::LimitsCpu(text) => {
+                if let Some(d) = self.limits.as_mut() {
+                    d.cpu = text;
+                }
+            }
+            Message::ApplyLimits => return self.apply_limits(false),
+            Message::RemoveLimits => return self.apply_limits(true),
+            Message::LimitsDone(Ok(())) => {
+                if let Some(d) = self.limits.take() {
+                    self.notice = Some(format!("Limits on {} are set.", d.name));
+                }
+            }
+            Message::LimitsDone(Err(e)) => {
+                if let Some(d) = self.limits.as_mut() {
+                    d.busy = false;
+                    d.error = Some(e);
+                }
+            }
+            Message::CloseLimits => self.limits = None,
             Message::MenuChose(message) => {
                 self.menu = None;
                 return self.update(*message);
@@ -1103,6 +1145,7 @@ impl App {
         let ctrl = press.mods.ctrl;
         match press.key {
             Key::Escape if self.menu.is_some() => self.menu = None,
+            Key::Escape if self.limits.is_some() => self.limits = None,
             Key::Escape if self.confirm.is_some() => self.confirm = None,
             Key::Escape if self.services.confirm.is_some() => self.services.confirm = None,
             Key::Escape if self.sign_out.is_some() => self.sign_out = None,
@@ -1342,6 +1385,9 @@ impl App {
                     open_files: inspect::open(root, id.pid).map(|o| o.len()),
                     sockets: inspect::sockets(root, id.pid),
                     memory: inspect::memory(root, id.pid),
+                    limits: hyprforge_procman::limits::cgroup_of(root, id.pid)
+                        .map(|c| hyprforge_procman::limits::read(&std::path::Path::new("/sys/fs/cgroup").join(c.trim_start_matches('/')), limits_view::cores()))
+                        .filter(|l| !l.is_none()),
                 }
             }
             None => Properties::default(),
@@ -1570,6 +1616,12 @@ mod render {
         let r = reading(&fs, &app.gpu_scan);
         app.take(r);
         draw(&app, "details", &dir);
+        // The limits card on the first app, as it would open.
+        if let Some(lead) = app.table.apps.first().map(|a| a.lead.id) {
+            app.open_limits(lead);
+            draw(&app, "limits", &dir);
+            app.limits = None;
+        }
 
         app.tab = Tab::Services;
         app.services.units.insert(Scope::System, runtime.block_on(Dbus.list(Scope::System)).unwrap_or_default());
