@@ -66,7 +66,11 @@ pub struct Proc {
     /// process per refresh is not worth paying for when nothing shows it.
     pub verbose: Option<Verbose>,
     /// Time spent runnable but waiting for a CPU, in nanoseconds over its
-    /// life — atop's RDELAY. From `schedstat`, readable for every process.
+    /// life — atop's RDELAY — summed over every thread. The process's own
+    /// `schedstat` is its first thread's alone, and read that way it said
+    /// Hyprland had waited 84.5 s where its threads had waited 176.4.
+    /// `None` unless asked for (`ProcFs::thread_schedstat`), since it
+    /// costs a file per thread; readable for every process.
     pub run_delay_ns: Option<u64>,
     /// Clock ticks spent waiting for block I/O — atop's BDELAY. Zero
     /// unless delay accounting is on (`kernel.task_delayacct`), which
@@ -92,8 +96,8 @@ pub struct Proc {
     /// `schedstat` is its first thread's alone: Hyprland's said 6.8
     /// million where its 25 threads had 9.6. A thread that ends takes its
     /// count with it, so a rate is floored at zero. Read only when asked
-    /// (`ProcFs::wakeups`), and never recorded: `serde(skip)` keeps the
-    /// journal's format as it was, since a new field would be format 4.
+    /// (`ProcFs::thread_schedstat`), and never recorded: `serde(skip)` keeps the
+    /// journal's format as it was, since a new field would be a new format.
     #[serde(skip)]
     pub timeslices: Option<u64>,
 }
@@ -232,23 +236,23 @@ pub struct ProcFs {
     pub threads: bool,
     /// Read each process's proportional set size (a page-table walk).
     pub pss: bool,
-    /// Count each process's scheduling, thread by thread, for wakeups:
-    /// one more small file per thread, about 1,300 of them here.
-    pub wakeups: bool,
+    /// Read every thread's `schedstat`, for wakeups and a whole-process
+    /// run delay: one more small file per thread, about 1,300 here.
+    pub thread_schedstat: bool,
 }
 
 impl Default for ProcFs {
     fn default() -> ProcFs {
         // SAFETY: sysconf has no preconditions; it reads a constant.
         let page = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
-        ProcFs { root: PathBuf::from("/proc"), page_size: u64::try_from(page).unwrap_or(4096), verbose: false, threads: false, pss: false, wakeups: false }
+        ProcFs { root: PathBuf::from("/proc"), page_size: u64::try_from(page).unwrap_or(4096), verbose: false, threads: false, pss: false, thread_schedstat: false }
     }
 }
 
 impl ProcFs {
     /// A directory laid out like `/proc`, with this page size.
     pub fn rooted_at(root: impl Into<PathBuf>, page_size: u64) -> ProcFs {
-        ProcFs { root: root.into(), page_size, verbose: false, threads: false, pss: false, wakeups: false }
+        ProcFs { root: root.into(), page_size, verbose: false, threads: false, pss: false, thread_schedstat: false }
     }
 
     pub fn snapshot(&self) -> io::Result<Snapshot> {
@@ -283,6 +287,12 @@ impl ProcFs {
             .filter(|a| !a.is_empty())
             .map(|a| String::from_utf8_lossy(a).into_owned())
             .collect();
+        let sched = match (self.thread_schedstat, stat.threads) {
+            (false, _) => None,
+            // Its one thread is the process: one file, not a directory.
+            (true, 1) => fs::read_to_string(dir.join("schedstat")).ok().and_then(|s| parse_schedstat(&s)),
+            (true, _) => thread_schedstat(dir),
+        };
         Some(Proc {
             pid,
             start: stat.start,
@@ -306,7 +316,6 @@ impl ProcFs {
             processor: stat.processor,
             policy: stat.policy,
             verbose: if self.verbose { fs::read_to_string(dir.join("status")).ok().and_then(|s| parse_status(&s)) } else { None },
-            run_delay_ns: fs::read_to_string(dir.join("schedstat")).ok().and_then(|s| parse_schedstat(&s)),
             blkio_ticks: stat.blkio_ticks,
             priority: stat.priority,
             cancelled_write: fs::read_to_string(dir.join("io")).ok().and_then(|io| io_field(&io, "cancelled_write_bytes:")),
@@ -320,12 +329,8 @@ impl ProcFs {
             pss: if self.pss { fs::read_to_string(dir.join("smaps_rollup")).ok().and_then(|s| parse_pss(&s)) } else { None },
             // Filled in by whoever holds the eBPF counter, if anyone does.
             net: None,
-            timeslices: match (self.wakeups, stat.threads) {
-                (false, _) => None,
-                // Its one thread is the process: one file, not a directory.
-                (true, 1) => fs::read_to_string(dir.join("schedstat")).ok().and_then(|s| parse_timeslices(&s)),
-                (true, _) => thread_timeslices(dir),
-            },
+            run_delay_ns: sched.map(|s| s.run_delay_ns),
+            timeslices: sched.map(|s| s.timeslices),
         })
     }
 }
@@ -464,23 +469,30 @@ fn io_field(io: &str, key: &str) -> Option<u64> {
     io.lines().find_map(|l| l.strip_prefix(key)?.trim().parse::<u64>().ok())
 }
 
+/// What one `schedstat` holds that is read: time waiting for a CPU, in
+/// nanoseconds, and how many times it ran.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+struct Sched {
+    run_delay_ns: u64,
+    timeslices: u64,
+}
+
 /// `schedstat`: time on a CPU, time waiting for one (both nanoseconds),
-/// and how many times it ran. The second is the run delay.
-fn parse_schedstat(text: &str) -> Option<u64> {
-    text.split_whitespace().nth(1)?.parse().ok()
+/// and how many times it ran.
+fn parse_schedstat(text: &str) -> Option<Sched> {
+    let mut f = text.split_whitespace().skip(1);
+    Some(Sched { run_delay_ns: f.next()?.parse().ok()?, timeslices: f.next()?.parse().ok()? })
 }
 
-/// `schedstat`'s third field: how many times it ran.
-fn parse_timeslices(text: &str) -> Option<u64> {
-    text.split_whitespace().nth(2)?.parse().ok()
-}
-
-/// Every thread's [`parse_timeslices`], summed. A thread that ended
+/// Every thread's [`parse_schedstat`], summed. A thread that ended
 /// between listing and reading is simply not counted.
-fn thread_timeslices(dir: &Path) -> Option<u64> {
-    let mut sum = 0;
+fn thread_schedstat(dir: &Path) -> Option<Sched> {
+    let mut sum = Sched::default();
     for entry in fs::read_dir(dir.join("task")).ok()?.flatten() {
-        sum += fs::read_to_string(entry.path().join("schedstat")).ok().and_then(|s| parse_timeslices(&s)).unwrap_or(0);
+        if let Some(s) = fs::read_to_string(entry.path().join("schedstat")).ok().and_then(|s| parse_schedstat(&s)) {
+            sum.run_delay_ns += s.run_delay_ns;
+            sum.timeslices += s.timeslices;
+        }
     }
     Some(sum)
 }
@@ -716,8 +728,8 @@ mod tests {
     /// This machine's `schedstat`, `smaps_rollup` and `io` lines.
     #[test]
     fn delays_pss_and_cancelled_writes_read_from_their_files() {
-        assert_eq!(parse_schedstat("500593 0 1\n"), Some(0));
-        assert_eq!(parse_schedstat("8213400 2195700 31\n"), Some(2195700));
+        assert_eq!(parse_schedstat("500593 0 1\n").map(|s| s.run_delay_ns), Some(0));
+        assert_eq!(parse_schedstat("8213400 2195700 31\n").map(|s| s.run_delay_ns), Some(2195700));
         let rollup = "558744672000-7ffc4552e000 ---p 00000000 00:00 0 [rollup]\nRss:                2456 kB\nPss:                 197 kB\nPss_Dirty:           112 kB\n";
         assert_eq!(parse_pss(rollup), Some(197 * 1024), "Pss, not Pss_Dirty");
         assert_eq!(io_field("read_bytes: 4096\ncancelled_write_bytes: 8192\n", "cancelled_write_bytes:"), Some(8192));
@@ -726,7 +738,7 @@ mod tests {
     #[test]
     fn this_process_has_its_threads_counted_and_a_run_delay() {
         let me = std::process::id() as i32;
-        let fs = ProcFs { threads: true, pss: true, ..ProcFs::default() };
+        let fs = ProcFs { threads: true, pss: true, thread_schedstat: true, ..ProcFs::default() };
         let snap = fs.snapshot().unwrap();
         let p = snap.procs.iter().find(|p| p.pid == me).unwrap();
         let t = p.thread_states.unwrap();
@@ -825,8 +837,8 @@ mod tests {
 
     #[test]
     fn a_schedstat_line_gives_how_many_times_it_ran() {
-        assert_eq!(parse_timeslices("375833 4569 2\n"), Some(2));
-        assert_eq!(parse_timeslices("375833 4569"), None);
+        assert_eq!(parse_schedstat("375833 4569 2\n"), Some(Sched { run_delay_ns: 4569, timeslices: 2 }));
+        assert_eq!(parse_schedstat("375833 4569"), None);
     }
 
     /// The process's own `schedstat` is its first thread's, so a worker
@@ -837,7 +849,7 @@ mod tests {
     #[test]
     fn wakeups_are_every_threads_not_only_the_first() {
         let me = std::process::id() as i32;
-        let first = parse_timeslices(&fs::read_to_string(format!("/proc/{me}/schedstat")).unwrap()).unwrap();
+        let first = parse_schedstat(&fs::read_to_string(format!("/proc/{me}/schedstat")).unwrap()).unwrap().timeslices;
         // Read while the worker still exists: a joined thread is gone,
         // and its count with it.
         let (go, wait) = std::sync::mpsc::channel::<()>();
@@ -848,14 +860,14 @@ mod tests {
             let _ = wait.recv();
         });
         std::thread::sleep(std::time::Duration::from_millis(300));
-        let fs = ProcFs { wakeups: true, ..ProcFs::default() };
+        let fs = ProcFs { thread_schedstat: true, ..ProcFs::default() };
         let snap = fs.snapshot().unwrap();
         let mine = snap.procs.iter().find(|p| p.pid == me).unwrap();
         let _ = go.send(());
         worker.join().unwrap();
         let all = mine.timeslices.expect("read when asked");
         assert!(all >= first + 200, "every thread's {all} against the first thread's {first}");
-        assert!(ProcFs::default().snapshot().unwrap().procs.iter().all(|p| p.timeslices.is_none()), "not read unless asked");
+        assert!(ProcFs::default().snapshot().unwrap().procs.iter().all(|p| p.timeslices.is_none() && p.run_delay_ns.is_none()), "not read unless asked");
     }
 
     /// A process whose `fd` directory can't be read has an unknown number

@@ -121,6 +121,9 @@ impl Recorder {
     pub fn new(config: Config) -> Recorder {
         let mut fs = ProcFs::default();
         fs.verbose = true;
+        // Run delay is every thread's, which only a read per thread gives
+        // — and `hyprforge-top`'s live mode runs through here too.
+        fs.thread_schedstat = true;
         fs.threads = config.threads;
         fs.pss = config.pss;
         // SAFETY: sysconf has no preconditions.

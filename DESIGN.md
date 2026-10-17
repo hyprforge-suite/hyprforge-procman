@@ -269,13 +269,23 @@ as administrator through pkexec.
   question. Wakeups are every thread's `schedstat` run count, because the
   process's own file is its first thread's (Hyprland: 6.8 M of 9.6 M);
   read only while the page shows (13 ms a reading becomes 20), and never
-  recorded (`serde(skip)`, so the journal stays format 3). Watts only on
+  recorded (`serde(skip)`, so adding them changed no journal format). Watts only on
   battery, where the battery's draw is exactly what it pays: the draw
   above the quietest seen is shared by CPU plus GPU time (`power.rs`).
   Plugged in it shows the share of activity alone, since nothing here
   says whether a card's power sensor is the package or a board. Both are
   averaged over ten seconds: the tray daemon's burst every ten seconds
   made a one-second rate call it the worst on the machine.
+
+- **Run delay is every thread's** (format 4, 2026-10-17). The process's
+  own `schedstat` is its first thread's alone — Hyprland's said 84.5 s
+  where its threads had waited 176.4 — so the recorder and
+  `hyprforge-top` now read each thread's, in the same pass as wakeups.
+  The layout is format 3's; the meaning is not, so it is a version: a
+  format 3 day reads with every run delay unknown, and today's format 3
+  file is set aside rather than appended to, so no interval compares
+  one meaning against the other. The window doesn't show run delay and
+  doesn't pay for reading it.
 
 **Not yet:**
 - Choosing a GPU per app. That moved to the GPU broker idea in the suite's vision.md.

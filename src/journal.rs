@@ -36,10 +36,18 @@ use std::path::{Path, PathBuf};
 /// names, so any change to what a frame holds is a new version — 2 added
 /// each process's network, 3 whether delay accounting was on and whether
 /// every exit was heard ([`Frame::delay_accounting`], [`Frame::exits_heard`]).
-pub const MAGIC: &[u8; 8] = b"HFPROCJ3";
-/// The one older format still read: version 2's frames are read and given
-/// version 3's new fields as "not known", so the days recorded before an
-/// upgrade stay readable. Older still is refused, as before.
+/// 4 changed a meaning and not a layout: a process's run delay is every
+/// thread's, where 3 recorded its first thread's alone. A day of each in
+/// one file would compare the two across the interval between them, so
+/// the change is a version like any other.
+pub const MAGIC: &[u8; 8] = b"HFPROCJ4";
+/// Version 3: version 4's layout, with each run delay its first thread's
+/// alone. Read with every run delay unknown, rather than shown as the
+/// undercount it was.
+const MAGIC_3: &[u8; 8] = b"HFPROCJ3";
+/// Version 2's frames are read and given version 3's new fields as "not
+/// known", so the days recorded before an upgrade stay readable. Older
+/// still is refused, as before.
 const MAGIC_2: &[u8; 8] = b"HFPROCJ2";
 /// Every version's magic starts with this.
 const FAMILY: &[u8; 7] = b"HFPROCJ";
@@ -305,7 +313,7 @@ impl Reader {
         let size = file.metadata()?.len();
         let mut magic = [0u8; 8];
         file.read_exact(&mut magic).map_err(torn)?;
-        if &magic != MAGIC && &magic != MAGIC_2 {
+        if &magic != MAGIC && &magic != MAGIC_3 && &magic != MAGIC_2 {
             let why = if magic.starts_with(FAMILY) { format!("a journal of format {}, and this reads {}", magic[7] as char, MAGIC[7] as char) } else { "not a procman journal".into() };
             return Err(io::Error::new(io::ErrorKind::InvalidData, why));
         }
@@ -378,10 +386,20 @@ impl Reader {
             d.decompress(&body, MAX)?
         };
         let invalid = |e| io::Error::new(io::ErrorKind::InvalidData, e);
-        if self.version == MAGIC_2[7] {
-            return postcard::from_bytes::<Frame2>(&raw).map(Frame::from).map_err(invalid);
+        let mut frame: Frame = if self.version == MAGIC_2[7] {
+            postcard::from_bytes::<Frame2>(&raw).map(Frame::from).map_err(invalid)?
+        } else {
+            postcard::from_bytes(&raw).map_err(invalid)?
+        };
+        // Before 4, a run delay was the process's first thread's alone:
+        // an undercount for anything with more than one, and not to be
+        // shown as if it were the whole process's.
+        if self.version < MAGIC[7] {
+            for p in &mut frame.snapshot.procs {
+                p.run_delay_ns = None;
+            }
         }
-        postcard::from_bytes(&raw).map_err(invalid)
+        Ok(frame)
     }
 
     /// The index of the last frame at or before `at_ms`.
@@ -680,6 +698,54 @@ mod tests {
         assert_eq!(read.exits_heard, ExitsHeard::Unknown);
     }
 
+    /// A day written as format 3: format 4's layout, its version byte
+    /// saying 3.
+    fn format_3_day(path: &Path, frames: &[Frame]) {
+        let mut w = Writer::open(path, &header()).unwrap();
+        for f in frames {
+            w.write(f).unwrap();
+        }
+        drop(w);
+        let mut bytes = std::fs::read(path).unwrap();
+        bytes[7] = MAGIC_3[7];
+        std::fs::write(path, bytes).unwrap();
+    }
+
+    /// Format 3 recorded a run delay that was the process's first thread
+    /// alone. Read now, it is unknown — never shown as the undercount it
+    /// was — and everything else in the frame is as written.
+    #[test]
+    fn a_format_3_days_run_delays_read_as_unknown() {
+        let t = tempfile::tempdir().unwrap();
+        let path = t.path().join("2026-10-16.hfr");
+        let mut written = frame(10_000, 5);
+        for p in &mut written.snapshot.procs {
+            p.run_delay_ns = Some(1_000);
+        }
+        format_3_day(&path, std::slice::from_ref(&written));
+        let mut r = Reader::open(&path).unwrap();
+        assert_eq!(r.version, b'3');
+        let read = r.frame(0).unwrap();
+        assert!(read.snapshot.procs.iter().all(|p| p.run_delay_ns.is_none()));
+        assert_eq!(read.snapshot.procs.len(), written.snapshot.procs.len());
+        assert_eq!(read.at_ms, written.at_ms);
+    }
+
+    /// The day the recorder is upgraded: today's format-3 file is set
+    /// aside, so no interval compares a first thread's run delay with a
+    /// whole process's.
+    #[test]
+    fn todays_format_3_file_is_set_aside_not_appended_to() {
+        let t = tempfile::tempdir().unwrap();
+        let path = t.path().join("2026-10-16.hfr");
+        format_3_day(&path, &[frame(0, 0)]);
+        let before = std::fs::read(&path).unwrap();
+        let mut w = Writer::open(&path, &header()).unwrap();
+        w.write(&frame(10_000, 0)).unwrap();
+        assert_eq!(Reader::open(&path).unwrap().version, MAGIC[7]);
+        assert_eq!(std::fs::read(t.path().join("2026-10-16.hfr.old")).unwrap(), before);
+    }
+
     /// Readable is not appendable: today's format-2 file is set aside,
     /// or its records and the new ones would be read as one format.
     #[test]
@@ -692,7 +758,7 @@ mod tests {
         let now = Frame { delay_accounting: Some(true), exits_heard: ExitsHeard::Dropped, ..frame(10_000, 0) };
         w.write(&now).unwrap();
         let mut r = Reader::open(&path).unwrap();
-        assert_eq!((r.version, r.entries.len()), (b'3', 1));
+        assert_eq!((r.version, r.entries.len()), (MAGIC[7], 1));
         assert_eq!(r.frame(0).unwrap(), now, "the new fields round-trip");
         assert_eq!(std::fs::read(t.path().join("2026-10-10.hfr.old")).unwrap(), before);
     }

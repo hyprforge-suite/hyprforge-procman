@@ -702,7 +702,7 @@ impl App {
     /// read only for the Advanced view.
     pub(crate) fn reader(&self) -> ProcFs {
         let mut fs = self.fs.clone();
-        fs.wakeups = self.tab == Tab::Performance && self.resource == Resource::Battery;
+        fs.thread_schedstat = self.tab == Tab::Performance && self.resource == Resource::Battery;
         fs
     }
 

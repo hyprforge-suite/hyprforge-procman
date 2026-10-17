@@ -252,12 +252,12 @@ mod tests {
     fn wakeups_are_read_only_while_the_battery_page_is_showing() {
         let mut app = window();
         app.tab = Tab::Processes;
-        assert!(!app.reader().wakeups);
+        assert!(!app.reader().thread_schedstat);
         app.tab = Tab::Performance;
         app.resource = crate::Resource::Cpu;
-        assert!(!app.reader().wakeups);
+        assert!(!app.reader().thread_schedstat);
         app.resource = crate::Resource::Battery;
-        assert!(app.reader().wakeups);
+        assert!(app.reader().thread_schedstat);
     }
 
     #[test]
