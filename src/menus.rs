@@ -172,6 +172,56 @@ mod tests {
         assert!(!rows.iter().any(|(l, _)| l == "Show in Details"), "not offered on the tab it would go to");
     }
 
+    /// The tests above hand `update` the message a right click would
+    /// make. This one makes the right click: a press and release over
+    /// the row, through the view the window draws, and whatever messages
+    /// come out of it fed back in.
+    #[test]
+    fn a_real_right_click_on_a_process_row_opens_its_menu() {
+        for tab in [Tab::Processes, Tab::Details] {
+            right_click_opens_a_menu_on(tab);
+        }
+    }
+
+    fn right_click_opens_a_menu_on(tab: Tab) {
+        let mut app = window();
+        app.tab = tab;
+        let size = iced::Size::new(1280.0, 800.0);
+        app.window_size = size;
+        let mut pids: Vec<i32> = std::fs::read_dir("/proc")
+            .unwrap()
+            .filter_map(|e| e.ok()?.file_name().to_str()?.parse().ok())
+            .collect();
+        pids.sort();
+        let messages = {
+            let mut sim = iced_test::Simulator::with_size(iced::Settings::default(), size, app.view());
+            // Whichever row is on screen: the list scrolls, and a test
+            // runner's own row is rarely in the first screenful.
+            let at = pids
+                .iter()
+                .find_map(|pid| sim.find(pid.to_string()).ok()?.visible_bounds())
+                .expect("some process row is on screen")
+                .center();
+            sim.point_at(at);
+            use iced::mouse::{Button, Event as M};
+            let _ = sim.simulate([
+                iced::Event::Mouse(M::CursorMoved { position: at }),
+                iced::Event::Mouse(M::ButtonPressed(Button::Right)),
+                iced::Event::Mouse(M::ButtonReleased(Button::Right)),
+            ]);
+            sim.into_messages().collect::<Vec<_>>()
+        };
+        assert!(
+            messages.iter().any(|m| matches!(m, Message::OpenMenu(_))),
+            "{tab:?}: a right click on the row produced no OpenMenu: {} message(s)",
+            messages.len()
+        );
+        for m in messages {
+            let _ = app.update(m);
+        }
+        assert!(app.menu_rows().is_some(), "{tab:?}: the menu opened and has rows");
+    }
+
     #[test]
     fn escape_closes_a_menu_before_anything_else() {
         let mut app = window();

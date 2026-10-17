@@ -119,5 +119,7 @@ tempfile = "3"
 iced_tiny_skia = { version = "0.14.1", default-features = false }
 iced_runtime = "0.14"
 tiny-skia = "0.11"
+# A real right click through the real view, headless.
+iced_test = "0.14"
 # The helper's tests talk to it over a socket pair, no bus needed.
 zbus = { version = "5.18", default-features = false, features = ["tokio", "p2p"] }
