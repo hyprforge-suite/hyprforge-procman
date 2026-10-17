@@ -272,6 +272,12 @@ impl ProcFs {
         Ok(Snapshot { procs, cpu, cores, memory, boot, counters: parse_counters(&stat) })
     }
 
+    /// One process by pid, read as a snapshot reads each — for a caller
+    /// that wants a few, not all of them.
+    pub fn one(&self, pid: i32) -> Option<Proc> {
+        self.read(pid, &self.root.join(pid.to_string()))
+    }
+
     /// One process, or `None` if it ended while being read.
     fn read(&self, pid: i32, dir: &Path) -> Option<Proc> {
         let uid = fs::metadata(dir).ok()?.uid();

@@ -35,6 +35,7 @@ pub mod proc;
 pub mod recorded;
 pub mod recorder;
 pub mod report;
+pub mod rules;
 pub mod sample;
 #[cfg(feature = "dbus")]
 pub mod services;

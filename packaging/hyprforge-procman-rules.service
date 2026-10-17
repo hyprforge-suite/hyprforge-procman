@@ -1,0 +1,19 @@
+# hyprforge-procman's rules: what Processes -> Rules says to do to a
+# program each time it starts. Installed to /usr/lib/systemd/user/;
+# switched on from the Rules tab, never by the package.
+[Unit]
+Description=Hyprforge process rules
+Documentation=https://github.com/hyprforge-suite/hyprforge-procman
+PartOf=graphical-session.target
+After=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=%h/.cargo/bin/hyprforge-procman-rules
+Restart=on-failure
+RestartSec=5
+# A scan every two seconds is not urgent.
+Nice=5
+
+[Install]
+WantedBy=graphical-session.target

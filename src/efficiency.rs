@@ -103,12 +103,14 @@ pub fn orphans(plans: &HashMap<i32, Plan>, weighed: &HashSet<String>) -> Vec<Str
 pub fn plan_for(app: &Seen, me: u32) -> Plan {
     let proc_root = std::path::Path::new("/proc");
     let cgroup = limits::cgroup_of(proc_root, app.lead);
+    let in_unit = cgroup.as_deref().map(|c| limits::processes_in(&std::path::Path::new("/sys/fs/cgroup").join(c.trim_start_matches('/')))).unwrap_or_default();
     limits::plan(&Target {
         name: app.name.clone(),
         lead: app.lead,
         pids: app.pids.clone(),
         unit: crate::inspect::unit(proc_root, app.lead),
-        in_unit: cgroup.as_deref().map(|c| limits::processes_in(&std::path::Path::new("/sys/fs/cgroup").join(c.trim_start_matches('/')))).unwrap_or_default(),
+        main: limits::is_first(proc_root, app.lead, &in_unit),
+        in_unit,
         cgroup,
         critical: false,
         me,

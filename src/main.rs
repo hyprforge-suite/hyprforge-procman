@@ -14,6 +14,7 @@ mod overview;
 mod past;
 mod people;
 mod recorded_view;
+mod rules_view;
 mod view;
 
 use hyprforge_keys::{Key, KeyPress};
@@ -64,6 +65,8 @@ pub enum Tab {
     Services,
     /// What crashed, and what was killed for memory, from the journal.
     Crashes,
+    /// What to do to a program every time it starts.
+    Rules,
 }
 
 /// Everything the Startup tab lists, read off the UI thread.
@@ -315,6 +318,16 @@ pub enum Message {
     /// started, or stopped and disabled.
     Efficiency(bool),
     EfficiencySwitched(Result<(), String>),
+    /// The Rules tab: a field edited, a row added or removed, the list
+    /// saved, a broken file replaced, the service switched.
+    RulesEdit(usize, rules_view::Field, String),
+    RulesAdd,
+    RulesRemove(usize),
+    RulesSave,
+    RulesStartOver,
+    RulesSwitch(bool),
+    RulesSwitched(Result<(), String>),
+    RulesState(Option<bool>),
     /// Whether its service is running; `None` when it isn't installed.
     EfficiencyState(Option<bool>),
     /// A menu row chosen: close the menu, then do what its button does.
@@ -377,6 +390,9 @@ pub struct App {
     pub efficiency: Option<bool>,
     /// Waiting on systemd to switch it.
     pub efficiency_busy: bool,
+    pub rules: rules_view::Tab,
+    /// Where the rules are kept; a test's own directory in tests.
+    pub rules_path: std::path::PathBuf,
     /// Wakeups a second, by process, averaged over about ten seconds.
     pub wakeups: HashMap<Id, f64>,
     /// Each process's share of what the machine did, in percent,
@@ -460,22 +476,43 @@ pub fn search_id() -> WidgetId {
 /// Efficiency mode's user unit — see `src/bin/efficiency.rs`.
 const EFFICIENCY_UNIT: &str = "hyprforge-procman-efficiency.service";
 
-/// Asks systemd whether efficiency mode's service is there and running.
-fn efficiency_state() -> Task<Message> {
+/// Whether one of this suite's user services is there and running —
+/// `None` when it isn't installed. Asked of systemd every time, never
+/// assumed from what was last asked for.
+pub fn unit_state(unit: &'static str, done: fn(Option<bool>) -> Message) -> Task<Message> {
     Task::perform(
-        async {
+        async move {
             let units = Dbus.list(Scope::User).await.ok()?;
-            units.iter().find(|u| u.name == EFFICIENCY_UNIT).map(|u| u.active == "active").or_else(|| {
+            units.iter().find(|u| u.name == unit).map(|u| u.active == "active").or_else(|| {
                 // Listed only once loaded: an installed unit nobody has
                 // started is not in the list, and its file says it's there.
                 let home = std::env::var_os("HOME")?;
-                let local = std::path::Path::new(&home).join(".config/systemd/user").join(EFFICIENCY_UNIT);
-                let packaged = std::path::Path::new("/usr/lib/systemd/user").join(EFFICIENCY_UNIT);
+                let local = std::path::Path::new(&home).join(".config/systemd/user").join(unit);
+                let packaged = std::path::Path::new("/usr/lib/systemd/user").join(unit);
                 (local.exists() || packaged.exists()).then_some(false)
             })
         },
-        Message::EfficiencyState,
+        done,
     )
+}
+
+/// Switches a user service on (enabled and started, so it comes back at
+/// the next sign-in) or off (stopped and disabled).
+pub fn switch_unit(unit: &'static str, on: bool, done: fn(Result<(), String>) -> Message) -> Task<Message> {
+    Task::perform(
+        async move {
+            let steps = if on { [Action::Enable, Action::Start] } else { [Action::Stop, Action::Disable] };
+            for step in steps {
+                Dbus.act(Scope::User, unit.to_string(), step).await?;
+            }
+            Ok::<(), String>(())
+        },
+        done,
+    )
+}
+
+fn efficiency_state() -> Task<Message> {
+    unit_state(EFFICIENCY_UNIT, Message::EfficiencyState)
 }
 
 fn read(fs: ProcFs, helper: Option<zbus::Connection>, lookup: Option<inspect::Lookup>, scan: GpuScan, ask_nvidia: bool, drive_temperatures: bool) -> Task<Message> {
@@ -624,6 +661,8 @@ impl App {
             limiter: std::sync::Arc::new(hyprforge_procman::limits::UserSystemd),
             efficiency: None,
             efficiency_busy: false,
+            rules: rules_view::Tab::default(),
+            rules_path: hyprforge_procman::rules::path(),
             wakeups: HashMap::new(),
             activity: HashMap::new(),
             watts: HashMap::new(),
@@ -969,18 +1008,8 @@ impl App {
             Message::CloseLimits => self.limits = None,
             Message::Efficiency(on) => {
                 self.efficiency_busy = true;
-                return Task::perform(
-                    async move {
-                        // Enabled as well as started, so it comes back at
-                        // the next sign-in; stopping gives every weight back.
-                        let steps = if on { [Action::Enable, Action::Start] } else { [Action::Stop, Action::Disable] };
-                        for step in steps {
-                            Dbus.act(Scope::User, EFFICIENCY_UNIT.to_string(), step).await?;
-                        }
-                        Ok::<(), String>(())
-                    },
-                    Message::EfficiencySwitched,
-                );
+                // Stopping it gives every weight back.
+                return switch_unit(EFFICIENCY_UNIT, on, Message::EfficiencySwitched);
             }
             Message::EfficiencySwitched(result) => {
                 self.efficiency_busy = false;
@@ -990,6 +1019,14 @@ impl App {
                 return efficiency_state();
             }
             Message::EfficiencyState(state) => self.efficiency = state,
+            Message::RulesEdit(..)
+            | Message::RulesAdd
+            | Message::RulesRemove(_)
+            | Message::RulesSave
+            | Message::RulesStartOver
+            | Message::RulesSwitch(_)
+            | Message::RulesSwitched(_)
+            | Message::RulesState(_) => return self.rules_update(message),
             Message::MenuChose(message) => {
                 self.menu = None;
                 return self.update(*message);
@@ -1014,6 +1051,14 @@ impl App {
                     Tab::Users => return Task::perform(sessions::list(), Message::SessionsLoaded),
                     Tab::Recorded => return self.recorded_opened(),
                     Tab::Crashes => return Task::perform(crashes_view::load(), |d| Message::CrashesLoaded(Box::new(d))),
+                    Tab::Rules => {
+                        // Read afresh each time: the file may have been
+                        // edited by hand, and the service may have changed.
+                        let service = self.rules.service;
+                        self.rules = rules_view::load(&self.rules_path);
+                        self.rules.service = service;
+                        return unit_state(rules_view::RULES_UNIT, Message::RulesState);
+                    }
                     _ => {}
                 }
             }
@@ -1218,6 +1263,7 @@ impl App {
             Key::Char('5') if ctrl => self.tab = Tab::Details,
             Key::Char('6') if ctrl => return self.update(Message::Tab(Tab::Services)),
             Key::Char('7') if ctrl => return self.update(Message::Tab(Tab::Crashes)),
+            Key::Char('8') if ctrl => return self.update(Message::Tab(Tab::Rules)),
             Key::Char('p') if ctrl => self.paused = !self.paused,
             Key::Char('.') if ctrl => return self.update(Message::Advanced(!self.advanced)),
             _ => {}
@@ -1654,6 +1700,18 @@ mod render {
         app.tab = Tab::Startup;
         app.startup = Some(runtime.block_on(load_startup()));
         draw(&app, "startup", &dir);
+
+        // Two rules, as the tab draws them — in memory, not the user's file.
+        app.tab = Tab::Rules;
+        app.rules = rules_view::Tab {
+            rows: vec![
+                rules_view::Row { program: "cargo".into(), priority: "10".into(), memory: "8 GB".into(), ..Default::default() },
+                rules_view::Row { program: "blender".into(), warn: "24 GB".into(), ..Default::default() },
+            ],
+            service: Some(false),
+            ..Default::default()
+        };
+        draw_sized(&app, "rules", &dir, 600.0);
 
         // This machine's own journal, with the newest crash opened.
         app.tab = Tab::Crashes;

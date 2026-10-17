@@ -62,6 +62,12 @@ name = "hyprforge-procman-efficiency"
 path = "src/bin/efficiency.rs"
 required-features = ["dbus"]
 
+# Rules: a user service that applies Processes → Rules as programs start.
+[[bin]]
+name = "hyprforge-procman-rules"
+path = "src/bin/rules.rs"
+required-features = ["dbus"]
+
 # Samples the machine every ten seconds into a private journal, as root.
 # No features: it links neither iced nor zbus.
 [[bin]]

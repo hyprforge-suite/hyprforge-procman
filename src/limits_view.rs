@@ -85,12 +85,14 @@ impl App {
         let Some((name, pids, own, lead)) = self.limit_target(id) else { return };
         let proc_root = Path::new("/proc");
         let cgroup = limits::cgroup_of(proc_root, lead);
+        let in_unit = cgroup.as_deref().map(|c| limits::processes_in(&sys(c))).unwrap_or_default();
         let target = Target {
             name: name.clone(),
             lead,
             pids: pids.clone(),
             unit: hyprforge_procman::inspect::unit(proc_root, lead),
-            in_unit: cgroup.as_deref().map(|c| limits::processes_in(&sys(c))).unwrap_or_default(),
+            main: limits::is_first(proc_root, lead, &in_unit),
+            in_unit,
             cgroup: cgroup.clone(),
             critical: self.limit_would_endanger(&pids),
             me: self.me,

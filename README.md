@@ -57,6 +57,14 @@ its cgroup's CPU weight: on an idle machine nothing changes. It listens
 to Hyprland's events rather than polling, and stopping it gives every
 weight back. `--dry-run` says what it would do and does none of it.
 
+**Rules** (Ctrl+8) say what to do to a program every time it starts —
+a lower priority, a memory or CPU cap, or a warning past a size — kept in
+`procman-rules.toml` and applied by `hyprforge-procman-rules`, a user
+service the tab switches on. A cap that would take another app along
+(a rule for Hyprland, or a shell) is refused, and a program already
+running is never touched retroactively. `--dry-run` says what the rules
+would do now.
+
 **`hyprforge-top`** is atop's screen in a terminal — its header lines,
 its views (`g m d n s v c u p j`, and `y` for threads and `e` for GPU use live), its keys and sorts — live, or replaying
 the recorder's history with `-r DAY -b HH:MM`. `hyprforge-top report

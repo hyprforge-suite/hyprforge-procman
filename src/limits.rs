@@ -97,6 +97,16 @@ pub fn cgroup_of(proc_root: &Path, pid: i32) -> Option<String> {
     text.lines().find_map(|l| l.strip_prefix("0::")).map(str::to_owned)
 }
 
+/// Whether `pid` started first of everything in its unit — its main
+/// process, as near as `/proc` can say without asking systemd.
+pub fn is_first(proc_root: &Path, pid: i32, in_unit: &[i32]) -> bool {
+    let start = |p: i32| crate::proc::start_time_in(proc_root, p);
+    match start(pid) {
+        Some(mine) => in_unit.iter().filter_map(|p| start(*p)).all(|s| s >= mine),
+        None => false,
+    }
+}
+
 /// Every process in a cgroup and the cgroups inside it.
 pub fn processes_in(dir: &Path) -> Vec<i32> {
     let mut out: Vec<i32> = std::fs::read_to_string(dir.join("cgroup.procs")).unwrap_or_default().lines().filter_map(|l| l.trim().parse().ok()).collect();
@@ -138,6 +148,10 @@ pub struct Target {
     /// The session runs on it — the compositor, or something it cannot
     /// do without. Never limited.
     pub critical: bool,
+    /// The unit is a service and the lead is its first-started process —
+    /// its main one, as near as `/proc` can say. Moving that out of the
+    /// service would leave the service without the thing it runs.
+    pub main: bool,
     /// The uid running this window, whose user manager would hold the
     /// limit, and whether the app is that user's own.
     pub me: u32,
@@ -173,6 +187,8 @@ pub fn plan(t: &Target) -> Plan {
     let alone = t.in_unit.iter().all(|p| t.pids.contains(p));
     if alone {
         Plan::Unit(unit.clone())
+    } else if t.main && unit.ends_with(".service") {
+        Plan::Refuse(format!("It is what {unit} runs, and moving it out to limit it would leave the service without it."))
     } else {
         Plan::NewScope { name: scope_name(&t.name, t.lead), pids: t.pids.clone() }
     }
@@ -307,6 +323,7 @@ mod tests {
             cgroup: Some(cgroup.into()),
             in_unit: in_unit.to_vec(),
             critical: false,
+            main: false,
             me: 1000,
             own: true,
         }
@@ -330,6 +347,18 @@ mod tests {
         let cg = "/user.slice/user-1000.slice/user@1000.service/app.slice/app-com.anthropic.Claude-232763.scope";
         let t = target("app-com.anthropic.Claude-232763.scope", cg, &[232763, 232764], &[232763, 232764]);
         assert_eq!(plan(&t), Plan::Unit("app-com.anthropic.Claude-232763.scope".into()));
+    }
+
+    /// A rule for something a user service runs would otherwise move
+    /// the service's own process out of it.
+    #[test]
+    fn a_services_main_process_is_not_moved_out_of_it() {
+        let cg = "/user.slice/user-1000.slice/user@1000.service/app.slice/syncthing.service";
+        let mut t = target("syncthing.service", cg, &[500], &[500, 501]);
+        t.main = true;
+        assert!(matches!(plan(&t), Plan::Refuse(why) if why.contains("syncthing.service")));
+        t.main = false;
+        assert!(matches!(plan(&t), Plan::NewScope { .. }), "a helper it started may still be moved");
     }
 
     #[test]

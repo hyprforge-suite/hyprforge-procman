@@ -318,6 +318,23 @@ as administrator through pkexec.
   `--dry-run` was run against this desktop: Ghostty on screen, left
   alone; Files moved and weighed; Claude's own scope weighed.
 
+- **Rules** (2026-10-17, `rules.rs`, a Rules tab and a user service).
+  A rule names a program and gives a priority (0–19 only: raising
+  priority needs privilege this user lacks), a memory or CPU cap (the
+  limits code), or a warning size (a desktop notification, once per
+  process). Starts are noticed by listing `/proc` every two seconds and
+  reading only new pids, because hearing starts needs root and systemd
+  never sees a program started in a shell; with no rules nothing is
+  scanned. A nice value is set on every thread, since `setpriority` on
+  a pid changes one. The dry run against this machine found two bugs
+  before anything was applied: a rule for Hyprland would have moved
+  Ghostty and every app it started into a capped scope, and one for
+  Claude would have split its dozen same-named processes into a scope
+  each. A cap now refuses to take another app's window process along,
+  and a match under another match of the same rule is left to that one.
+  A broken file is shown, never treated as no rules, and only replaced
+  if the person starts a new list.
+
 **Not yet:**
 - Choosing a GPU per app. That moved to the GPU broker idea in the suite's vision.md.
 
