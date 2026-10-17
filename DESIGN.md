@@ -255,6 +255,16 @@ as administrator through pkexec.
 - **Right-click menus** on every process row (Processes and Details) and every service. A right click selects the row and opens the menu at the pointer; each item sends what the matching button sends, so it goes through the same confirmations and refusals, and an item a button would dim is dimmed rather than left out. The menu is the suite's shared one (`hyprforge_ui::widgets::context_menu`, moved out of Files for this).
 - **The twelfth component** (2026-10-10, released after 0.1.13): the PKGBUILD's `hyprforge-procman`, the installer's `--procman`, Set up's Ctrl+Shift+Escape bind and "Record system history", and the site page.
 
+- **Crashes** (2026-10-17): systemd-coredump's crashes and every kill
+  for memory, from the journal by catalogue message ID (`incidents.rs`).
+  The kernel's two OOM lines name the process and what it held; systemd
+  reports one kill once per level of the unit tree (five records for a
+  Flatpak's scope), so those collapse to one, named after the deepest
+  unit — a user manager's unit is deeper than any system one. Only the
+  fields shown are asked for (`--output-fields`), and `--all`, without
+  which 46 of this machine's 95 crash messages came back empty. Without
+  read access to the system journal it says it is showing your own.
+
 **Not yet:**
 - Choosing a GPU per app. That moved to the GPU broker idea in the suite's vision.md.
 

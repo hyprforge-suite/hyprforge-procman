@@ -118,6 +118,7 @@ impl App {
             Tab::Startup => self.startup_view(s),
             Tab::Users => self.users_view(s),
             Tab::Services => self.services_view(s),
+            Tab::Crashes => self.crashes_view(s),
         };
         let page = column![self.header(s), widgets::divider(), body, widgets::divider(), self.status(s)];
         let page = container(page).width(Length::Fill).height(Length::Fill).style(|_t: &iced::Theme| container::Style {
@@ -157,6 +158,7 @@ impl App {
             (Tab::Users, "Users"),
             (Tab::Details, "Details"),
             (Tab::Services, "Services"),
+            (Tab::Crashes, "Crashes"),
         ]);
         let tabs = widgets::panel_tabs(&list, &self.tab, Message::Tab, s);
         let mut bar = row![tabs].spacing(spacing::MD).align_y(Alignment::Center);

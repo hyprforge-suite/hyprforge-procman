@@ -28,6 +28,13 @@ other Hyprforge component to start.
 - **Users**, **Details** (`port:8080` and `file:~/notes.txt` find who has
   them), **App history** per app per day, and an **Advanced** view
   (Ctrl+.) with btop's layout and atop's detail.
+- **Crashes**: every program that crashed, with the crashing thread and
+  its stack trace (Copy stack trace makes a bug report), and every one
+  killed for memory — by the kernel because the machine ran out, at a
+  cgroup's own limit, or by systemd-oomd — with what it was using. Read
+  from the journal, asking only for the fields it shows: a coredump
+  record also holds the dead process's environment, which never leaves
+  the journal.
 - **Recorded**: the recorder's history in the window. A day drawn as CPU,
   memory and I/O pressure, strained stretches marked; pick a moment and
   see what was busiest, and what the hour around it added up to.

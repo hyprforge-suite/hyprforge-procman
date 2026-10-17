@@ -6,6 +6,7 @@
 //! selected, and the one question this app asks before acting — "end
 //! this?".
 
+mod crashes_view;
 mod details;
 mod menus;
 mod overview;
@@ -60,6 +61,8 @@ pub enum Tab {
     Users,
     Details,
     Services,
+    /// What crashed, and what was killed for memory, from the journal.
+    Crashes,
 }
 
 /// Everything the Startup tab lists, read off the UI thread.
@@ -291,6 +294,10 @@ pub enum Message {
     /// A right click on a row: select it and open its menu at the pointer.
     OpenMenu(menus::MenuFor),
     CloseMenu,
+    CrashesLoaded(Box<crashes_view::CrashesData>),
+    /// Open one incident's details, or close them with `None`.
+    CrashSelect(Option<i64>),
+    CrashRange(usize),
     /// A menu row chosen: close the menu, then do what its button does.
     MenuChose(Box<Message>),
     /// Open file location for a program named outright — a menu's, read
@@ -338,6 +345,10 @@ pub struct App {
     /// recorded, so nothing is written over it).
     pub app_history: Result<hyprforge_procman::app_history::History, String>,
     pub history_days: usize,
+    pub crashes: Option<crashes_view::CrashesData>,
+    /// The open incident, by its journal timestamp.
+    pub crash_selected: Option<i64>,
+    pub crash_days: usize,
     pub recorded: recorded_view::RecordedTab,
     /// Installed apps, for showing a window class by its app's name.
     pub apps_db: Option<hyprforge_mime::MimeDb>,
@@ -548,6 +559,9 @@ impl App {
             resource: Resource::Cpu,
             app_history: hyprforge_procman::app_history::load(&hyprforge_procman::app_history::path()),
             history_days: 1,
+            crashes: None,
+            crash_selected: None,
+            crash_days: 7,
             recorded: recorded_view::RecordedTab::default(),
             apps_db: None,
             history_saved: std::time::Instant::now(),
@@ -822,6 +836,9 @@ impl App {
                 return task;
             }
             Message::CloseMenu => self.menu = None,
+            Message::CrashesLoaded(data) => self.crashes = Some(*data),
+            Message::CrashSelect(at) => self.crash_selected = at,
+            Message::CrashRange(days) => self.crash_days = days,
             Message::MenuChose(message) => {
                 self.menu = None;
                 return self.update(*message);
@@ -845,6 +862,7 @@ impl App {
                     Tab::Startup => return Task::perform(load_startup(), |d| Message::StartupLoaded(Box::new(d))),
                     Tab::Users => return Task::perform(sessions::list(), Message::SessionsLoaded),
                     Tab::Recorded => return self.recorded_opened(),
+                    Tab::Crashes => return Task::perform(crashes_view::load(), |d| Message::CrashesLoaded(Box::new(d))),
                     _ => {}
                 }
             }
@@ -1047,6 +1065,7 @@ impl App {
             Key::Char('4') if ctrl => return self.update(Message::Tab(Tab::Users)),
             Key::Char('5') if ctrl => self.tab = Tab::Details,
             Key::Char('6') if ctrl => return self.update(Message::Tab(Tab::Services)),
+            Key::Char('7') if ctrl => return self.update(Message::Tab(Tab::Crashes)),
             Key::Char('p') if ctrl => self.paused = !self.paused,
             Key::Char('.') if ctrl => return self.update(Message::Advanced(!self.advanced)),
             _ => {}
@@ -1459,6 +1478,14 @@ mod render {
         app.tab = Tab::Startup;
         app.startup = Some(runtime.block_on(load_startup()));
         draw(&app, "startup", &dir);
+
+        // This machine's own journal, with the newest crash opened.
+        app.tab = Tab::Crashes;
+        app.crash_days = 30;
+        let crashes = runtime.block_on(crashes_view::load());
+        app.crash_selected = crashes.incidents.as_ref().ok().and_then(|f| f.list.iter().find(|i| matches!(i, hyprforge_procman::incidents::Incident::Crash(_)))).map(|i| i.at());
+        app.crashes = Some(crashes);
+        draw_sized(&app, "crashes", &dir, 1100.0);
 
         app.tab = Tab::Users;
         app.sessions = runtime.block_on(sessions::list());

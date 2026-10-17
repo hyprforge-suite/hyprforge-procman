@@ -20,6 +20,7 @@ pub mod helper;
 pub mod inspect;
 pub mod journal;
 pub mod history;
+pub mod incidents;
 pub mod machine;
 pub mod model;
 pub mod moment;
