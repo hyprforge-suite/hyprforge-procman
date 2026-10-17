@@ -840,9 +840,59 @@ impl App {
                 if let Some(w) = b.watts.filter(|w| *w > 0.05) {
                     facts = facts.push(widgets::fact("Power", format!("{w:.1} W"), s));
                 }
-                self.page("Battery", format!("{} %", b.percent), &self.history.battery, 1.0, facts.into(), None, s)
+                self.page("Battery", format!("{} %", b.percent), &self.history.battery, 1.0, facts.into(), Some(self.power_users(s)), s)
             }
         }
+    }
+
+    /// What the battery is paying for: the hungriest programs, with
+    /// their estimated watts on battery, or their share of the machine's
+    /// activity plugged in — and their wakeups either way.
+    fn power_users(&self, s: FontScale) -> Element<'_, Message> {
+        let on_battery = !self.watts.is_empty() || self.power_floor.watts().is_some();
+        let ranked = hyprforge_procman::power::hungriest(if on_battery { &self.watts } else { &self.activity }, &self.wakeups, 8);
+        let note = match (on_battery, self.power_floor.watts()) {
+            (true, Some(floor)) => format!(
+                "Estimated: the battery's draw above the least seen while this window was open ({floor:.1} W), shared by each program's CPU and GPU time. Wakeups are each time one of its threads woke a core. Both are averaged over about ten seconds."
+            ),
+            _ => "Plugged in, so no watts: the battery isn't the one paying. Each program's share of what the processor and GPU did, and how often it woke a core, averaged over about ten seconds.".to_string(),
+        };
+        let head = |label: &'static str, w: f32| container(widgets::meta_text(label, density::META_TEXT_BASE, s)).width(Length::Fixed(s.apply(w))).align_x(Alignment::End);
+        let mut list = column![
+            widgets::section_label("What's using power", s),
+            widgets::hint_text(note, s),
+            row![
+                widgets::meta_text("Program", density::META_TEXT_BASE, s).width(Length::Fill),
+                head(if on_battery { "Power" } else { "Share" }, 90.0),
+                head("Wakeups", 110.0),
+                head("CPU", CPU_W),
+            ]
+            .spacing(spacing::SM),
+        ]
+        .spacing(spacing::SM);
+        if ranked.is_empty() {
+            list = list.push(widgets::hint_text(if on_battery { "Nothing above idle yet." } else { "Waiting for a second reading." }, s));
+        }
+        for id in ranked {
+            let Some(e) = self.entry(id) else { continue };
+            let figure = if on_battery {
+                self.watts.get(&id).map(|w| format!("≈ {w:.1} W")).unwrap_or_else(|| "—".into())
+            } else {
+                self.activity.get(&id).map(|p| format!("{p:.0} %")).unwrap_or_else(|| "—".into())
+            };
+            let mono = |v: String, w: f32| container(widgets::scaled_text(v, density::ROW_TEXT_BASE, s).font(theme::mono_font())).width(Length::Fixed(s.apply(w))).align_x(Alignment::End);
+            list = list.push(
+                row![
+                    widgets::scaled_text(e.name.clone(), density::ROW_TEXT_BASE, s).width(Length::Fill),
+                    mono(figure, 90.0),
+                    mono(self.wakeups.get(&id).map(|k| format!("{k:.0} /s")).unwrap_or_else(|| "—".into()), 110.0),
+                    mono(percent(e.cpu), CPU_W),
+                ]
+                .spacing(spacing::SM)
+                .align_y(Alignment::Center),
+            );
+        }
+        list.into()
     }
 
     /// A resource that was there and is not now (a drive unplugged).

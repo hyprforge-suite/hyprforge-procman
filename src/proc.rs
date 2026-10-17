@@ -86,6 +86,16 @@ pub struct Proc {
     /// where something running as root loaded it (`netbpf`). `None` is
     /// "not measured", never "nothing sent".
     pub net: Option<NetIo>,
+    /// Times any of its threads was put on a CPU, over their lives —
+    /// what wakes a processor from idle, and so what a battery pays for.
+    /// Summed over `task/*/schedstat`, because the process's own
+    /// `schedstat` is its first thread's alone: Hyprland's said 6.8
+    /// million where its 25 threads had 9.6. A thread that ends takes its
+    /// count with it, so a rate is floored at zero. Read only when asked
+    /// (`ProcFs::wakeups`), and never recorded: `serde(skip)` keeps the
+    /// journal's format as it was, since a new field would be format 4.
+    #[serde(skip)]
+    pub timeslices: Option<u64>,
 }
 
 /// Threads by state, atop's TRUN / TSLPI / TSLPU.
@@ -222,20 +232,23 @@ pub struct ProcFs {
     pub threads: bool,
     /// Read each process's proportional set size (a page-table walk).
     pub pss: bool,
+    /// Count each process's scheduling, thread by thread, for wakeups:
+    /// one more small file per thread, about 1,300 of them here.
+    pub wakeups: bool,
 }
 
 impl Default for ProcFs {
     fn default() -> ProcFs {
         // SAFETY: sysconf has no preconditions; it reads a constant.
         let page = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
-        ProcFs { root: PathBuf::from("/proc"), page_size: u64::try_from(page).unwrap_or(4096), verbose: false, threads: false, pss: false }
+        ProcFs { root: PathBuf::from("/proc"), page_size: u64::try_from(page).unwrap_or(4096), verbose: false, threads: false, pss: false, wakeups: false }
     }
 }
 
 impl ProcFs {
     /// A directory laid out like `/proc`, with this page size.
     pub fn rooted_at(root: impl Into<PathBuf>, page_size: u64) -> ProcFs {
-        ProcFs { root: root.into(), page_size, verbose: false, threads: false, pss: false }
+        ProcFs { root: root.into(), page_size, verbose: false, threads: false, pss: false, wakeups: false }
     }
 
     pub fn snapshot(&self) -> io::Result<Snapshot> {
@@ -307,6 +320,12 @@ impl ProcFs {
             pss: if self.pss { fs::read_to_string(dir.join("smaps_rollup")).ok().and_then(|s| parse_pss(&s)) } else { None },
             // Filled in by whoever holds the eBPF counter, if anyone does.
             net: None,
+            timeslices: match (self.wakeups, stat.threads) {
+                (false, _) => None,
+                // Its one thread is the process: one file, not a directory.
+                (true, 1) => fs::read_to_string(dir.join("schedstat")).ok().and_then(|s| parse_timeslices(&s)),
+                (true, _) => thread_timeslices(dir),
+            },
         })
     }
 }
@@ -449,6 +468,21 @@ fn io_field(io: &str, key: &str) -> Option<u64> {
 /// and how many times it ran. The second is the run delay.
 fn parse_schedstat(text: &str) -> Option<u64> {
     text.split_whitespace().nth(1)?.parse().ok()
+}
+
+/// `schedstat`'s third field: how many times it ran.
+fn parse_timeslices(text: &str) -> Option<u64> {
+    text.split_whitespace().nth(2)?.parse().ok()
+}
+
+/// Every thread's [`parse_timeslices`], summed. A thread that ended
+/// between listing and reading is simply not counted.
+fn thread_timeslices(dir: &Path) -> Option<u64> {
+    let mut sum = 0;
+    for entry in fs::read_dir(dir.join("task")).ok()?.flatten() {
+        sum += fs::read_to_string(entry.path().join("schedstat")).ok().and_then(|s| parse_timeslices(&s)).unwrap_or(0);
+    }
+    Some(sum)
 }
 
 /// `Pss:` from `smaps_rollup`, in bytes.
@@ -787,6 +821,41 @@ mod tests {
         assert!(threads(Path::new("/proc"), i32::MAX).is_empty(), "no such process is no threads, not an error");
         drop(named);
         worker.join().unwrap();
+    }
+
+    #[test]
+    fn a_schedstat_line_gives_how_many_times_it_ran() {
+        assert_eq!(parse_timeslices("375833 4569 2\n"), Some(2));
+        assert_eq!(parse_timeslices("375833 4569"), None);
+    }
+
+    /// The process's own `schedstat` is its first thread's, so a worker
+    /// that wakes again and again would never show: the count has to be
+    /// every thread's. A second thread here sleeps and wakes 200 times
+    /// while the first waits on it, and the whole process's count must
+    /// come out at least that much above the first thread's file.
+    #[test]
+    fn wakeups_are_every_threads_not_only_the_first() {
+        let me = std::process::id() as i32;
+        let first = parse_timeslices(&fs::read_to_string(format!("/proc/{me}/schedstat")).unwrap()).unwrap();
+        // Read while the worker still exists: a joined thread is gone,
+        // and its count with it.
+        let (go, wait) = std::sync::mpsc::channel::<()>();
+        let worker = std::thread::spawn(move || {
+            for _ in 0..200 {
+                std::thread::sleep(std::time::Duration::from_micros(200));
+            }
+            let _ = wait.recv();
+        });
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        let fs = ProcFs { wakeups: true, ..ProcFs::default() };
+        let snap = fs.snapshot().unwrap();
+        let mine = snap.procs.iter().find(|p| p.pid == me).unwrap();
+        let _ = go.send(());
+        worker.join().unwrap();
+        let all = mine.timeslices.expect("read when asked");
+        assert!(all >= first + 200, "every thread's {all} against the first thread's {first}");
+        assert!(ProcFs::default().snapshot().unwrap().procs.iter().all(|p| p.timeslices.is_none()), "not read unless asked");
     }
 
     /// A process whose `fd` directory can't be read has an unknown number

@@ -105,6 +105,7 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
     use hyprforge_procman::proc::ProcFs;
 
     /// The window over one real reading of this machine, with history
@@ -220,6 +221,41 @@ mod tests {
             let _ = app.update(m);
         }
         assert!(app.menu_rows().is_some(), "{tab:?}: the menu opened and has rows");
+    }
+
+    /// On battery: the first quiet reading is the floor and blames no
+    /// one; a busier one shares what is above it. Plugged in: no watts,
+    /// and the floor goes, since it meant nothing off the battery.
+    #[test]
+    fn watts_are_shared_only_on_battery_and_only_above_its_quietest() {
+        use hyprforge_procman::machine::Battery;
+        let mut app = window();
+        let usage = hyprforge_procman::sample::Use { cpu: HashMap::from([(me(), 12.5)]), ..Default::default() };
+        let battery = |status: &str, w: f32| Some(Battery { status: status.into(), percent: 50, watts: Some(w) });
+        app.machine.battery = battery("Discharging", 8.0);
+        app.take_power(&usage, 8, 1.0);
+        assert!(app.watts.is_empty(), "the first reading is its own floor");
+        app.machine.battery = battery("Discharging", 12.0);
+        app.take_power(&usage, 8, 1.0);
+        assert!((app.watts[&me()] - 4.0).abs() < 1e-3, "{:?}", app.watts);
+        app.machine.battery = battery("Charging", 20.0);
+        app.take_power(&usage, 8, 1.0);
+        assert!(app.watts.is_empty() && app.power_floor.watts().is_none());
+        assert!(app.activity[&me()] > 99.0, "the share is still shown plugged in");
+    }
+
+    /// Wakeups cost a file per thread, so only the page that shows them
+    /// pays for them.
+    #[test]
+    fn wakeups_are_read_only_while_the_battery_page_is_showing() {
+        let mut app = window();
+        app.tab = Tab::Processes;
+        assert!(!app.reader().wakeups);
+        app.tab = Tab::Performance;
+        app.resource = crate::Resource::Cpu;
+        assert!(!app.reader().wakeups);
+        app.resource = crate::Resource::Battery;
+        assert!(app.reader().wakeups);
     }
 
     #[test]

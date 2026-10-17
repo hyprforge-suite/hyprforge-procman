@@ -27,6 +27,7 @@ pub mod moment;
 #[cfg(feature = "netbpf")]
 pub mod netbpf;
 pub mod nvidia;
+pub mod power;
 pub mod proc;
 pub mod recorded;
 pub mod recorder;

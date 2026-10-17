@@ -87,6 +87,26 @@ pub fn net_rates(before: &Snapshot, now: &Snapshot, seconds: f64) -> HashMap<Id,
     out
 }
 
+/// Each process's wakeups a second: times any of its threads was put on
+/// a CPU, from [`crate::proc::Proc::timeslices`]. Only a process with a
+/// count in both readings has one. A thread that ended between them took
+/// its count away, which can make the sum go down; that is floored at
+/// zero rather than read as negative wakeups.
+pub fn wakeup_rates(before: &Snapshot, now: &Snapshot, seconds: f64) -> HashMap<Id, f64> {
+    let earlier: HashMap<Id, u64> = before.procs.iter().filter_map(|p| Some((Id { pid: p.pid, start: p.start }, p.timeslices?))).collect();
+    let mut out = HashMap::new();
+    if seconds <= 0.0 {
+        return out;
+    }
+    for p in &now.procs {
+        let id = Id { pid: p.pid, start: p.start };
+        if let (Some(n), Some(&n0)) = (p.timeslices, earlier.get(&id)) {
+            out.insert(id, n.saturating_sub(n0) as f64 / seconds);
+        }
+    }
+    out
+}
+
 /// What two readings say about one process, for the Advanced view.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct Detail {
@@ -156,6 +176,8 @@ pub struct Use {
     pub gpu_cards: HashMap<Id, Vec<String>>,
     /// The Advanced view's rates; empty when it is off.
     pub detail: HashMap<Id, Detail>,
+    /// Wakeups a second — see [`wakeup_rates`].
+    pub wakeups: HashMap<Id, f64>,
 }
 
 #[cfg(test)]
@@ -193,6 +215,19 @@ mod tests {
 
     fn snap(total: u64, idle: u64, procs: Vec<Proc>) -> Snapshot {
         Snapshot { procs, cpu: CpuTimes { total, idle, ..CpuTimes::default() }, ..Snapshot::default() }
+    }
+
+    /// A thread that ended between readings took its count with it; the
+    /// process woke no less for that, so the rate floors at zero.
+    #[test]
+    fn wakeups_are_a_rate_and_never_negative() {
+        let with = |pid, n| Proc { timeslices: Some(n), ..proc(pid, 5, 0) };
+        let a = snap(0, 0, vec![with(10, 100), with(11, 500), proc(12, 5, 0)]);
+        let b = snap(0, 0, vec![with(10, 300), with(11, 400), with(12, 9)]);
+        let r = wakeup_rates(&a, &b, 2.0);
+        assert_eq!(r[&Id { pid: 10, start: 5 }], 100.0);
+        assert_eq!(r[&Id { pid: 11, start: 5 }], 0.0);
+        assert!(!r.contains_key(&Id { pid: 12, start: 5 }), "one reading is no rate");
     }
 
     #[test]

@@ -349,6 +349,15 @@ pub struct App {
     /// The open incident, by its journal timestamp.
     pub crash_selected: Option<i64>,
     pub crash_days: usize,
+    /// Wakeups a second, by process, averaged over about ten seconds.
+    pub wakeups: HashMap<Id, f64>,
+    /// Each process's share of what the machine did, in percent,
+    /// averaged the same way.
+    pub activity: HashMap<Id, f32>,
+    /// Estimated watts, while on battery only — see `power`.
+    pub watts: HashMap<Id, f32>,
+    /// The least the battery has drawn while this window watched.
+    pub power_floor: hyprforge_procman::power::Floor,
     pub recorded: recorded_view::RecordedTab,
     /// Installed apps, for showing a window class by its app's name.
     pub apps_db: Option<hyprforge_mime::MimeDb>,
@@ -562,6 +571,10 @@ impl App {
             crashes: None,
             crash_selected: None,
             crash_days: 7,
+            wakeups: HashMap::new(),
+            activity: HashMap::new(),
+            watts: HashMap::new(),
+            power_floor: Default::default(),
             recorded: recorded_view::RecordedTab::default(),
             apps_db: None,
             history_saved: std::time::Instant::now(),
@@ -681,6 +694,43 @@ impl App {
         }
     }
 
+    /// The reader for the next refresh. Wakeups cost a small file per
+    /// thread — about 1,300 here, 13 ms a reading becoming 20 — so they
+    /// are read only while the Battery page shows them, as `status` is
+    /// read only for the Advanced view.
+    pub(crate) fn reader(&self) -> ProcFs {
+        let mut fs = self.fs.clone();
+        fs.wakeups = self.tab == Tab::Performance && self.resource == Resource::Battery;
+        fs
+    }
+
+    /// Who the battery is paying for. Watts only while it is
+    /// discharging, when its own draw is exactly what it pays; plugged
+    /// in, the share of activity alone, because no sensor here says
+    /// whether a card's power reading is the package or a board.
+    pub(crate) fn take_power(&mut self, usage: &sample::Use, cores: usize, seconds: f64) {
+        use hyprforge_procman::power::{self, Load};
+        let mut loads: HashMap<Id, Load> = usage.cpu.iter().map(|(id, c)| (*id, Load { cpu_percent: *c, gpu_percent: None })).collect();
+        for (id, g) in &usage.gpu {
+            loads.entry(*id).or_default().gpu_percent = Some(*g);
+        }
+        power::smooth(&mut self.activity, &power::shares(&loads, cores.max(1)), seconds);
+        power::smooth(&mut self.wakeups, &usage.wakeups, seconds);
+        let draw = self.machine.battery.as_ref().filter(|b| b.status == "Discharging").and_then(|b| b.watts);
+        match draw {
+            Some(w) => {
+                self.power_floor.see(w);
+                self.watts = power::estimate(&self.activity, w, self.power_floor);
+            }
+            None => {
+                // A floor seen on battery means nothing once plugged in,
+                // and the next time on battery starts its own.
+                self.power_floor = Default::default();
+                self.watts.clear();
+            }
+        }
+    }
+
     fn title(&self) -> String {
         "Processes".to_string()
     }
@@ -712,7 +762,7 @@ impl App {
                         let list = self.load_services();
                         if !self.reading {
                             self.reading = true;
-                            return Task::batch([list, read(self.fs.clone(), self.helper(), self.lookup(), self.gpu_scan.clone(), self.ask_nvidia(), self.ask_drive_temperatures())]);
+                            return Task::batch([list, read(self.reader(), self.helper(), self.lookup(), self.gpu_scan.clone(), self.ask_nvidia(), self.ask_drive_temperatures())]);
                         }
                         return list;
                     }
@@ -721,7 +771,7 @@ impl App {
                 // machine gets fewer refreshes, not a queue of them.
                 if !self.reading {
                     self.reading = true;
-                    return read(self.fs.clone(), self.helper(), self.lookup(), self.gpu_scan.clone(), self.ask_nvidia(), self.ask_drive_temperatures());
+                    return read(self.reader(), self.helper(), self.lookup(), self.gpu_scan.clone(), self.ask_nvidia(), self.ask_drive_temperatures());
                 }
             }
             Message::Read(result) => {
@@ -821,7 +871,7 @@ impl App {
                 Ok(()) => {
                     if !self.reading {
                         self.reading = true;
-                        return read(self.fs.clone(), self.helper(), self.lookup(), self.gpu_scan.clone(), self.ask_nvidia(), self.ask_drive_temperatures());
+                        return read(self.reader(), self.helper(), self.lookup(), self.gpu_scan.clone(), self.ask_nvidia(), self.ask_drive_temperatures());
                     }
                 }
                 Err(e) => self.notice = Some(format!("Couldn't change its priority: {e}.")),
@@ -954,7 +1004,7 @@ impl App {
                 self.notice = (refused > 0).then(|| format!("{refused} of the processes under {} weren't yours to end.", c.name));
                 if !self.reading {
                     self.reading = true;
-                    return read(self.fs.clone(), self.helper(), self.lookup(), self.gpu_scan.clone(), self.ask_nvidia(), self.ask_drive_temperatures());
+                    return read(self.reader(), self.helper(), self.lookup(), self.gpu_scan.clone(), self.ask_nvidia(), self.ask_drive_temperatures());
                 }
             }
             Message::Confirmed => {
@@ -966,7 +1016,7 @@ impl App {
                             // the next tick would.
                             if !self.reading {
                                 self.reading = true;
-                                return read(self.fs.clone(), self.helper(), self.lookup(), self.gpu_scan.clone(), self.ask_nvidia(), self.ask_drive_temperatures());
+                                return read(self.reader(), self.helper(), self.lookup(), self.gpu_scan.clone(), self.ask_nvidia(), self.ask_drive_temperatures());
                             }
                         }
                         Err(signal::Refused::NotAllowed) => {
@@ -992,7 +1042,7 @@ impl App {
                         self.notice = Some(format!("Couldn't {} it: {e}", if frozen { "freeze" } else { "resume" }));
                     } else if !self.reading {
                         self.reading = true;
-                        return read(self.fs.clone(), self.helper(), self.lookup(), self.gpu_scan.clone(), self.ask_nvidia(), self.ask_drive_temperatures());
+                        return read(self.reader(), self.helper(), self.lookup(), self.gpu_scan.clone(), self.ask_nvidia(), self.ask_drive_temperatures());
                     }
                 }
             }
@@ -1032,7 +1082,7 @@ impl App {
                     self.notice = None;
                     if !self.reading {
                         self.reading = true;
-                        return read(self.fs.clone(), self.helper(), self.lookup(), self.gpu_scan.clone(), self.ask_nvidia(), self.ask_drive_temperatures());
+                        return read(self.reader(), self.helper(), self.lookup(), self.gpu_scan.clone(), self.ask_nvidia(), self.ask_drive_temperatures());
                     }
                 }
                 Err(e) => self.notice = Some(format!("Couldn't end it: {e}.")),
@@ -1186,6 +1236,10 @@ impl App {
                 Vec::new()
             }
         };
+        if let Some(before) = &self.last {
+            usage.wakeups = sample::wakeup_rates(before, &snapshot, seconds);
+        }
+        self.take_power(&usage, snapshot.cores.len(), seconds);
         let users = &mut self.users;
         self.table = model::table(&snapshot, &usage, &windows, self.me, &mut |uid| users.name(uid));
 
@@ -1469,6 +1523,19 @@ mod render {
         if let Some(gpu) = app.machine.gpus.iter().find(|g| g.driver == "nvidia").or(app.machine.gpus.first()) {
             app.resource = Resource::Gpu(gpu.card.clone());
             draw(&app, "performance-gpu", &dir);
+        }
+        if app.machine.battery.is_some() {
+            // Wakeups need two readings with the per-thread counts in
+            // both, so take two more on the Battery page.
+            app.resource = Resource::Battery;
+            let mut fs = app.reader();
+            fs.verbose = true;
+            for _ in 0..2 {
+                let r = reading(&fs, &app.gpu_scan);
+                app.take(r);
+                std::thread::sleep(Duration::from_millis(500));
+            }
+            draw(&app, "performance-battery", &dir);
         }
 
         app.tab = Tab::History;

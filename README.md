@@ -21,6 +21,11 @@ other Hyprforge component to start.
 - **Performance**: CPU and every core, memory and swap, every disk, every
   network, every GPU (an NVIDIA card is read only while it is awake, so
   the window never wakes it), the battery, temperatures, fans, pressure.
+  The Battery page says **what is using power**: each program's
+  estimated watts on battery (the battery's draw above the quietest it
+  was seen, shared by CPU and GPU time), or its share of the activity
+  plugged in, and how often it wakes a core — every thread's, averaged
+  over ten seconds.
 - **Startup**: XDG autostart, user units and Hyprland's own startup
   programs, with how long each took to start.
 - **Services**: system and user units, their CPU and memory from their
