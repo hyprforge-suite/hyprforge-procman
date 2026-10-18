@@ -232,11 +232,18 @@ impl App {
             said = said.push(widgets::meta_text("·", density::META_TEXT_BASE, s)).push(widgets::scaled_text(k, density::META_TEXT_BASE, s).font(theme::mono_font()).color(theme::warning()));
         }
         said = said.push(widgets::meta_text(format!("· {programs}"), density::META_TEXT_BASE, s).font(theme::mono_font()));
-        let mut bar = row![range, view, Space::new().width(Length::Fill), said].spacing(spacing::MD).align_y(Alignment::Center);
         if !found.everyone {
-            bar = bar.push(widgets::meta_text("yours only", density::META_TEXT_BASE, s));
+            said = said.push(widgets::meta_text("· yours only", density::META_TEXT_BASE, s));
         }
-        let mut page = column![bar].spacing(spacing::MD).padding(spacing::LG);
+        // Narrow, the counts take a line of their own under the controls
+        // rather than wrapping beside them.
+        let mut page = if wide {
+            column![row![range, view, Space::new().width(Length::Fill), said].spacing(spacing::MD).align_y(Alignment::Center)]
+        } else {
+            column![row![range, view].spacing(spacing::MD).align_y(Alignment::Center), said]
+        }
+        .spacing(spacing::MD)
+        .padding(spacing::LG);
         if shown.is_empty() {
             page = page.push(widgets::hint_text("Nothing crashed and nothing was killed for memory in this range.", s));
             return page.into();
@@ -260,9 +267,21 @@ impl App {
                 // a kill says how it was killed.
                 let how = match newest {
                     Incident::Crash(c) => c.signal.clone().unwrap_or_else(|| "crashed".into()),
-                    Incident::Kill(_) => what(newest).to_lowercase(),
+                    // The sentence's first letter only: "MB" stays "MB".
+                    Incident::Kill(_) => {
+                        let w = what(newest);
+                        let mut c = w.chars();
+                        c.next().map_or(String::new(), |f| f.to_lowercase().chain(c).collect())
+                    }
                 };
-                let how = if g.kills() > 0 && g.kills() < g.list.len() { format!("{how}, and {} for memory", g.kills()) } else { how };
+                // A program that both crashed and was killed says the other
+                // kind too, counted in its own word.
+                let (kills, crashes) = (g.kills(), g.list.len() - g.kills());
+                let how = match newest {
+                    Incident::Crash(_) if kills > 0 => format!("{how}, and {kills} out of memory"),
+                    Incident::Kill(_) if crashes > 0 => format!("{how}, and {crashes} {}", if crashes == 1 { "crash" } else { "crashes" }),
+                    _ => how,
+                };
                 let line = row![
                     column![
                         widgets::clamped_text(g.name.clone(), 1).size(s.apply(density::ROW_TEXT_BASE)).width(Length::Fill),

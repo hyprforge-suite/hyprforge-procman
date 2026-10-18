@@ -1824,11 +1824,13 @@ mod render {
         }
 
         draw(&mut app, "history", &dir);
+        draw_at(&mut app, "history-half", &dir, 770.0, 930.0);
 
         app.tab = Tab::Startup;
         app.startup = Some(runtime.block_on(load_startup()));
         app.find_icons();
         draw(&mut app, "startup", &dir);
+        draw_at(&mut app, "startup-half", &dir, 770.0, 930.0);
 
         // Two rules, as the tab draws them — in memory, not the user's file.
         app.tab = Tab::Rules;
@@ -1842,6 +1844,7 @@ mod render {
             ..Default::default()
         };
         draw(&mut app, "rules", &dir);
+        draw_at(&mut app, "rules-half", &dir, 770.0, 930.0);
 
         // This machine's own journal, with the newest crash opened.
         app.tab = Tab::Crashes;
@@ -1850,6 +1853,7 @@ mod render {
         app.crash_selected = crashes.incidents.as_ref().ok().and_then(|f| f.list.iter().find(|i| matches!(i, hyprforge_procman::incidents::Incident::Crash(_)))).map(|i| i.at());
         app.crashes = Some(crashes);
         draw_sized(&mut app, "crashes", &dir, 1100.0);
+        draw_at(&mut app, "crashes-half", &dir, 770.0, 930.0);
 
         app.tab = Tab::Users;
         app.sessions = runtime.block_on(sessions::list());

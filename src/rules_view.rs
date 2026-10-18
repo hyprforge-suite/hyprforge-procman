@@ -173,19 +173,26 @@ impl App {
                         None => input.width(Length::Fill).into(),
                     }
                 };
+                let buttons = row![widgets::secondary_button("Remove").on_press(Message::RulesRemove(i)), widgets::primary_button("Done").on_press(Message::RulesSave)].spacing(spacing::XS);
+                let fields = row![
+                    field(&r.program, "program, as Processes names it", Field::Program, None),
+                    field(&r.priority, "0 – 19", Field::Priority, Some(widths[0])),
+                    field(&r.memory, "GB", Field::Memory, Some(widths[1])),
+                    field(&r.cpu, "%", Field::Cpu, Some(widths[2])),
+                    field(&r.warn, "GB", Field::Warn, Some(widths[3])),
+                ]
+                .spacing(spacing::MD)
+                .align_y(Alignment::Center);
+                let wide = self.fit() == hyprforge_procman::fit::Fit::Full;
+                // Beside the fields with room for them; narrow, on a line
+                // of their own, rather than squeezed against the edge.
+                let top: Element<'_, Message> = if wide {
+                    row![fields, container(buttons).width(Length::Fixed(s.apply(widths[4] + 60.0))).align_x(Alignment::End)].spacing(spacing::MD).align_y(Alignment::Center).into()
+                } else {
+                    column![fields, container(buttons).width(Length::Fill).align_x(Alignment::End)].spacing(spacing::SM).into()
+                };
                 let edit = column![
-                    row![
-                        field(&r.program, "program, as Processes names it", Field::Program, None),
-                        field(&r.priority, "0 – 19", Field::Priority, Some(widths[0])),
-                        field(&r.memory, "GB", Field::Memory, Some(widths[1])),
-                        field(&r.cpu, "%", Field::Cpu, Some(widths[2])),
-                        field(&r.warn, "GB", Field::Warn, Some(widths[3])),
-                        container(row![widgets::secondary_button("Remove").on_press(Message::RulesRemove(i)), widgets::primary_button("Done").on_press(Message::RulesSave)].spacing(spacing::XS))
-                            .width(Length::Fixed(s.apply(widths[4] + 60.0)))
-                            .align_x(Alignment::End),
-                    ]
-                    .spacing(spacing::MD)
-                    .align_y(Alignment::Center),
+                    top,
                     widgets::meta_text(
                         "Priority 0 is as usual, 19 is last in line. A cap gives the program a unit of its own, unless that would take another app with it.",
                         density::META_TEXT_BASE,

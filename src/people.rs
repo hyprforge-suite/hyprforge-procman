@@ -26,6 +26,7 @@ impl App {
         let Some(data) = &self.startup else {
             return container(widgets::hint_text("Reading what starts with you…", s)).padding(spacing::LG).into();
         };
+        let wide = self.fit() == hyprforge_procman::fit::Fit::Full;
         let state_of = |unit: &str| data.units.iter().find(|u| u.name == unit);
         let mut apps: Vec<&startup::Autostart> = data.autostarts.iter().collect();
         apps.sort_by_key(|a| std::cmp::Reverse(data.blame.get(&startup::autostart_unit(&a.id)).copied().unwrap_or(0)));
@@ -72,13 +73,21 @@ impl App {
             .align_y(Alignment::Center);
             row![
                 container(icon).width(Length::Fixed(icon_w)),
-                row![
-                    widgets::clamped_text(name, 1).size(s.apply(density::ROW_TEXT_BASE)).width(Length::Shrink),
-                    widgets::clamped_text(detail, 1).size(s.apply(density::META_TEXT_BASE)).width(Length::Fill).font(theme::mono_font()).color(theme::text_dim()),
-                ]
-                .spacing(spacing::MD)
-                .align_y(Alignment::Center)
-                .width(Length::Fill),
+                // The command beside the name when there is room for it;
+                // narrow, cut to "nm-…" it said nothing, so it goes.
+                if wide {
+                    Element::from(
+                        row![
+                            widgets::clamped_text(name, 1).size(s.apply(density::ROW_TEXT_BASE)).width(Length::Shrink),
+                            widgets::clamped_text(detail, 1).size(s.apply(density::META_TEXT_BASE)).width(Length::Fill).font(theme::mono_font()).color(theme::text_dim()),
+                        ]
+                        .spacing(spacing::MD)
+                        .align_y(Alignment::Center)
+                        .width(Length::Fill),
+                    )
+                } else {
+                    widgets::clamped_text(name, 1).size(s.apply(density::ROW_TEXT_BASE)).width(Length::Fill).into()
+                },
                 container(status).width(Length::Fixed(s.apply(110.0))),
                 container(time).width(Length::Fixed(s.apply(220.0))),
                 container(control).width(Length::Fixed(s.apply(70.0))).align_x(Alignment::End),
