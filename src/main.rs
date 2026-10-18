@@ -1119,6 +1119,11 @@ impl App {
                     self.view.only = None;
                 }
                 self.view.query = q;
+                // The Overview's field searches processes: where the
+                // answers are drawn.
+                if self.tab == Tab::Overview {
+                    self.tab = Tab::Processes;
+                }
             }
             Message::Sort(column) => self.view.sort = self.view.sort.clicked(column),
             Message::Select(id) => self.selected = Some(id),
@@ -1304,6 +1309,8 @@ impl App {
             for (name, rate) in &disks {
                 self.history.disks.entry(name.clone()).or_default().push(rate.active);
             }
+            self.history.reads.push(disks.iter().map(|(_, r)| r.read).sum::<f64>() as f32);
+            self.history.writes.push(disks.iter().map(|(_, r)| r.write).sum::<f64>() as f32);
             for (name, rate) in &nets {
                 self.history.nets.entry(name.clone()).or_default().push((rate.rx + rate.tx) as f32);
             }

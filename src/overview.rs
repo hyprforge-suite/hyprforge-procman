@@ -1,8 +1,8 @@
-//! The Overview: the Advanced view's dashboard, everything at once the
-//! way btop lays it out, with atop's verbosity — CPU by kind and core,
-//! memory by use, every disk's latency and queue, every interface's
-//! errors, pressure over three windows, and the busiest processes with a
-//! minute of history each.
+//! The Overview: where the window opens — everything at once, laid out
+//! the way btop does with atop's detail: the processor by kind and core,
+//! memory by use, every GPU, every interface, storage's reads and writes,
+//! and the busiest processes with a minute of history each. Pressure is
+//! said in the card it is about ("waited 1%"), not a card of its own.
 //!
 //! Colours come from the theme's roles only. The accent is never one of
 //! them: it means selected, and nothing here is.
@@ -76,11 +76,81 @@ fn count(per_second: f64) -> String {
     }
 }
 
+/// A line over the last minute, in a card's width.
+fn line_graph<'a>(series: &'a hyprforge_procman::history::Series, ceiling: f32, height: f32, s: FontScale) -> Element<'a, Message> {
+    canvas(Graph { series, ceiling, line: theme::text(), grid: surface::card_border() }).width(Length::Fill).height(Length::Fixed(s.apply(height))).into()
+}
+
+/// A figure big enough to read across the room, and what it is of.
+fn figure<'a>(value: String, unit: &'static str, s: FontScale) -> Element<'a, Message> {
+    row![
+        widgets::scaled_text(value, 22.0, s).font(theme::mono_font()),
+        widgets::meta_text(unit, density::META_TEXT_BASE, s),
+    ]
+    .spacing(spacing::XS)
+    .align_y(Alignment::End)
+    .into()
+}
+
+/// A card's title with something said at its right: the figure a glance
+/// wants, or where it was measured.
+fn titled<'a>(title: &str, aside: String, s: FontScale) -> Element<'a, Message> {
+    row![widgets::section_label(title, s), Space::new().width(Length::Fill), widgets::meta_text(aside, density::META_TEXT_BASE, s).font(theme::mono_font())]
+        .align_y(Alignment::Center)
+        .into()
+}
+
+/// A core's cell in the heat grid: its share in the info colour, deeper
+/// the busier — and solid, with dark ink, past half. Not the accent: on
+/// this tab nothing is selected, and the accent means selected.
+fn core_cell<'a>(used: f32, clock: String, s: FontScale) -> Element<'a, Message> {
+    let hot = used > 0.5;
+    let base = theme::info();
+    let fill = if hot { base } else { Color { a: 0.08 + used.clamp(0.0, 1.0) * 0.9, ..base } };
+    let ink = if hot { theme::surface::root() } else { theme::text() };
+    container(
+        column![
+            widgets::scaled_text(format!("{:.0}%", used * 100.0), density::META_TEXT_BASE, s).font(theme::mono_font()).color(ink),
+            widgets::scaled_text(clock, density::META_TEXT_BASE * 0.8, s).font(theme::mono_font()).color(if hot { ink } else { theme::text_dim() }),
+        ]
+        .spacing(1.0)
+        .align_x(Alignment::Center),
+    )
+    .width(Length::FillPortion(1))
+    .padding([spacing::XS, 2.0])
+    .align_x(Alignment::Center)
+    .style(move |_t: &iced::Theme| container::Style {
+        background: Some(Background::Color(fill)),
+        border: Border { radius: density::inner_radius().into(), ..Border::default() },
+        ..container::Style::default()
+    })
+    .into()
+}
+
+/// A plain box for a card, sized by its share of the row.
+fn boxed<'a>(body: Element<'a, Message>, portion: u16) -> Element<'a, Message> {
+    container(body)
+        .padding(spacing::MD)
+        .width(Length::FillPortion(portion))
+        .style(|_t: &iced::Theme| container::Style {
+            background: Some(Background::Color(surface::card())),
+            border: Border { radius: density::card_radius().into(), width: 1.0, color: surface::card_border() },
+            ..container::Style::default()
+        })
+        .into()
+}
+
 impl App {
+    /// Four rows: the processor and memory; the GPUs and the network;
+    /// storage across the width; the busiest processes. Drawn to the
+    /// 2026-10-17 design ("C"): what was the pressure card now sits in
+    /// the cards it is about, and every resource with a history draws it
+    /// as a line.
     pub fn overview_view(&self, s: FontScale) -> Element<'_, Message> {
         let page = column![
             row![self.cpu_card(s), self.memory_card(s)].spacing(spacing::MD),
-            row![self.disks_card(s), self.network_card(s), self.pressure_card(s)].spacing(spacing::MD),
+            row![self.gpus_card(s), self.network_card(s)].spacing(spacing::MD),
+            self.storage_card(s),
             self.top_card(s),
         ]
         .spacing(spacing::MD)
@@ -88,16 +158,28 @@ impl App {
         scrollable(page).height(Length::Fill).into()
     }
 
+    /// The share of the last ten seconds something waited for `pick`,
+    /// as the kernel's pressure counts it, or nothing if it doesn't.
+    fn waited(&self, pick: impl Fn(&hyprforge_procman::machine::PressureDetail) -> f32) -> String {
+        self.machine.pressure_detail.as_ref().map_or(String::new(), |p| format!(" · waited {:.0}%", pick(p)))
+    }
+
     fn cpu_card(&self, s: FontScale) -> Element<'_, Message> {
         let m = &self.machine;
         let o = &self.overview;
         let load = m.load.map_or("—".to_string(), |l| format!("{:.2} {:.2} {:.2}", l[0], l[1], l[2]));
         let up = m.uptime_seconds.map_or("—".to_string(), duration);
-        let headline = format!(
-            "CPU {} · load {load} · up {up}{}",
-            percent(self.totals.cpu.map(|c| c * 100.0)),
-            m.cpu_celsius.map_or(String::new(), |c| format!(" · {c:.0} °C"))
+        let aside = format!(
+            "load {load} · up {up}{}{}",
+            m.cpu_celsius.map_or(String::new(), |c| format!(" · {c:.0} °C")),
+            self.waited(|p| p.cpu_some.avg10)
         );
+        let now = row![
+            container(figure(percent(self.totals.cpu.map(|c| c * 100.0)), "now", s)).width(Length::Shrink),
+            line_graph(&self.history.cpu, 1.0, 64.0, s),
+        ]
+        .spacing(spacing::MD)
+        .align_y(Alignment::End);
         // Where the time went, in /proc/stat's kinds; idle is the track.
         let (user, nice, system, iowait, irq, softirq, steal) = (o.split[0], o.split[1], o.split[2], o.split[4], o.split[5], o.split[6], o.split[7]);
         let colors = [theme::info(), theme::success(), theme::warning(), theme::error(), theme::text_dim(), theme::text()];
@@ -123,41 +205,22 @@ impl App {
             counters.running,
             counters.blocked
         );
-        // Each core: its use, its clock now, a thin bar.
-        let mut cores = column![].spacing(spacing::XS);
-        let per_row = 4;
-        for (n, chunk) in self.history.cores.chunks(per_row).enumerate() {
-            let mut r = row![].spacing(spacing::MD);
+        // Every core as a cell, eight to a row: the busy one stands out
+        // without reading a single number.
+        let mut grid = column![].spacing(spacing::XS);
+        for (n, chunk) in self.history.cores.chunks(8).enumerate() {
+            let mut r = row![].spacing(spacing::XS);
             for (i, core) in chunk.iter().enumerate() {
-                let index = n * per_row + i;
-                let used = core.last().unwrap_or(0.0);
-                let mhz = m.clocks.get(index).and_then(|c| c.0);
-                r = r.push(
-                    column![
-                        row![
-                            widgets::meta_text(format!("{index}"), density::META_TEXT_BASE, s).width(Length::Fixed(s.apply(22.0))),
-                            widgets::scaled_text(percent(Some(used * 100.0)), density::META_TEXT_BASE, s).font(theme::mono_font()).width(Length::Fill),
-                            widgets::meta_text(clock(mhz), density::META_TEXT_BASE, s).font(theme::mono_font()),
-                        ],
-                        widgets::progress_line(used, s),
-                    ]
-                    .spacing(2.0)
-                    .width(Length::FillPortion(1)),
-                );
+                let mhz = m.clocks.get(n * 8 + i).and_then(|c| c.0);
+                r = r.push(core_cell(core.last().unwrap_or(0.0), clock(mhz), s));
             }
-            cores = cores.push(r);
+            for _ in chunk.len()..8 {
+                r = r.push(Space::new().width(Length::FillPortion(1)));
+            }
+            grid = grid.push(r);
         }
-        let graph = container(canvas(Graph { series: &self.history.cpu, ceiling: 1.0, line: theme::text(), grid: surface::card_border() }).width(Length::Fill).height(Length::Fixed(s.apply(90.0))));
-        let body = column![
-            widgets::scaled_text(headline, density::ROW_TEXT_BASE, s),
-            graph,
-            split,
-            legend,
-            widgets::meta_text(activity, density::META_TEXT_BASE, s),
-            cores,
-        ]
-        .spacing(spacing::SM);
-        container(card("Processor".to_string(), body.into(), s)).width(Length::FillPortion(2)).into()
+        let body = column![titled("Processor", aside, s), now, grid, split, legend, widgets::meta_text(activity, density::META_TEXT_BASE, s)].spacing(spacing::SM);
+        boxed(body.into(), 2)
     }
 
     fn memory_card(&self, s: FontScale) -> Element<'_, Message> {
@@ -173,61 +236,119 @@ impl App {
         );
         let o = &self.overview;
         let body = column![
-            widgets::scaled_text(format!("{} used of {}", bytes(t.memory_used), bytes(t.memory_total)), density::ROW_TEXT_BASE, s),
+            titled("Memory", self.waited(|p| p.memory_some.avg10).trim_start_matches(" · ").to_string(), s),
+            figure(bytes(t.memory_used), "used", s),
+            widgets::meta_text(format!("of {}", bytes(t.memory_total)), density::META_TEXT_BASE, s),
+            // Scaled to the whole of memory, so the line's height is how
+            // full it is, not how much it wobbled.
+            line_graph(&self.history.memory, 1.0, 48.0, s),
             bar,
             key(colors[0], "programs", bytes(d.anon), s),
             key(colors[1], "file cache", bytes(cache), s),
-            key(colors[2], "buffers", bytes(d.buffers), s),
             key(colors[3], "shared", bytes(d.shmem), s),
             key(colors[4], "kernel slab", format!("{} ({} reclaimable)", bytes(d.slab), bytes(d.slab_reclaimable)), s),
             widgets::divider(),
             pair("Available", bytes(t.memory_total.saturating_sub(t.memory_used)), s),
-            pair("Free", bytes(d.free), s),
-            pair("Dirty · writing back", format!("{} · {}", bytes(d.dirty), bytes(d.writeback)), s),
-            pair("Page tables · kernel stacks", format!("{} · {}", bytes(d.page_tables), bytes(d.kernel_stack)), s),
             pair("Swap", format!("{} of {}", bytes(t.swap_used), bytes(t.swap_total)), s),
             pair("Swapping in · out", format!("{} · {}", rate(Some(o.swap_in)), rate(Some(o.swap_out))), s),
-            pair("Page faults · from disk", format!("{}/s · {}/s", count(o.faults), count(o.major_faults)), s),
         ]
         .spacing(spacing::XS);
-        container(card("Memory".to_string(), body.into(), s)).width(Length::FillPortion(1)).into()
+        boxed(body.into(), 1)
     }
 
-    fn disks_card(&self, s: FontScale) -> Element<'_, Message> {
-        let mut body = column![].spacing(spacing::SM);
+    /// Every GPU side by side: how busy over the last minute, its video
+    /// memory, temperature and power — read as the Performance page reads
+    /// them, so an NVIDIA card asleep is said to be, never woken.
+    fn gpus_card(&self, s: FontScale) -> Element<'_, Message> {
+        let mut cards = row![].spacing(spacing::LG);
+        for g in &self.machine.gpus {
+            let asleep = g.power.as_deref() == Some("suspended");
+            let reading = (g.driver == "nvidia").then_some(self.nvidia.as_ref()).flatten().and_then(|n| n.as_ref().ok());
+            // `maker` takes the PCI address, as the process table names cards.
+            let maker = hyprforge_procman::gpu::maker(&g.pci, &self.machine.gpus).to_string();
+            let name = reading.map_or(format!("{maker} · {}", g.card), |r| r.name.clone());
+            let busy = if asleep { "asleep".to_string() } else { percent(self.gpu_busy(g)) };
+            let mut col = column![widgets::scaled_text(name, density::ROW_TEXT_BASE, s), figure(busy, if asleep { "" } else { "busy" }, s)].spacing(spacing::XS);
+            if let Some(series) = self.history.gpus.get(&g.card) {
+                col = col.push(line_graph(series, 1.0, 48.0, s));
+            }
+            let (vram, celsius, watts) = match reading {
+                Some(r) => (r.vram_used.zip(r.vram_total), r.celsius, r.watts),
+                None => (g.vram_used.zip(g.vram_total), g.celsius, g.watts),
+            };
+            if let Some((used, total)) = vram {
+                col = col.push(pair("Video memory", format!("{} of {}", bytes(used), bytes(total)), s));
+            }
+            if !asleep {
+                if let Some(c) = celsius {
+                    col = col.push(pair("Temperature", format!("{c:.0} °C"), s));
+                }
+            }
+            if let Some(w) = watts {
+                col = col.push(pair("Power", format!("{w:.1} W"), s));
+            }
+            cards = cards.push(container(col).width(Length::FillPortion(1)));
+        }
+        if self.machine.gpus.is_empty() {
+            cards = cards.push(widgets::hint_text("No GPU this window can read.", s));
+        }
+        boxed(column![widgets::section_label("GPUs", s), cards].spacing(spacing::SM).into(), 7)
+    }
+
+    /// What moved, as two lines — reads and writes, every disk together —
+    /// then each disk and each filesystem's free space side by side.
+    fn storage_card(&self, s: FontScale) -> Element<'_, Message> {
+        let ceiling = self.history.reads.ceiling(64.0 * 1024.0).max(self.history.writes.ceiling(64.0 * 1024.0));
+        let reads = self.history.reads.last().unwrap_or(0.0);
+        let writes = self.history.writes.last().unwrap_or(0.0);
+        let graph = iced::widget::stack![
+            canvas(Graph { series: &self.history.writes, ceiling, line: theme::text(), grid: surface::card_border() }).width(Length::Fill).height(Length::Fixed(s.apply(72.0))),
+            canvas(Graph { series: &self.history.reads, ceiling, line: theme::info(), grid: Color::TRANSPARENT }).width(Length::Fill).height(Length::Fixed(s.apply(72.0))),
+        ];
+        let legend = row![
+            key(theme::info(), "read", rate(Some(f64::from(reads))), s),
+            key(theme::text(), "write", rate(Some(f64::from(writes))), s),
+        ]
+        .spacing(spacing::MD);
+        let mut disks = column![].spacing(spacing::XS);
         for d in &self.machine.disks {
             let r = self.disk_rates.iter().find(|(n, _)| *n == d.name).map(|(_, r)| *r).unwrap_or_default();
-            let name = format!("{}{}", d.name, d.model.as_ref().map_or(String::new(), |m| format!(" · {m}")));
-            body = body.push(
-                column![
-                    row![
-                        widgets::scaled_text(name, density::META_TEXT_BASE, s).width(Length::Fill),
-                        widgets::meta_text(d.celsius.map_or(String::new(), |c| format!("{c:.0} °C")), density::META_TEXT_BASE, s),
-                    ],
-                    widgets::progress_line(r.active, s),
-                    pair("Read · write", format!("{} · {}", rate(Some(r.read)), rate(Some(r.write))), s),
-                    pair("Operations", format!("{} r/s · {} w/s", count(r.read_ops), count(r.write_ops)), s),
-                    pair("Average wait · queue", format!("{} · {:.2}", r.wait_ms.map_or("—".to_string(), |w| format!("{w:.1} ms")), r.queue), s),
+            let name = d.model.clone().unwrap_or_else(|| d.name.clone());
+            let mono = |v: String, w: f32| container(widgets::scaled_text(v, density::META_TEXT_BASE, s).font(theme::mono_font())).width(Length::Fixed(s.apply(w))).align_x(Alignment::End);
+            disks = disks.push(
+                row![
+                    widgets::scaled_text(name, density::META_TEXT_BASE, s).width(Length::Fill),
+                    mono(rate(Some(r.read)), 84.0),
+                    mono(rate(Some(r.write)), 84.0),
+                    mono(d.celsius.map_or("—".to_string(), |c| format!("{c:.0}°")), 44.0),
                 ]
-                .spacing(2.0),
+                .spacing(spacing::SM)
+                .align_y(Alignment::Center),
             );
         }
-        body = body.push(widgets::divider());
+        let mut mounts = column![].spacing(spacing::SM);
         for f in &self.machine.filesystems {
             let used = f.total.saturating_sub(f.available);
             let share = if f.total == 0 { 0.0 } else { used as f32 / f.total as f32 };
-            body = body.push(
+            mounts = mounts.push(
                 column![
                     row![
                         widgets::scaled_text(f.mount.clone(), density::META_TEXT_BASE, s).width(Length::Fill),
-                        widgets::meta_text(format!("{} free of {} · {}", bytes(f.available), bytes(f.total), f.kind), density::META_TEXT_BASE, s),
+                        widgets::meta_text(format!("{} free of {}", bytes(f.available), bytes(f.total)), density::META_TEXT_BASE, s),
                     ],
                     widgets::progress_line(share, s),
                 ]
                 .spacing(2.0),
             );
         }
-        container(card("Storage".to_string(), body.into(), s)).width(Length::FillPortion(1)).into()
+        let body = column![
+            widgets::section_label("Storage", s),
+            legend,
+            graph,
+            row![container(disks).width(Length::FillPortion(1)), container(mounts).width(Length::FillPortion(1))].spacing(spacing::LG),
+        ]
+        .spacing(spacing::SM);
+        boxed(body.into(), 1)
     }
 
     fn network_card(&self, s: FontScale) -> Element<'_, Message> {
@@ -251,34 +372,7 @@ impl App {
             block = block.push(text(trouble).size(s.apply(density::META_TEXT_BASE)).color(color));
             body = body.push(block);
         }
-        container(card("Network".to_string(), body.into(), s)).width(Length::FillPortion(1)).into()
-    }
-
-    fn pressure_card(&self, s: FontScale) -> Element<'_, Message> {
-        let Some(p) = self.machine.pressure_detail else {
-            return container(card("Pressure".to_string(), widgets::hint_text("This kernel doesn't report pressure.", s).into(), s)).width(Length::FillPortion(1)).into();
-        };
-        let line = |label: &'static str, w: hyprforge_procman::machine::Windows| -> Element<'_, Message> {
-            column![
-                row![
-                    widgets::meta_text(label, density::META_TEXT_BASE, s).width(Length::Fill),
-                    widgets::scaled_text(format!("{:>5.1} {:>5.1} {:>5.1}", w.avg10, w.avg60, w.avg300), density::META_TEXT_BASE, s).font(theme::mono_font()),
-                ],
-                widgets::progress_line(w.avg10 / 100.0, s),
-            ]
-            .spacing(2.0)
-            .into()
-        };
-        let body = column![
-            widgets::meta_text("Share of time something waited — 10 s, 1 min, 5 min", density::META_TEXT_BASE, s),
-            line("CPU, some waited", p.cpu_some),
-            line("Memory, some", p.memory_some),
-            line("Memory, everything", p.memory_full),
-            line("Storage, some", p.io_some),
-            line("Storage, everything", p.io_full),
-        ]
-        .spacing(spacing::SM);
-        container(card("Pressure".to_string(), body.into(), s)).width(Length::FillPortion(1)).into()
+        container(card("Network".to_string(), body.into(), s)).width(Length::FillPortion(5)).into()
     }
 
     fn top_card(&self, s: FontScale) -> Element<'_, Message> {

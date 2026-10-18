@@ -166,29 +166,22 @@ impl App {
 
     fn header(&self, s: FontScale) -> Element<'_, Message> {
         let mut bar = row![widgets::sidebar_toggle(self.sidebar, Message::ToggleSidebar, s)].spacing(spacing::MD).align_y(Alignment::Center);
-        // The space between the tabs and the controls: the search field's,
-        // on a tab that has one, so it takes all the room there is.
-        let searches = matches!(self.tab, Tab::Services | Tab::Processes | Tab::Details);
-        if !searches {
-            bar = bar.push(Space::new().width(Length::Fill));
+        // The search sits by the sidebar, where it is found; the Overview
+        // has the processes' one, and typing there opens Processes.
+        let search: Option<Element<'_, Message>> = match self.tab {
+            Tab::Services => Some(widgets::search_field("Search services", &self.services.query, Message::ServiceQuery, None, None, s).into()),
+            Tab::Overview | Tab::Processes | Tab::Details => {
+                Some(widgets::search_field("Search, or port:8080, file:~/notes.txt", &self.view.query, Message::Query, None, Some(crate::search_id()), s).into())
+            }
+            _ => None,
+        };
+        if let Some(field) = search {
+            // Whatever the bar has left, up to 520: the controls are
+            // fixed, so the field is what gives — never Pause, pushed off
+            // the edge.
+            bar = bar.push(container(field).width(Length::FillPortion(3)).max_width(s.apply(520.0)));
         }
-        if self.tab == Tab::Services {
-            bar = bar.push(
-                container(container(widgets::search_field("Search services", &self.services.query, Message::ServiceQuery, None, None, s)).max_width(s.apply(560.0)))
-                    .width(Length::Fill)
-                    .align_x(Alignment::End),
-            );
-        }
-        if matches!(self.tab, Tab::Processes | Tab::Details) {
-            bar = bar.push(
-                // Whatever the bar has left, up to 320: the tabs and the
-                // controls are fixed, so the field is what gives — never
-                // Pause, pushed off the edge.
-                container(container(widgets::search_field("Search, or port:8080, file:~/notes.txt", &self.view.query, Message::Query, None, Some(crate::search_id()), s)).max_width(s.apply(560.0)))
-                    .width(Length::Fill)
-                    .align_x(Alignment::End),
-            );
-        }
+        bar = bar.push(self.readouts(s)).push(Space::new().width(Length::FillPortion(1)));
         let speeds = widgets::segmented_choice(
             &INTERVALS,
             (!self.paused).then_some(&self.interval),
@@ -213,6 +206,30 @@ impl App {
             .align_y(Alignment::Center)
             .style(|_t: &iced::Theme| container::Style { background: Some(Background::Color(surface::sidebar())), ..container::Style::default() })
             .into()
+    }
+
+    /// CPU, memory and I/O wait, on every tab: the three a glance at the
+    /// header should answer. I/O wait in the warning colour past a tenth,
+    /// where it starts to be why things feel slow.
+    fn readouts(&self, s: FontScale) -> Element<'_, Message> {
+        let t = self.totals;
+        let iowait = self.overview.split[4];
+        let item = |label: &'static str, value: String, warn: bool| -> Element<'_, Message> {
+            let ink = if warn { theme::warning() } else { theme::text() };
+            row![
+                widgets::meta_text(label, density::META_TEXT_BASE, s).font(theme::mono_font()).color(if warn { ink } else { theme::text_dim() }),
+                widgets::scaled_text(value, density::META_TEXT_BASE, s).font(theme::mono_font()).color(ink),
+            ]
+            .spacing(spacing::XS)
+            .into()
+        };
+        row![
+            item("CPU", percent(t.cpu.map(|c| c * 100.0)), false),
+            item("MEM", format!("{} / {}", bytes(t.memory_used), bytes(t.memory_total)), false),
+            item("I/O WAIT", percent(Some(iowait * 100.0)), iowait > 0.1),
+        ]
+        .spacing(spacing::MD)
+        .into()
     }
 
     pub fn column_head(&self, label: &'static str, column: Column, width: Length, right: bool, s: FontScale) -> Element<'_, Message> {
@@ -698,7 +715,7 @@ impl App {
     }
 
     /// A card's busy figure, from wherever its driver keeps one.
-    fn gpu_busy(&self, g: &hyprforge_procman::machine::Gpu) -> Option<f32> {
+    pub(crate) fn gpu_busy(&self, g: &hyprforge_procman::machine::Gpu) -> Option<f32> {
         match g.driver.as_str() {
             "nvidia" => self.nvidia.as_ref().and_then(|n| n.as_ref().ok()).and_then(|n| n.busy),
             _ => g.busy_percent.map(f32::from),

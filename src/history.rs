@@ -55,6 +55,11 @@ pub struct History {
     pub nets: BTreeMap<String, Series>,
     /// Busy, by card.
     pub gpus: BTreeMap<String, Series>,
+    /// Bytes read and written a second, every disk together: the
+    /// Overview's I/O graph, where the per-disk series above is how busy
+    /// each was, not how much moved.
+    pub reads: Series,
+    pub writes: Series,
     pub battery: Series,
 }
 

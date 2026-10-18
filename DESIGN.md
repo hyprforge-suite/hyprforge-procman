@@ -335,6 +335,17 @@ as administrator through pkexec.
   A broken file is shown, never treated as no rules, and only replaced
   if the person starts a new list.
 
+- **The Overview, redesigned** (2026-10-17, design "C" on the canvas):
+  the processor (a minute's line, a heat grid of cores, the CPU-time
+  split) and memory (its line, scaled to the whole of it); every GPU side
+  by side with its line, video memory, temperature and power, NVIDIA read
+  as the Performance page reads it; the network; storage as two lines,
+  reads and writes, then each disk and filesystem; the busiest
+  processes. The pressure card is gone: what it said is in the card it is
+  about ("waited 1%") and in the header's I/O WAIT, which with CPU and MEM
+  is on every tab. The heat grid is in the info colour, not the accent the
+  mockup drew it in: on this tab nothing is selected.
+
 **Not yet:**
 - Choosing a GPU per app. That moved to the GPU broker idea in the suite's vision.md.
 
