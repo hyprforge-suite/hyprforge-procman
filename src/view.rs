@@ -113,7 +113,8 @@ impl App {
             Tab::Crashes => self.crashes_view(s),
             Tab::Rules => self.rules_view(s),
         };
-        let page = column![self.header(s), widgets::divider(), body, widgets::divider(), self.status(s)];
+        let middle: Element<'_, Message> = if self.sidebar { row![self.sidebar(s), body].height(Length::Fill).into() } else { body };
+        let page = column![self.header(s), widgets::divider(), middle, widgets::divider(), self.status(s)];
         let page = container(page).width(Length::Fill).height(Length::Fill).style(|_t: &iced::Theme| container::Style {
             background: Some(Background::Color(surface::root())),
             ..container::Style::default()
@@ -139,22 +140,32 @@ impl App {
         }
     }
 
+    /// Every tab, down the left in three groups: what is happening now,
+    /// what happened, and what runs on its own. Eleven tabs in the header
+    /// squeezed its search field to a sliver at half a screen's width.
+    fn sidebar(&self, s: FontScale) -> Element<'_, Message> {
+        use hyprforge_ui::widgets::{nav_sidebar, NavGroup, NavItem};
+        let item = |tab: Tab, label: &str| NavItem { label: label.to_string(), mark: None, badge: None, selected: self.tab == tab, on_press: Message::Tab(tab) };
+        let groups = vec![
+            NavGroup {
+                label: Some("Live"),
+                items: vec![
+                    item(Tab::Overview, "Overview"),
+                    item(Tab::Processes, "Processes"),
+                    item(Tab::Performance, "Performance"),
+                    item(Tab::Details, "Details"),
+                    item(Tab::Services, "Services"),
+                    item(Tab::Users, "Users"),
+                ],
+            },
+            NavGroup { label: Some("Over time"), items: vec![item(Tab::History, "App history"), item(Tab::Recorded, "Recorded"), item(Tab::Crashes, "Crashes")] },
+            NavGroup { label: Some("Automatic"), items: vec![item(Tab::Startup, "Startup"), item(Tab::Rules, "Rules")] },
+        ];
+        nav_sidebar(groups, s.apply(190.0), s)
+    }
+
     fn header(&self, s: FontScale) -> Element<'_, Message> {
-        let mut list: Vec<(Tab, &str)> = vec![(Tab::Overview, "Overview")];
-        list.extend([
-            (Tab::Processes, "Processes"),
-            (Tab::Performance, "Performance"),
-            (Tab::History, "App history"),
-            (Tab::Recorded, "Recorded"),
-            (Tab::Startup, "Startup"),
-            (Tab::Users, "Users"),
-            (Tab::Details, "Details"),
-            (Tab::Services, "Services"),
-            (Tab::Crashes, "Crashes"),
-            (Tab::Rules, "Rules"),
-        ]);
-        let tabs = widgets::panel_tabs(&list, &self.tab, Message::Tab, s);
-        let mut bar = row![tabs].spacing(spacing::MD).align_y(Alignment::Center);
+        let mut bar = row![widgets::sidebar_toggle(self.sidebar, Message::ToggleSidebar, s)].spacing(spacing::MD).align_y(Alignment::Center);
         // The space between the tabs and the controls: the search field's,
         // on a tab that has one, so it takes all the room there is.
         let searches = matches!(self.tab, Tab::Services | Tab::Processes | Tab::Details);
@@ -163,7 +174,7 @@ impl App {
         }
         if self.tab == Tab::Services {
             bar = bar.push(
-                container(container(widgets::search_field("Search services", &self.services.query, Message::ServiceQuery, None, None, s)).max_width(s.apply(320.0)))
+                container(container(widgets::search_field("Search services", &self.services.query, Message::ServiceQuery, None, None, s)).max_width(s.apply(560.0)))
                     .width(Length::Fill)
                     .align_x(Alignment::End),
             );
@@ -173,7 +184,7 @@ impl App {
                 // Whatever the bar has left, up to 320: the tabs and the
                 // controls are fixed, so the field is what gives — never
                 // Pause, pushed off the edge.
-                container(container(widgets::search_field("Search, or port:8080, file:~/notes.txt", &self.view.query, Message::Query, None, Some(crate::search_id()), s)).max_width(s.apply(320.0)))
+                container(container(widgets::search_field("Search, or port:8080, file:~/notes.txt", &self.view.query, Message::Query, None, Some(crate::search_id()), s)).max_width(s.apply(560.0)))
                     .width(Length::Fill)
                     .align_x(Alignment::End),
             );

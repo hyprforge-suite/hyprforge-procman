@@ -327,6 +327,8 @@ pub enum Message {
     RulesSwitch(bool),
     RulesSwitched(Result<(), String>),
     RulesState(Option<bool>),
+    /// Show or hide the sidebar of tabs.
+    ToggleSidebar,
     /// Whether its service is running; `None` when it isn't installed.
     EfficiencyState(Option<bool>),
     /// A menu row chosen: close the menu, then do what its button does.
@@ -390,6 +392,8 @@ pub struct App {
     /// Waiting on systemd to switch it.
     pub efficiency_busy: bool,
     pub rules: rules_view::Tab,
+    /// Whether the sidebar of tabs is showing.
+    pub sidebar: bool,
     /// Where the rules are kept; a test's own directory in tests.
     pub rules_path: std::path::PathBuf,
     /// Wakeups a second, by process, averaged over about ten seconds.
@@ -661,6 +665,7 @@ impl App {
             efficiency: None,
             efficiency_busy: false,
             rules: rules_view::Tab::default(),
+            sidebar: true,
             rules_path: hyprforge_procman::rules::path(),
             wakeups: HashMap::new(),
             activity: HashMap::new(),
@@ -1008,6 +1013,7 @@ impl App {
                 return efficiency_state();
             }
             Message::EfficiencyState(state) => self.efficiency = state,
+            Message::ToggleSidebar => self.sidebar = !self.sidebar,
             Message::RulesEdit(..)
             | Message::RulesAdd
             | Message::RulesRemove(_)
