@@ -316,7 +316,82 @@ fn chip_on<'a>(chips: &'a [Chip], device: Option<&Path>) -> Option<&'a Chip> {
     chips.iter().find(|c| c.device.as_deref() == Some(device))
 }
 
+/// The processor as a person names it, read once: it does not change
+/// while the machine runs.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct Processor {
+    /// "AMD", "Intel", or the vendor string as given.
+    pub maker: Option<String>,
+    /// "Ryzen 7 7840HS" — the model name without the maker and the
+    /// marketing it carries ("w/ Radeon 780M Graphics", "8-Core
+    /// Processor"), which the page says elsewhere or not at all.
+    pub model: Option<String>,
+    /// Physical cores; the threads are the per-core series.
+    pub cores: Option<usize>,
+    /// The slowest and fastest any core may run, in MHz.
+    pub min_mhz: Option<u32>,
+    pub max_mhz: Option<u32>,
+}
+
+/// [`Processor`] from `/proc/cpuinfo`'s text.
+pub fn parse_cpuinfo(text: &str) -> Processor {
+    let field = |line: &str, key: &str| line.strip_prefix(key).map(|r| r.trim_start_matches([' ', '\t'])).and_then(|r| r.strip_prefix(':')).map(|r| r.trim().to_string());
+    let mut maker = None;
+    let mut model = None;
+    let mut cores = std::collections::HashSet::new();
+    let (mut physical, mut core) = (None, None);
+    for line in text.lines() {
+        if line.trim().is_empty() {
+            if let (Some(p), Some(c)) = (physical.take(), core.take()) {
+                cores.insert((p, c));
+            }
+            continue;
+        }
+        if let Some(v) = field(line, "vendor_id") {
+            maker.get_or_insert(match v.as_str() {
+                "AuthenticAMD" => "AMD".to_string(),
+                "GenuineIntel" => "Intel".to_string(),
+                _ => v,
+            });
+        } else if let Some(v) = field(line, "model name") {
+            model.get_or_insert(v);
+        } else if let Some(v) = field(line, "physical id") {
+            physical = Some(v);
+        } else if let Some(v) = field(line, "core id") {
+            core = Some(v);
+        }
+    }
+    if let (Some(p), Some(c)) = (physical, core) {
+        cores.insert((p, c));
+    }
+    let model = model.map(|m| short_model(&m));
+    Processor { maker, model, cores: (!cores.is_empty()).then_some(cores.len()), min_mhz: None, max_mhz: None }
+}
+
+/// "AMD Ryzen 7 7840HS w/ Radeon 780M Graphics" → "Ryzen 7 7840HS";
+/// "Intel(R) Core(TM) i7-1165G7 @ 2.80GHz" → "Core i7-1165G7".
+fn short_model(full: &str) -> String {
+    let mut m = full.replace("(R)", "").replace("(TM)", "").replace("(tm)", "");
+    for cut in [" w/ ", " with ", " @ "] {
+        if let Some(i) = m.find(cut) {
+            m.truncate(i);
+        }
+    }
+    let words: Vec<&str> = m.split_whitespace().filter(|w| !matches!(*w, "AMD" | "Intel" | "Processor" | "CPU")).filter(|w| !w.ends_with("-Core")).collect();
+    words.join(" ")
+}
+
 impl SysFs {
+    /// The processor's name, core count and clock range — read when
+    /// asked, not with every reading.
+    pub fn processor(&self) -> Processor {
+        let mut p = parse_cpuinfo(&read(self.path("proc/cpuinfo")).unwrap_or_default());
+        let khz = |f: &str| number::<u32>(self.path("sys/devices/system/cpu/cpu0/cpufreq").join(f)).map(|k| k / 1000);
+        p.min_mhz = khz("cpuinfo_min_freq");
+        p.max_mhz = khz("cpuinfo_max_freq");
+        p
+    }
+
     pub fn rooted_at(root: impl Into<PathBuf>) -> SysFs {
         SysFs { root: root.into(), drive_temperatures: true }
     }
@@ -712,6 +787,20 @@ pub fn rates(before: &Machine, now: &Machine, seconds: f64) -> (Named<DiskRate>,
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// From this machine's own /proc/cpuinfo, two of its sixteen entries
+    /// (2026-10-18): the model loses its maker and its graphics, and the
+    /// cores are counted by core id, not by entry.
+    #[test]
+    fn the_processor_is_named_as_a_person_would_and_its_cores_counted() {
+        let text = "processor\t: 0\nvendor_id\t: AuthenticAMD\nmodel name\t: AMD Ryzen 7 7840HS w/ Radeon 780M Graphics\nphysical id\t: 0\ncore id\t\t: 0\n\nprocessor\t: 1\nvendor_id\t: AuthenticAMD\nmodel name\t: AMD Ryzen 7 7840HS w/ Radeon 780M Graphics\nphysical id\t: 0\ncore id\t\t: 0\n\nprocessor\t: 2\nvendor_id\t: AuthenticAMD\nmodel name\t: AMD Ryzen 7 7840HS w/ Radeon 780M Graphics\nphysical id\t: 0\ncore id\t\t: 1\n";
+        let p = parse_cpuinfo(text);
+        assert_eq!(p.maker.as_deref(), Some("AMD"));
+        assert_eq!(p.model.as_deref(), Some("Ryzen 7 7840HS"));
+        assert_eq!(p.cores, Some(2), "two entries share core 0");
+        assert_eq!(short_model("Intel(R) Core(TM) i7-1165G7 @ 2.80GHz"), "Core i7-1165G7");
+        assert_eq!(short_model("AMD Ryzen 9 5900X 12-Core Processor"), "Ryzen 9 5900X");
+    }
     use std::os::unix::fs::symlink;
 
     /// A Framework 16's `/sys` and `/proc`, as far as this reads them —

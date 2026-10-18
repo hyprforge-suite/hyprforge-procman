@@ -52,6 +52,10 @@ impl Series {
 #[derive(Debug, Clone, Default)]
 pub struct History {
     pub cpu: Series,
+    /// The kernel's share of it — system time and interrupts — drawn
+    /// under the total on the Performance page, so what is left between
+    /// the two is the programs'.
+    pub cpu_system: Series,
     pub cores: Vec<Series>,
     pub memory: Series,
     pub swap: Series,

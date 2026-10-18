@@ -13,6 +13,7 @@ mod limits_view;
 mod menus;
 mod overview;
 mod past;
+mod performance;
 mod people;
 mod recorded_view;
 mod rules_view;
@@ -424,6 +425,8 @@ pub struct App {
     pub app_cpu: HashMap<Id, hyprforge_procman::history::Series>,
     /// The column a narrow Processes list keeps besides CPU and Memory.
     pub narrow_column: Column,
+    /// The processor's name and clocks, read once at start.
+    pub processor: hyprforge_procman::machine::Processor,
     history_saved: std::time::Instant,
     /// The btop/atop-verbose view: the Overview tab and the extra columns.
     /// Machine-wide rates the Overview shows.
@@ -692,6 +695,7 @@ impl App {
             icons: app_icons::Cache::default(),
             app_cpu: HashMap::new(),
             narrow_column: Column::Gpu,
+            processor: SysFs::default().processor(),
             history_saved: std::time::Instant::now(),
             overview: Overview::default(),
             counters: Default::default(),
@@ -1434,6 +1438,8 @@ impl App {
         let cpu = self.last.as_ref().map(|before| sample::busy(before.cpu, snapshot.cpu));
         if let Some(before) = &self.last {
             self.history.cpu.push(cpu.unwrap_or(0.0));
+            let o = &self.overview.split;
+            self.history.cpu_system.push(o[2] + o[5] + o[6]);
             self.history.cores.resize_with(snapshot.cores.len(), Default::default);
             for (i, (a, b)) in before.cores.iter().zip(&snapshot.cores).enumerate() {
                 self.history.cores[i].push(sample::busy(*a, *b));
@@ -1731,6 +1737,7 @@ mod render {
 
         app.tab = Tab::Performance;
         draw(&mut app, "performance", &dir);
+        draw_at(&mut app, "performance-half", &dir, 770.0, 930.0);
         if let Some(disk) = app.machine.disks.first() {
             app.resource = Resource::Disk(disk.name.clone());
             draw(&mut app, "performance-disk", &dir);
