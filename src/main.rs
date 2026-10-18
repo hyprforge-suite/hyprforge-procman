@@ -434,6 +434,9 @@ pub struct App {
     pub app_cpu: HashMap<Id, hyprforge_procman::history::Series>,
     /// The column a narrow Processes list keeps besides CPU and Memory.
     pub narrow_column: Column,
+    /// Apps efficiency mode is holding back right now, by lead — read
+    /// from their units' weights each refresh.
+    pub held_back: std::collections::HashSet<Id>,
     /// The app chosen on App history; until one is, the busiest.
     pub history_app: Option<String>,
     /// The processor's name and clocks, read once at start.
@@ -708,6 +711,7 @@ impl App {
             icons: app_icons::Cache::default(),
             app_cpu: HashMap::new(),
             narrow_column: Column::Gpu,
+            held_back: std::collections::HashSet::new(),
             history_app: None,
             processor: SysFs::default().processor(),
             history_saved: std::time::Instant::now(),
@@ -1545,6 +1549,22 @@ impl App {
             }
         }
         self.find_icons();
+        // Which apps efficiency mode is holding back, asked of the kernel
+        // rather than remembered from the service: two small reads an
+        // app, and only when the service is installed to set any.
+        self.held_back = match self.efficiency {
+            Some(_) => self
+                .table
+                .apps
+                .iter()
+                .filter(|a| {
+                    hyprforge_procman::limits::cgroup_of(std::path::Path::new("/proc"), a.lead.id.pid)
+                        .is_some_and(|cg| hyprforge_procman::efficiency::held_back(std::path::Path::new("/sys/fs/cgroup"), &cg))
+                })
+                .map(|a| a.lead.id)
+                .collect(),
+            None => std::collections::HashSet::new(),
+        };
         // This process and what it runs under, plus the compositor by
         // name, in case this window was started some other way.
         self.critical = model::ancestry(&snapshot, std::process::id() as i32);

@@ -123,9 +123,42 @@ pub fn weight(down: bool) -> Vec<(&'static str, u64)> {
     vec![("CPUWeight", if down { BACKGROUND_WEIGHT } else { limits::UNLIMITED })]
 }
 
+/// Whether efficiency mode is holding back the unit `cgroup` names (as
+/// `/proc/<pid>/cgroup` gives it), or the unit just above it — read from
+/// the weight the kernel has, so what the list says is what is applied,
+/// whatever the service meant to do. An app's processes sit in its
+/// scope or one level under it.
+pub fn held_back(cgroup_root: &std::path::Path, cgroup: &str) -> bool {
+    let mut at = std::path::PathBuf::from(cgroup.trim_start_matches('/'));
+    for _ in 0..2 {
+        let weight = std::fs::read_to_string(cgroup_root.join(&at).join("cpu.weight")).ok();
+        if weight.as_deref().and_then(|w| w.trim().parse::<u64>().ok()) == Some(BACKGROUND_WEIGHT) {
+            return true;
+        }
+        if !at.pop() {
+            break;
+        }
+    }
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_app_is_held_back_by_its_own_units_weight_or_the_one_above() {
+        let root = tempfile::tempdir().unwrap();
+        let unit = root.path().join("user.slice/app-steam.scope");
+        std::fs::create_dir_all(unit.join("sub")).unwrap();
+        std::fs::write(unit.join("cpu.weight"), "20\n").unwrap();
+        std::fs::write(unit.join("sub/cpu.weight"), "100\n").unwrap();
+        assert!(held_back(root.path(), "/user.slice/app-steam.scope"));
+        assert!(held_back(root.path(), "/user.slice/app-steam.scope/sub"), "one level under it");
+        std::fs::write(unit.join("cpu.weight"), "100\n").unwrap();
+        assert!(!held_back(root.path(), "/user.slice/app-steam.scope"), "the default weight is not held back");
+        assert!(!held_back(root.path(), "/nowhere"), "no cgroup is not held back");
+    }
 
     fn app(lead: i32, on_screen: bool) -> Seen {
         Seen { name: format!("app{lead}"), lead, pids: vec![lead], on_screen, own: true }

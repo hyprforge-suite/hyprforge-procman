@@ -489,6 +489,12 @@ impl App {
                 if !app.lead.own {
                     title = title.push(widgets::chip(app.lead.user.clone(), widgets::Tint::Dim, s));
                 }
+                // Efficiency mode giving it less CPU while it has no window
+                // on screen: said on the row, since it is why the app is
+                // slower than it looks like it should be.
+                if self.held_back.contains(&id) {
+                    title = title.push(widgets::chip("efficiency", widgets::Tint::Dim, s));
+                }
                 let name = row![
                     chevron(open, Message::Toggle(id)),
                     crate::app_icons::view(self.icons.peek(class), s.apply(crate::app_icons::SIDE as f32)),
