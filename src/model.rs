@@ -307,6 +307,10 @@ pub struct View {
     pub query: String,
     /// Apps opened to show their processes.
     pub expanded: HashSet<Id>,
+    /// Runs of same-named background processes opened to show each one
+    /// ([`Line::Same`]) — by name, since the run has no pid of its own
+    /// and its members come and go.
+    pub opened: HashSet<String>,
     pub show_kernel: bool,
     /// What a `port:`/`file:` search found; replaces the text search
     /// while it is set.
@@ -318,9 +322,30 @@ pub struct View {
 pub enum Line {
     Heading { label: &'static str, count: usize },
     App { app: App, open: bool },
-    /// A process inside an open app.
+    /// A process inside an open app — or inside an open [`Line::Same`].
     Member(Entry),
     Process(Entry),
+    /// Several background processes with one name — three
+    /// `systemd-userwork`, a dozen `kworker`s' worth of helpers — as one
+    /// row of their sum, so ninety rows of background read as the forty
+    /// different things they are. Opened, its members follow as
+    /// [`Line::Member`]s.
+    Same { name: String, members: Vec<Entry>, open: bool },
+}
+
+/// A run's sums, as a row is sorted: known only when every member's is,
+/// as an app's are.
+fn same_key<'a>(name: &'a str, members: &'a [Entry]) -> Key<'a> {
+    Key {
+        name,
+        cpu: members.iter().map(|m| m.cpu).sum(),
+        memory: members.iter().map(|m| m.private_bytes).sum(),
+        disk: members.iter().map(|m| m.disk).sum(),
+        net: members.iter().map(|m| m.net).sum(),
+        gpu: { let g: Vec<f32> = members.iter().filter_map(|m| m.gpu).collect(); (!g.is_empty()).then(|| g.iter().sum::<f32>().min(100.0)) },
+        id: members[0].id,
+        user: &members[0].user,
+    }
 }
 
 /// What a row is sorted by.
@@ -415,7 +440,31 @@ pub fn lines(table: &Table, view: &View) -> Vec<Line> {
     }
     if !background.is_empty() {
         out.push(Line::Heading { label: "Background processes", count: background.len() });
-        out.extend(background.into_iter().cloned().map(Line::Process));
+        // Gathered by name in sorted order, so a run's members keep the
+        // order they sorted in and a run sits where its first would.
+        let mut runs: Vec<(&str, Vec<Entry>)> = Vec::new();
+        let mut at: HashMap<&str, usize> = HashMap::new();
+        for e in background {
+            match at.get(e.name.as_str()) {
+                Some(&i) => runs[i].1.push(e.clone()),
+                None => {
+                    at.insert(&e.name, runs.len());
+                    runs.push((&e.name, vec![e.clone()]));
+                }
+            }
+        }
+        runs.sort_by(|(a, am), (b, bm)| compare(view.sort, same_key(a, am), same_key(b, bm)));
+        for (name, mut members) in runs {
+            if members.len() == 1 {
+                out.push(Line::Process(members.remove(0)));
+                continue;
+            }
+            let open = view.opened.contains(name);
+            out.push(Line::Same { name: name.to_string(), members: members.clone(), open });
+            if open {
+                out.extend(members.into_iter().map(Line::Member));
+            }
+        }
     }
     out
 }
@@ -573,6 +622,38 @@ mod tests {
         let flatpaks: HashMap<i32, String> = [830281, 830302, 830303, 830306, 830307].into_iter().map(|p| (p, "com.github.tchx84.Flatseal".to_string())).collect();
         let windows = if with_window { vec![window(830307, "com.github.tchx84.Flatseal", "Flatseal")] } else { Vec::new() };
         table(&snapshot, &Use::default(), &windows, &flatpaks, 1000, &mut |_| "voldemort".into())
+    }
+
+    fn bg(pid: i32, name: &str, cpu: f32) -> Entry {
+        Entry { id: Id { pid, start: 1 }, name: name.into(), cpu: Some(cpu), private_bytes: 1000, ..Entry::default() }
+    }
+
+    /// Three of one name are one row of their sum, sorted by that sum —
+    /// three idle helpers together can outrank one busier process.
+    #[test]
+    fn same_named_background_processes_are_one_row_of_their_sum() {
+        let t = Table { apps: Vec::new(), background: vec![bg(1, "userwork", 0.4), bg(2, "atop", 1.0), bg(3, "userwork", 0.4), bg(4, "userwork", 0.4)] };
+        let view = View { sort: Sort { column: Column::Cpu, descending: true }, ..View::default() };
+        let out = lines(&t, &view);
+        match &out[1] {
+            Line::Same { name, members, open } => {
+                assert_eq!((name.as_str(), members.len(), *open), ("userwork", 3, false));
+            }
+            other => panic!("expected the run first, by its 1.2%: {other:?}"),
+        }
+        assert!(matches!(&out[2], Line::Process(e) if e.name == "atop"));
+        assert_eq!(out.len(), 3, "closed: the run's members are not listed");
+    }
+
+    #[test]
+    fn an_opened_run_lists_each_member_and_a_single_stays_a_process() {
+        let t = Table { apps: Vec::new(), background: vec![bg(1, "wl-copy", 0.0), bg(2, "wl-copy", 0.0), bg(3, "trayd", 0.0)] };
+        let mut view = View::default();
+        view.opened.insert("wl-copy".into());
+        let out = lines(&t, &view);
+        let members = out.iter().filter(|l| matches!(l, Line::Member(e) if e.name == "wl-copy")).count();
+        assert_eq!(members, 2);
+        assert!(out.iter().any(|l| matches!(l, Line::Process(e) if e.name == "trayd")));
     }
 
     /// Five processes in one sandbox are one app, named after it — and

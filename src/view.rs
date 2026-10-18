@@ -21,13 +21,49 @@ use hyprforge_ui::{density, glyph, widgets};
 use iced::widget::{button, canvas, column, container, row, scrollable, stack, text, Space};
 use iced::{Alignment, Background, Border, Element, Length};
 
-pub const NAME_PORTION: u16 = 6;
 pub const CPU_W: f32 = 84.0;
 pub const MEM_W: f32 = 104.0;
 pub const DISK_W: f32 = 104.0;
 pub const GPU_W: f32 = 84.0;
 pub const PID_W: f32 = 84.0;
 pub const USER_W: f32 = 120.0;
+/// The Processes list's minute of CPU.
+pub const SPARK_W: f32 = 110.0;
+/// Each figure's column in a narrow list.
+pub const NARROW_W: f32 = 92.0;
+
+/// A row's figures, whatever it is a row of: an app, a run of one name,
+/// or a process.
+pub struct Figures {
+    pub cpu: Option<f32>,
+    pub memory: u64,
+    pub disk: Option<f64>,
+    pub net: Option<f64>,
+    pub gpu: (Option<f32>, Vec<String>),
+}
+
+/// The name a run of [`Line::Same`] is opened by.
+fn name_of(members: &[Entry]) -> String {
+    members.first().map(|m| m.name.clone()).unwrap_or_default()
+}
+
+/// A figure on a tint as deep as `share` (0 to 1) — the heat the
+/// Processes list draws its CPU, memory and GPU in. The info colour,
+/// never the accent: the accent means selected. Nothing below half a
+/// percent is tinted, so an idle list is a quiet one.
+pub fn heat_cell<'a, Message: 'a>(content: String, share: f32, width: f32, s: FontScale) -> Element<'a, Message> {
+    let alpha = if share <= 0.005 { 0.0 } else { (0.06 + share * 1.6).min(0.5) };
+    container(widgets::scaled_text(content, density::ROW_TEXT_BASE, s).font(theme::mono_font()))
+        .width(Length::Fixed(s.apply(width)))
+        .padding([2.0, spacing::SM])
+        .align_x(Alignment::End)
+        .style(move |_t: &iced::Theme| container::Style {
+            background: (alpha > 0.0).then(|| Background::Color(iced::Color { a: alpha, ..theme::info() })),
+            border: Border { radius: density::inner_radius().into(), ..Border::default() },
+            ..container::Style::default()
+        })
+        .into()
+}
 
 fn scale() -> FontScale {
     FontScale(theme::active().font_scale)
@@ -293,18 +329,89 @@ impl App {
             .into()
     }
 
-    fn processes(&self, s: FontScale) -> Element<'_, Message> {
-        let heads = row![
-            self.column_head("Name", Column::Name, Length::FillPortion(NAME_PORTION), false, s),
-            self.column_head("CPU", Column::Cpu, Length::Fixed(s.apply(CPU_W)), true, s),
-            self.column_head("Memory", Column::Memory, Length::Fixed(s.apply(MEM_W)), true, s),
-            self.column_head("Disk", Column::Disk, Length::Fixed(s.apply(DISK_W)), true, s),
-            self.column_head("Network", Column::Network, Length::Fixed(s.apply(DISK_W)), true, s),
-            self.column_head("GPU", Column::Gpu, Length::Fixed(s.apply(GPU_W)), true, s),
-            self.column_head("PID", Column::Pid, Length::Fixed(s.apply(PID_W)), true, s),
-            self.column_head("User", Column::User, Length::Fixed(s.apply(USER_W)), false, s),
+    /// The machine's total over a column's head, as Task Manager draws
+    /// it: "7%" above CPU says "of what" before the eye reaches a row.
+    /// Pressing it sorts, as every head does.
+    fn total_head(&self, total: String, label: &'static str, column: Column, width: f32, warn: bool, s: FontScale) -> Element<'_, Message> {
+        let sort = self.view.sort;
+        let marker = if sort.column == column { if sort.descending { " ↓" } else { " ↑" } } else { "" };
+        let ink = if warn { theme::warning() } else { theme::text() };
+        let body = column![
+            widgets::scaled_text(total, density::ROW_TEXT_BASE, s).font(theme::mono_font()).color(ink),
+            widgets::meta_text(format!("{label}{marker}"), density::META_TEXT_BASE, s),
         ]
-        .padding([0.0, spacing::SM]);
+        .align_x(Alignment::End);
+        button(container(body).width(Length::Fill).align_x(Alignment::End))
+            .padding([spacing::XS, spacing::SM])
+            .width(Length::Fixed(s.apply(width)))
+            .on_press(Message::Sort(column))
+            .style(|t, status| widgets::selectable_row_style(t, status, false))
+            .into()
+    }
+
+    /// The machine's totals, as the heads show them: CPU, memory used,
+    /// every disk's reads and writes, every interface both ways, and the
+    /// busiest GPU.
+    fn totals_text(&self) -> [(String, bool); 5] {
+        let t = self.totals;
+        let memory = if t.memory_total == 0 { None } else { Some(t.memory_used as f32 / t.memory_total as f32 * 100.0) };
+        let disk: f64 = self.disk_rates.iter().map(|(_, r)| r.read + r.write).sum();
+        let net: f64 = self.net_rates.iter().map(|(_, r)| r.rx + r.tx).sum();
+        let gpu = self.machine.gpus.iter().filter_map(|g| self.gpu_busy(g)).fold(None, |m: Option<f32>, v| Some(m.map_or(v, |m| m.max(v))));
+        [
+            (percent(t.cpu.map(|c| c * 100.0)), false),
+            (percent(memory), false),
+            // Amber while the machine is waiting on the disk: the rate can
+            // be small and still be the reason things are slow.
+            (rate(Some(disk)), self.overview.split[4] > 0.1),
+            (rate(Some(net)), false),
+            (percent(gpu), false),
+        ]
+    }
+
+    /// The column a narrow list keeps after CPU and Memory, and its head:
+    /// pressing it steps to the next of Disk, Network and GPU.
+    fn narrow_head(&self, totals: &[(String, bool); 5], s: FontScale) -> Element<'_, Message> {
+        let (i, label, next) = match self.narrow_column {
+            Column::Disk => (2, "Disk", Column::Network),
+            Column::Network => (3, "Network", Column::Gpu),
+            _ => (4, "GPU", Column::Disk),
+        };
+        let (total, warn) = totals[i].clone();
+        let body = column![
+            widgets::scaled_text(total, density::ROW_TEXT_BASE, s).font(theme::mono_font()).color(if warn { theme::warning() } else { theme::text() }),
+            widgets::meta_text(format!("{label} ⇄"), density::META_TEXT_BASE, s),
+        ]
+        .align_x(Alignment::End);
+        button(container(body).width(Length::Fill).align_x(Alignment::End))
+            .padding([spacing::XS, spacing::SM])
+            .width(Length::Fixed(s.apply(NARROW_W)))
+            .on_press(Message::NarrowColumn(next))
+            .style(|t, status| widgets::selectable_row_style(t, status, false))
+            .into()
+    }
+
+    fn processes(&self, s: FontScale) -> Element<'_, Message> {
+        let wide = self.fit() == Fit::Full;
+        let totals = self.totals_text();
+        let head = |i: usize, label, column, width| {
+            let (total, warn) = totals[i].clone();
+            self.total_head(total, label, column, width, warn, s)
+        };
+        let mut heads = row![self.column_head("Name", Column::Name, Length::Fill, false, s)].align_y(Alignment::End);
+        if wide {
+            heads = heads
+                .push(container(widgets::meta_text("Last minute", density::META_TEXT_BASE, s)).width(Length::Fixed(s.apply(SPARK_W))).padding([spacing::XS, spacing::SM]))
+                .push(head(0, "CPU", Column::Cpu, CPU_W))
+                .push(head(1, "Memory", Column::Memory, MEM_W))
+                .push(head(2, "Disk", Column::Disk, DISK_W))
+                .push(head(3, "Network", Column::Network, DISK_W))
+                .push(head(4, "GPU", Column::Gpu, GPU_W))
+                .push(self.column_head("PID", Column::Pid, Length::Fixed(s.apply(PID_W)), true, s));
+        } else {
+            heads = heads.push(head(0, "CPU", Column::Cpu, NARROW_W)).push(head(1, "Memory", Column::Memory, NARROW_W)).push(self.narrow_head(&totals, s));
+        }
+        let heads = heads.padding([0.0, spacing::SM]);
 
         let lines = model::lines(&self.table, &self.view);
         let mut list = column![].spacing(1.0).padding([spacing::XS, spacing::SM]);
@@ -315,12 +422,34 @@ impl App {
             list = list.push(container(widgets::hint_text("Nothing matches the search.", s)).padding(spacing::MD));
         }
         for line in lines {
-            list = list.push(self.line(line, s));
+            list = list.push(self.line(line, wide, s));
         }
-        column![heads, widgets::divider(), scrollable(list).height(Length::Fill)].height(Length::Fill).into()
+        let mut page = column![heads, widgets::divider(), scrollable(list).height(Length::Fill)].height(Length::Fill);
+        if let Some(bar) = self.selection_bar(wide, s) {
+            page = page.push(bar);
+        }
+        page.into()
     }
 
-    fn line(&self, line: Line, s: FontScale) -> Element<'_, Message> {
+    /// The name an app is shown by: its launcher entry's, when one is
+    /// installed for its window class, or the process's own.
+    pub(crate) fn app_label(&self, app: &model::App) -> String {
+        match (&self.desktop, &app.flatpak) {
+            // A Flatpak's lead is already named after its app.
+            (_, Some(_)) => app.lead.name.clone(),
+            (Some(d), None) => hyprforge_procman::app_history::entry(&d.db, &app.class).map_or_else(|| app.lead.name.clone(), |a| a.name.clone()),
+            (None, None) => app.lead.name.clone(),
+        }
+    }
+
+    fn line(&self, line: Line, wide: bool, s: FontScale) -> Element<'_, Message> {
+        let chevron = |open: bool, press: Message| {
+            button(glyph::nav(if open { glyph::Nav::Down } else { glyph::Nav::Forward }, s.apply(16.0), theme::text_dim()))
+                .padding(0)
+                .on_press(press)
+                .style(|t, status| widgets::selectable_row_style(t, status, false))
+        };
+        let caption = |content: String, selected: bool| widgets::clamped_text(content, 1).size(s.apply(density::META_TEXT_BASE)).width(Length::Fill).color(ink(selected));
         match line {
             Line::Heading { label, count } => container(widgets::section_label(&format!("{label} ({count})"), s))
                 .padding(iced::Padding { top: spacing::SM + spacing::XS, right: spacing::SM, bottom: spacing::XS, left: spacing::SM })
@@ -328,39 +457,98 @@ impl App {
             Line::App { app, open } => {
                 let id = app.lead.id;
                 let selected = self.selected == Some(id);
-                let chevron = button(glyph::nav(if open { glyph::Nav::Down } else { glyph::Nav::Forward }, s.apply(16.0), theme::text_dim()))
-                    .padding(0)
-                    .on_press(Message::Toggle(id))
-                    .style(|t, status| widgets::selectable_row_style(t, status, false));
-                let mut name = column![widgets::scaled_text(app.lead.name.clone(), density::ROW_TEXT_BASE, s)];
-                let windows = if app.windows > 1 { format!(" · {} windows", app.windows) } else { String::new() };
-                let sandbox = match (&app.flatpak, app.windows) {
-                    (Some(_), 0) => "Flatpak · no window".to_string(),
-                    (Some(_), _) => " · Flatpak".to_string(),
-                    (None, _) => String::new(),
-                };
-                let caption = format!("{}{windows}{sandbox}", app.title);
-                if !caption.is_empty() {
-                    name = name.push(widgets::clamped_text(caption, 1).size(s.apply(density::META_TEXT_BASE)).width(Length::Fill).color(ink(selected)));
-                }
-                let name = row![chevron, name].spacing(spacing::XS).align_y(Alignment::Center);
+                let label = self.app_label(&app);
                 let count = app.members.len();
-                let user = if count > 1 { format!("{} · {count}", app.lead.user) } else { app.lead.user.clone() };
-                self.row(id, name.into(), app.cpu(), app.private_bytes(), (app.disk(), app.net()), (app.gpu(), app.gpu_cards()), id.pid, user, s)
+                // Under the name: what it is besides its name — the
+                // program, when that differs, and the window's title —
+                // and how much of it there is.
+                let mut parts: Vec<String> = Vec::new();
+                if wide {
+                    if label != app.lead.name {
+                        parts.push(app.lead.name.clone());
+                    }
+                    if !app.title.is_empty() && app.title != label {
+                        parts.push(app.title.clone());
+                    }
+                }
+                match (&app.flatpak, app.windows) {
+                    (Some(_), 0) => parts.push("Flatpak · no window".to_string()),
+                    (Some(_), _) => parts.push("Flatpak".to_string()),
+                    (None, n) if n > 1 => parts.push(format!("{n} windows")),
+                    _ => {}
+                }
+                if count > 1 {
+                    parts.push(format!("{count} processes"));
+                }
+                if !wide {
+                    parts.push(id.pid.to_string());
+                }
+                let class = app.flatpak.as_deref().unwrap_or(&app.class);
+                let mut title = row![widgets::clamped_text(label, 1).size(s.apply(density::ROW_TEXT_BASE)).width(Length::Shrink)].spacing(spacing::SM).align_y(Alignment::Center);
+                if !app.lead.own {
+                    title = title.push(widgets::chip(app.lead.user.clone(), widgets::Tint::Dim, s));
+                }
+                let name = row![
+                    chevron(open, Message::Toggle(id)),
+                    crate::app_icons::view(self.icons.peek(class), s.apply(crate::app_icons::SIDE as f32)),
+                    column![title, caption(parts.join(" · "), selected)],
+                ]
+                .spacing(spacing::SM)
+                .align_y(Alignment::Center);
+                let figures = Figures { cpu: app.cpu(), memory: app.private_bytes(), disk: app.disk(), net: app.net(), gpu: (app.gpu(), app.gpu_cards()) };
+                self.row(id, name.into(), figures, self.app_cpu.get(&id), Some(Message::Select(id)), wide, s)
+            }
+            Line::Same { name, members, open } => {
+                let id = members[0].id;
+                let selected = members.iter().any(|m| self.selected == Some(m.id));
+                let mut title = row![widgets::clamped_text(name.clone(), 1).size(s.apply(density::ROW_TEXT_BASE)).width(Length::Shrink), widgets::chip(format!("× {}", members.len()), widgets::Tint::Dim, s)]
+                    .spacing(spacing::SM)
+                    .align_y(Alignment::Center);
+                if let Some(user) = members.iter().find(|m| !m.own).map(|m| m.user.clone()) {
+                    title = title.push(widgets::chip(user, widgets::Tint::Dim, s));
+                }
+                let name_col: Element<'_, Message> = if wide { title.into() } else { column![title, caption(format!("{} processes", members.len()), selected)].into() };
+                let name = row![chevron(open, Message::OpenRun(name.clone())), name_col].spacing(spacing::SM).align_y(Alignment::Center);
+                let gpu: Vec<f32> = members.iter().filter_map(|m| m.gpu).collect();
+                let figures = Figures {
+                    cpu: members.iter().map(|m| m.cpu).sum(),
+                    memory: members.iter().map(|m| m.private_bytes).sum(),
+                    disk: members.iter().map(|m| m.disk).sum(),
+                    net: members.iter().map(|m| m.net).sum(),
+                    gpu: ((!gpu.is_empty()).then(|| gpu.iter().sum::<f32>().min(100.0)), Vec::new()),
+                };
+                self.row(id, name.into(), figures, None, Some(Message::OpenRun(name_of(&members))), wide, s)
             }
             Line::Member(e) => {
-                let name = row![Space::new().width(Length::Fixed(s.apply(16.0) + spacing::XS * 2.0)), self.entry_name(&e, s)].align_y(Alignment::Center);
-                self.row(e.id, name.into(), e.cpu, e.private_bytes, (e.disk, e.net), (e.gpu, e.gpu_cards.clone()), e.id.pid, e.user.clone(), s)
+                let name = row![Space::new().width(Length::Fixed(s.apply(16.0) + spacing::SM)), self.process_name(&e, wide, s)].align_y(Alignment::Center);
+                let figures = Figures { cpu: e.cpu, memory: e.private_bytes, disk: e.disk, net: e.net, gpu: (e.gpu, e.gpu_cards.clone()) };
+                self.row(e.id, name.into(), figures, self.process_history.get(&e.id), Some(Message::Select(e.id)), wide, s)
             }
             Line::Process(e) => {
-                let name = self.entry_name(&e, s);
-                self.row(e.id, name, e.cpu, e.private_bytes, (e.disk, e.net), (e.gpu, e.gpu_cards.clone()), e.id.pid, e.user.clone(), s)
+                let name = self.process_name(&e, wide, s);
+                let figures = Figures { cpu: e.cpu, memory: e.private_bytes, disk: e.disk, net: e.net, gpu: (e.gpu, e.gpu_cards.clone()) };
+                self.row(e.id, name, figures, self.process_history.get(&e.id), Some(Message::Select(e.id)), wide, s)
             }
         }
     }
 
+    /// A process's name, its state, and whose it is when it is not this
+    /// user's — the column the User head used to be. Narrow, its pid
+    /// goes under it, since there is no PID column.
+    fn process_name(&self, e: &Entry, wide: bool, s: FontScale) -> Element<'_, Message> {
+        let mut name = row![self.entry_name(e, s)].spacing(spacing::SM).align_y(Alignment::Center);
+        if !e.own {
+            name = name.push(widgets::chip(e.user.clone(), widgets::Tint::Dim, s));
+        }
+        if wide {
+            return name.into();
+        }
+        let selected = self.selected == Some(e.id);
+        column![name, widgets::clamped_text(e.id.pid.to_string(), 1).size(s.apply(density::META_TEXT_BASE)).color(ink(selected))].into()
+    }
+
     pub fn entry_name(&self, e: &Entry, s: FontScale) -> Element<'_, Message> {
-        let mut name = row![widgets::scaled_text(e.name.clone(), density::ROW_TEXT_BASE, s)].spacing(spacing::SM).align_y(Alignment::Center);
+        let mut name = row![widgets::clamped_text(e.name.clone(), 1).size(s.apply(density::ROW_TEXT_BASE)).width(Length::Shrink)].spacing(spacing::SM).align_y(Alignment::Center);
         match e.state {
             'T' | 't' => name = name.push(widgets::chip("Frozen", widgets::Tint::Info, s)),
             'Z' => name = name.push(widgets::chip("Ended, not collected", widgets::Tint::Dim, s)),
@@ -373,36 +561,111 @@ impl App {
         name.into()
     }
 
+    /// One row: the name, a minute of CPU, then the figures — CPU, memory
+    /// and GPU tinted by their share of the machine, so the heavy rows
+    /// stand out before a number is read.
     #[allow(clippy::too_many_arguments)]
-    fn row<'a>(&self, id: Id, name: Element<'a, Message>, cpu: Option<f32>, memory: u64, (disk, net): (Option<f64>, Option<f64>), gpu: (Option<f32>, Vec<String>), pid: i32, user: String, s: FontScale) -> Element<'a, Message> {
+    fn row<'a>(&'a self, id: Id, name: Element<'a, Message>, f: Figures, minute: Option<&'a Series>, press: Option<Message>, wide: bool, s: FontScale) -> Element<'a, Message> {
         let selected = self.selected == Some(id);
-        let cell = |content: String, width: f32| {
-            container(widgets::scaled_text(content, density::ROW_TEXT_BASE, s).font(theme::mono_font()))
+        let plain = |content: String, width: f32, dim: bool| -> Element<'a, Message> {
+            // Dim reads as gone on the accent, so a selected row's quiet
+            // figures take the row's own ink.
+            container(widgets::scaled_text(content, density::ROW_TEXT_BASE, s).font(theme::mono_font()).color(if dim && !selected { theme::text_dim() } else { theme::text() }))
                 .width(Length::Fixed(s.apply(width)))
                 .padding([0.0, spacing::SM])
                 .align_x(Alignment::End)
+                .into()
         };
-        let line = row![
-            container(name).width(Length::FillPortion(NAME_PORTION)).padding([0.0, spacing::SM]),
-            cell(percent(cpu), CPU_W),
-            cell(bytes(memory), MEM_W),
-            cell(rate(disk), DISK_W),
-            // Only Show everything's helper counts it, for anyone's.
-            cell(rate(net), DISK_W),
-            // Which cards, and the load where the driver says; no GPU
-            // open is blank, not 0 %, as Task Manager draws it.
-            cell(gpu_cell(&gpu), GPU_W),
-            cell(pid.to_string(), PID_W),
-            container(widgets::meta_text(user, density::ROW_TEXT_BASE, s).color(ink(selected))).width(Length::Fixed(s.apply(USER_W))).padding([0.0, spacing::SM]),
-        ]
-        .align_y(Alignment::Center);
+        let total = self.totals.memory_total.max(1) as f32;
+        let cpu = heat_cell(percent(f.cpu), f.cpu.unwrap_or(0.0) / 25.0, if wide { CPU_W } else { NARROW_W }, s);
+        let memory = heat_cell(bytes(f.memory), f.memory as f32 / total, if wide { MEM_W } else { NARROW_W }, s);
+        let quiet = |v: Option<f64>| v.is_none_or(|v| v <= 0.0);
+        // No GPU open is blank, not 0 %, as Task Manager draws it.
+        let gpu = heat_cell(gpu_cell(&f.gpu), f.gpu.0.unwrap_or(0.0) / 100.0, if wide { GPU_W } else { NARROW_W }, s);
+        let mut line = row![container(name).width(Length::Fill).padding([0.0, spacing::SM])].align_y(Alignment::Center);
+        if wide {
+            let spark: Element<'a, Message> = match minute {
+                Some(series) => container(
+                    canvas(Graph { series, ceiling: series.values().fold(0.02f32, f32::max), line: theme::text_dim(), grid: iced::Color::TRANSPARENT, motion: None })
+                        .width(Length::Fill)
+                        .height(Length::Fixed(s.apply(18.0))),
+                )
+                .width(Length::Fixed(s.apply(SPARK_W)))
+                .padding([0.0, spacing::SM])
+                .into(),
+                None => Space::new().width(Length::Fixed(s.apply(SPARK_W))).into(),
+            };
+            line = line
+                .push(spark)
+                .push(cpu)
+                .push(memory)
+                .push(plain(rate(f.disk), DISK_W, quiet(f.disk)))
+                // Only Show everything's helper counts it, for anyone's.
+                .push(plain(rate(f.net), DISK_W, quiet(f.net)))
+                .push(gpu)
+                .push(plain(id.pid.to_string(), PID_W, true));
+        } else {
+            let third = match self.narrow_column {
+                Column::Disk => plain(rate(f.disk), NARROW_W, quiet(f.disk)),
+                Column::Network => plain(rate(f.net), NARROW_W, quiet(f.net)),
+                _ => gpu,
+            };
+            line = line.push(cpu).push(memory).push(third);
+        }
         let row = button(line)
             .padding([spacing::XS, 0.0])
             .width(Length::Fill)
             .height(Length::Shrink)
-            .on_press(Message::Select(id))
+            .on_press_maybe(press)
             .style(move |t, status| widgets::selectable_row_style(t, status, selected));
         iced::widget::mouse_area(row).on_right_press(Message::OpenMenu(crate::menus::MenuFor::Process(id))).into()
+    }
+
+    /// What can be done to the selection, with the selection: its name
+    /// and figures, then the actions — End task always last. Narrow, the
+    /// rarer ones fold into More, which opens the row's own menu.
+    fn selection_bar(&self, wide: bool, s: FontScale) -> Option<Element<'_, Message>> {
+        let id = self.selected?;
+        let app = self.table.apps.iter().find(|a| a.lead.id == id);
+        let entry = self.entry(id)?;
+        let (label, summary) = match app {
+            Some(a) => (self.app_label(a), format!("{} processes · {} CPU · {}", a.members.len(), percent(a.cpu()), bytes(a.private_bytes()))),
+            None => (entry.name.clone(), format!("PID {} · {} CPU · {}", id.pid, percent(entry.cpu), bytes(entry.private_bytes))),
+        };
+        let mut bar = row![widgets::clamped_text(label, 1).size(s.apply(density::ROW_TEXT_BASE)).width(Length::Shrink)].spacing(spacing::SM).align_y(Alignment::Center);
+        if wide {
+            bar = bar.push(widgets::meta_text(summary, density::META_TEXT_BASE, s).font(theme::mono_font()));
+        }
+        bar = bar.push(Space::new().width(Length::Fill));
+        if app.is_some_and(|a| a.windows > 0) {
+            bar = bar.push(widgets::secondary_button("Switch to").on_press(Message::SwitchTo));
+        }
+        if wide {
+            let frozen = matches!(entry.state, 'T' | 't');
+            let freeze = if frozen {
+                widgets::secondary_button("Resume").on_press(Message::Freeze(false))
+            } else {
+                widgets::secondary_button("Freeze").on_press_maybe((!self.critical.contains(&id.pid)).then_some(Message::Freeze(true)))
+            };
+            bar = bar
+                .push(widgets::secondary_button("Limits…").on_press(Message::OpenLimits(id)))
+                .push(freeze)
+                .push(widgets::secondary_button("Kill").on_press(Message::Ask(How::Force)));
+        } else {
+            bar = bar.push(widgets::secondary_button("More").on_press(Message::OpenMenu(crate::menus::MenuFor::Process(id))));
+        }
+        bar = bar.push(widgets::primary_button("End task").on_press(Message::Ask(How::Ask)));
+        Some(
+            container(bar)
+                .padding([spacing::SM, spacing::MD])
+                .width(Length::Fill)
+                .style(|_t: &iced::Theme| container::Style {
+                    background: Some(Background::Color(surface::card())),
+                    border: Border { width: 1.0, color: surface::card_border(), ..Border::default() },
+                    ..container::Style::default()
+                })
+                .into(),
+        )
     }
 
     fn status(&self, s: FontScale) -> Element<'_, Message> {
@@ -433,30 +696,16 @@ impl App {
         } else {
             bar = bar.push(Space::new().width(Length::Fill));
         }
+        // The selection's actions are in its own bar above this line
+        // ([`App::selection_bar`]); the list's switches stay here.
         if self.tab == Tab::Processes {
-            let chosen = self.selected;
-            let is_app = chosen.is_some_and(|id| self.table.apps.iter().any(|a| a.lead.id == id && a.windows > 0));
-            if is_app {
-                bar = bar.push(widgets::secondary_button("Switch to").on_press(Message::SwitchTo));
-            }
-            let frozen = chosen.and_then(|id| self.entry(id)).is_some_and(|e| matches!(e.state, 'T' | 't'));
-            let freeze = if frozen {
-                widgets::secondary_button("Resume").on_press(Message::Freeze(false))
-            } else {
-                let allowed = chosen.filter(|id| !self.critical.contains(&id.pid));
-                widgets::secondary_button("Freeze").on_press_maybe(allowed.map(|_| Message::Freeze(true)))
-            };
             // Efficiency mode, when its service is installed: apps with no
             // window on screen give way for CPU to the ones that have.
             if let Some(on) = self.efficiency {
                 let toggle = widgets::toggle(on, s).label("Efficiency mode");
                 bar = bar.push(if self.efficiency_busy { toggle } else { toggle.on_toggle(Message::Efficiency) });
             }
-            bar = bar
-                .push(widgets::toggle(self.view.show_kernel, s).label("Kernel threads").on_toggle(Message::ShowKernel))
-                .push(freeze)
-                .push(widgets::secondary_button("Kill").on_press_maybe(chosen.map(|_| Message::Ask(How::Force))))
-                .push(widgets::primary_button("End task").on_press_maybe(chosen.map(|_| Message::Ask(How::Ask))));
+            bar = bar.push(widgets::toggle(self.view.show_kernel, s).label("Kernel threads").on_toggle(Message::ShowKernel));
         }
         container(bar).padding([spacing::SM, spacing::MD]).style(|_t: &iced::Theme| container::Style {
             background: Some(Background::Color(surface::sidebar())),

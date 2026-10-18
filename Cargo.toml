@@ -25,7 +25,7 @@ gui = ["dbus", "desktop", "dep:iced", "dep:hyprforge-ui", "dep:hyprforge-look", 
 # The helper's service and its clients; systemd and logind.
 dbus = ["dep:zbus", "dep:tokio"]
 # What only a desktop session has: Hyprland's startup programs, app names.
-desktop = ["dep:hyprforge-session", "dep:hyprforge-mime"]
+desktop = ["dep:hyprforge-session", "dep:hyprforge-mime", "dep:hyprforge-icons"]
 # The terminal UI.
 # (crossterm comes through ratatui's own re-export, so the two can never
 # disagree on its version; dbus for opening the journal through the
@@ -91,7 +91,11 @@ hyprforge-paths = "0.1"
 # App names for window classes: on Wayland a class is the app id, which
 # is the launcher entry's file name — and the entry has the name to show.
 hyprforge-mime = { version = "0.1", optional = true }
-# `canvas` for the history graphs, on top of the suite's base set.
+# And their icons, through the configured theme and what it inherits —
+# the entry names one; this finds the file.
+hyprforge-icons = { version = "0.1", optional = true }
+# `canvas` for the history graphs, `image` and `svg` for apps' icons, on
+# top of the suite's base set.
 iced = { version = "0.14", optional = true, default-features = false, features = [
     "wgpu",
     "tiny-skia",
@@ -102,6 +106,8 @@ iced = { version = "0.14", optional = true, default-features = false, features =
     "wayland",
     "tokio",
     "canvas",
+    "image",
+    "svg",
 ] }
 tokio = { version = "1.53", optional = true, features = ["rt-multi-thread", "macros", "sync", "time"] }
 # getpwuid_r for user names, and pidfd_open / pidfd_send_signal, so a

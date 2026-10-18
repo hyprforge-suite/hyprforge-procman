@@ -81,11 +81,15 @@ pub fn save(path: &Path, history: &History) -> Result<(), String> {
 /// What to call a window class: its launcher entry's `Name=` when one is
 /// installed under that id (exactly, or ignoring case), else the class.
 pub fn app_name(db: &hyprforge_mime::MimeDb, class: &str) -> String {
+    entry(db, class).map(|a| a.name.clone()).unwrap_or_else(|| class.to_owned())
+}
+
+/// The launcher entry for a window class: on Wayland a class is the app
+/// id, which is the entry's file name — exactly, or in another case
+/// (`Steam` is `steam.desktop`).
+pub fn entry<'a>(db: &'a hyprforge_mime::MimeDb, class: &str) -> Option<&'a hyprforge_mime::App> {
     let wanted = format!("{class}.desktop");
-    db.app(&wanted)
-        .or_else(|| db.all_apps().into_iter().find(|a| a.id.eq_ignore_ascii_case(&wanted)))
-        .map(|a| a.name.clone())
-        .unwrap_or_else(|| class.to_owned())
+    db.app(&wanted).or_else(|| db.all_apps().into_iter().find(|a| a.id.eq_ignore_ascii_case(&wanted)))
 }
 
 /// One app's slice of one reading.

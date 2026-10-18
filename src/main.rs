@@ -6,6 +6,7 @@
 //! selected, and the one question this app asks before acting — "end
 //! this?".
 
+mod app_icons;
 mod crashes_view;
 mod details;
 mod limits_view;
@@ -307,6 +308,11 @@ pub enum Message {
     CrashRange(usize),
     /// The limits card: open it on a process's app, edit, apply, close.
     OpenLimits(Id),
+    /// Open or close a run of same-named background processes.
+    OpenRun(String),
+    /// Which column a narrow Processes list keeps: Disk, Network or GPU.
+    NarrowColumn(Column),
+    DesktopLoaded(app_icons::Desktop),
     LimitsMemory(String),
     LimitsCpu(String),
     ApplyLimits,
@@ -408,8 +414,16 @@ pub struct App {
     /// The least the battery has drawn while this window watched.
     pub power_floor: hyprforge_procman::power::Floor,
     pub recorded: recorded_view::RecordedTab,
-    /// Installed apps, for showing a window class by its app's name.
-    pub apps_db: Option<hyprforge_mime::MimeDb>,
+    /// Installed apps, for showing a window class by its app's name and
+    /// icon; loaded off the window's thread at start.
+    pub desktop: Option<app_icons::Desktop>,
+    /// Each app's icon, looked up once per window class ([`app_icons`]).
+    pub icons: app_icons::Cache,
+    /// A minute of each app's CPU, all its processes together, for the
+    /// Processes rows' lines — by its lead, as the row is.
+    pub app_cpu: HashMap<Id, hyprforge_procman::history::Series>,
+    /// The column a narrow Processes list keeps besides CPU and Memory.
+    pub narrow_column: Column,
     history_saved: std::time::Instant,
     /// The btop/atop-verbose view: the Overview tab and the extra columns.
     /// Machine-wide rates the Overview shows.
@@ -674,7 +688,10 @@ impl App {
             watts: HashMap::new(),
             power_floor: Default::default(),
             recorded: recorded_view::RecordedTab::default(),
-            apps_db: None,
+            desktop: None,
+            icons: app_icons::Cache::default(),
+            app_cpu: HashMap::new(),
+            narrow_column: Column::Gpu,
             history_saved: std::time::Instant::now(),
             overview: Overview::default(),
             counters: Default::default(),
@@ -696,7 +713,7 @@ impl App {
             reading: true,
         };
         let scan = app.gpu_scan.clone();
-        (app, Task::batch([read(fs, None, None, scan, false, false), efficiency_state()]))
+        (app, Task::batch([read(fs, None, None, scan, false, false), efficiency_state(), Task::perform(app_icons::load(), Message::DesktopLoaded)]))
     }
 
     fn load_services(&mut self) -> Task<Message> {
@@ -788,6 +805,16 @@ impl App {
         match &self.everything {
             Everything::Open(system) => Some(system.clone()),
             _ => None,
+        }
+    }
+
+    /// Looks up the icon for every app on the list that has not been
+    /// asked about — once the launcher entries have arrived.
+    fn find_icons(&mut self) {
+        let Some(desktop) = &self.desktop else { return };
+        for a in &self.table.apps {
+            let class = a.flatpak.as_deref().unwrap_or(&a.class);
+            self.icons.get(desktop, class);
         }
     }
 
@@ -1038,10 +1065,6 @@ impl App {
             }
             Message::Tab(tab) => {
                 self.tab = tab;
-                // The app list is read once, when history first needs names.
-                if tab == Tab::History && self.apps_db.is_none() {
-                    self.apps_db = Some(hyprforge_mime::MimeDb::load());
-                }
                 match tab {
                     Tab::Services => return self.load_services(),
                     Tab::Startup => return Task::perform(load_startup(), |d| Message::StartupLoaded(Box::new(d))),
@@ -1136,6 +1159,16 @@ impl App {
                 self.selected = Some(id);
             }
             Message::ShowKernel(on) => self.view.show_kernel = on,
+            Message::OpenRun(name) => {
+                if !self.view.opened.remove(&name) {
+                    self.view.opened.insert(name);
+                }
+            }
+            Message::NarrowColumn(column) => self.narrow_column = column,
+            Message::DesktopLoaded(desktop) => {
+                self.desktop = Some(desktop);
+                self.find_icons();
+            }
             Message::Pause(on) => self.paused = on,
             Message::Interval(d) => self.interval = d,
             Message::Ask(how) => self.confirm = self.selected.and_then(|id| self.confirmation(id, how)),
@@ -1456,7 +1489,15 @@ impl App {
                     self.process_history.entry(e.id).or_default().push(cpu / 100.0);
                 }
             }
+            let leads: std::collections::HashSet<Id> = self.table.apps.iter().map(|a| a.lead.id).collect();
+            self.app_cpu.retain(|id, _| leads.contains(id));
+            for a in &self.table.apps {
+                if let Some(cpu) = a.cpu() {
+                    self.app_cpu.entry(a.lead.id).or_default().push(cpu / 100.0);
+                }
+            }
         }
+        self.find_icons();
         // This process and what it runs under, plus the compositor by
         // name, in case this window was started some other way.
         self.critical = model::ancestry(&snapshot, std::process::id() as i32);
@@ -1650,6 +1691,7 @@ mod render {
         hyprforge_ui::theme::init(hyprforge_appearance::look::resolve());
         let runtime = tokio::runtime::Runtime::new().unwrap();
         let (mut app, _) = App::new();
+        app.desktop = Some(runtime.block_on(app_icons::load()));
         app.nvidia = Some(hyprforge_procman::nvidia::query());
         // History in memory only: a test never writes the user's file.
         app.app_history = Ok(Default::default());
@@ -1668,7 +1710,10 @@ mod render {
         draw_at(&mut app, "overview-half", &dir, 770.0, 930.0);
         draw_at(&mut app, "overview-quarter", &dir, 770.0, 455.0);
         app.tab = Tab::Processes;
+        app.selected = app.table.apps.first().map(|a| a.lead.id);
         draw_at(&mut app, "processes-half", &dir, 770.0, 930.0);
+        draw(&mut app, "processes-selected", &dir);
+        app.selected = None;
         app.tab = Tab::Overview;
         app.tab = Tab::Processes;
         draw(&mut app, "processes", &dir);
@@ -1709,7 +1754,7 @@ mod render {
         }
 
         app.tab = Tab::History;
-        app.apps_db = Some(hyprforge_mime::MimeDb::load());
+
         draw(&mut app, "history", &dir);
 
         app.tab = Tab::Startup;

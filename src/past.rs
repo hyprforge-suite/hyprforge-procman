@@ -49,8 +49,8 @@ impl App {
             table = table.push(widgets::hint_text("Nothing recorded yet for this range.", s));
         }
         for (class, u) in apps {
-            let class = match &self.apps_db {
-                Some(db) => hyprforge_procman::app_history::app_name(db, &class),
+            let class = match &self.desktop {
+                Some(d) => hyprforge_procman::app_history::app_name(&d.db, &class),
                 None => class,
             };
             let mono = |v: String, w: f32| container(widgets::scaled_text(v, density::ROW_TEXT_BASE, s).font(theme::mono_font())).width(Length::Fixed(s.apply(w))).align_x(Alignment::End);
