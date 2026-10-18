@@ -77,8 +77,8 @@ fn count(per_second: f64) -> String {
 }
 
 /// A line over the last minute, in a card's width.
-fn line_graph<'a>(series: &'a hyprforge_procman::history::Series, ceiling: f32, height: f32, s: FontScale) -> Element<'a, Message> {
-    canvas(Graph { series, ceiling, line: theme::text(), grid: surface::card_border() }).width(Length::Fill).height(Length::Fixed(s.apply(height))).into()
+fn line_graph<'a>(series: &'a hyprforge_procman::history::Series, ceiling: f32, height: f32, motion: Option<hyprforge_procman::graph::Motion>, s: FontScale) -> Element<'a, Message> {
+    canvas(Graph { series, ceiling, line: theme::text(), grid: surface::card_border(), motion }).width(Length::Fill).height(Length::Fixed(s.apply(height))).into()
 }
 
 /// A figure big enough to read across the room, and what it is of.
@@ -176,7 +176,7 @@ impl App {
         );
         let now = row![
             container(figure(percent(self.totals.cpu.map(|c| c * 100.0)), "now", s)).width(Length::Shrink),
-            line_graph(&self.history.cpu, 1.0, 64.0, s),
+            line_graph(&self.history.cpu, 1.0, 64.0, self.motion(), s),
         ]
         .spacing(spacing::MD)
         .align_y(Alignment::End);
@@ -241,7 +241,7 @@ impl App {
             widgets::meta_text(format!("of {}", bytes(t.memory_total)), density::META_TEXT_BASE, s),
             // Scaled to the whole of memory, so the line's height is how
             // full it is, not how much it wobbled.
-            line_graph(&self.history.memory, 1.0, 48.0, s),
+            line_graph(&self.history.memory, 1.0, 48.0, self.motion(), s),
             bar,
             key(colors[0], "programs", bytes(d.anon), s),
             key(colors[1], "file cache", bytes(cache), s),
@@ -270,7 +270,7 @@ impl App {
             let busy = if asleep { "asleep".to_string() } else { percent(self.gpu_busy(g)) };
             let mut col = column![widgets::scaled_text(name, density::ROW_TEXT_BASE, s), figure(busy, if asleep { "" } else { "busy" }, s)].spacing(spacing::XS);
             if let Some(series) = self.history.gpus.get(&g.card) {
-                col = col.push(line_graph(series, 1.0, 48.0, s));
+                col = col.push(line_graph(series, 1.0, 48.0, self.motion(), s));
             }
             let (vram, celsius, watts) = match reading {
                 Some(r) => (r.vram_used.zip(r.vram_total), r.celsius, r.watts),
@@ -302,8 +302,8 @@ impl App {
         let reads = self.history.reads.last().unwrap_or(0.0);
         let writes = self.history.writes.last().unwrap_or(0.0);
         let graph = iced::widget::stack![
-            canvas(Graph { series: &self.history.writes, ceiling, line: theme::text(), grid: surface::card_border() }).width(Length::Fill).height(Length::Fixed(s.apply(72.0))),
-            canvas(Graph { series: &self.history.reads, ceiling, line: theme::info(), grid: Color::TRANSPARENT }).width(Length::Fill).height(Length::Fixed(s.apply(72.0))),
+            canvas(Graph { series: &self.history.writes, ceiling, line: theme::text(), grid: surface::card_border(), motion: self.motion() }).width(Length::Fill).height(Length::Fixed(s.apply(72.0))),
+            canvas(Graph { series: &self.history.reads, ceiling, line: theme::info(), grid: Color::TRANSPARENT, motion: self.motion() }).width(Length::Fill).height(Length::Fixed(s.apply(72.0))),
         ];
         let legend = row![
             key(theme::info(), "read", rate(Some(f64::from(reads))), s),
@@ -359,7 +359,7 @@ impl App {
             let mut block = column![widgets::scaled_text(n.name.clone(), density::META_TEXT_BASE, s)].spacing(2.0);
             if let Some(series) = series {
                 block = block.push(
-                    canvas(Graph { series, ceiling: series.ceiling(64.0 * 1024.0), line: theme::text(), grid: surface::card_border() })
+                    canvas(Graph { series, ceiling: series.ceiling(64.0 * 1024.0), line: theme::text(), grid: surface::card_border(), motion: self.motion() })
                         .width(Length::Fill)
                         .height(Length::Fixed(s.apply(40.0))),
                 );
@@ -399,7 +399,7 @@ impl App {
             let spark: Element<'_, Message> = match self.process_history.get(&e.id) {
                 Some(series) => {
                     let ceiling = series.values().fold(0.02f32, f32::max);
-                    canvas(Graph { series, ceiling, line: theme::text(), grid: Color::TRANSPARENT }).width(Length::Fixed(s.apply(130.0))).height(Length::Fixed(s.apply(18.0))).into()
+                    canvas(Graph { series, ceiling, line: theme::text(), grid: Color::TRANSPARENT, motion: None }).width(Length::Fixed(s.apply(130.0))).height(Length::Fixed(s.apply(18.0))).into()
                 }
                 None => Space::new().width(Length::Fixed(s.apply(130.0))).into(),
             };

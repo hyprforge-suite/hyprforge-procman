@@ -356,7 +356,7 @@ pub struct App {
     /// An end the window was refused, which the helper could do.
     pub admin_offer: Option<Confirm>,
     pub everything: Everything,
-    last_at: Option<std::time::Instant>,
+    pub(crate) last_at: Option<std::time::Instant>,
     gpu_scan: GpuScan,
     /// The NVIDIA card's last answer, and when it was asked.
     pub nvidia: Option<Result<hyprforge_procman::nvidia::Reading, String>>,

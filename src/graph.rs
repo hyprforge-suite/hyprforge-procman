@@ -7,6 +7,61 @@
 use crate::history::{Series, LEN};
 use iced::widget::canvas::{self, Frame, Geometry, Path, Stroke};
 use iced::{mouse, Color, Point, Rectangle, Renderer, Size, Theme};
+use std::time::{Duration, Instant};
+
+/// When the newest reading was taken and how far apart readings are.
+/// Given one, a graph scrolls continuously between readings instead of
+/// jumping a whole step when each arrives: it is drawn from the same
+/// readings, slid left by the share of the interval that has passed.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Motion {
+    pub sampled: Instant,
+    pub interval: Duration,
+}
+
+/// How often a moving graph is redrawn. A minute across a card is about
+/// fifteen pixels a second, so at this rate a line moves half a pixel a
+/// frame — smooth to the eye — at a third of a 90 Hz display's frames,
+/// in a window whose job is noticing what costs CPU.
+pub const FRAME: Duration = Duration::from_millis(33);
+
+impl Motion {
+    /// 0 as a reading arrives, 1 when the next is due — held there if it
+    /// is late, so a slow reading stops the line rather than running it
+    /// past the newest value.
+    pub fn phase(&self, now: Instant) -> f32 {
+        let interval = self.interval.as_secs_f32();
+        if interval <= 0.0 {
+            return 0.0;
+        }
+        (now.saturating_duration_since(self.sampled).as_secs_f32() / interval).clamp(0.0, 1.0)
+    }
+}
+
+/// Where each of `count` readings sits across `width`, newest last.
+///
+/// One interval behind, on purpose: the newest reading enters at the
+/// right edge plus a step and slides in as `phase` runs to 1, so the
+/// edge itself is a point on the line between the last two readings
+/// ([`edge`]). Drawn level with the newest instead, the end of the line
+/// would snap up or down each time a reading landed — smooth sideways,
+/// still jumping. Placed from the right, so a graph with only a few
+/// readings fills in from where the newest is.
+pub fn positions(count: usize, width: f32, phase: f32) -> Vec<f32> {
+    let step = width / (LEN - 1) as f32;
+    let x0 = width - step * count.saturating_sub(1) as f32 + step * (1.0 - phase);
+    (0..count).map(|i| x0 + step * i as f32).collect()
+}
+
+/// The value at the right edge: between the last two readings, `phase`
+/// of the way to the newest.
+pub fn edge(values: &[f32], phase: f32) -> f32 {
+    match values {
+        [.., before, newest] => before + (newest - before) * phase,
+        [only] => *only,
+        [] => 0.0,
+    }
+}
 
 pub struct Graph<'a> {
     pub series: &'a Series,
@@ -15,10 +70,24 @@ pub struct Graph<'a> {
     pub ceiling: f32,
     pub line: Color,
     pub grid: Color,
+    /// Scroll between readings; `None` draws them where they fall, as a
+    /// sparkline or a paused window does.
+    pub motion: Option<Motion>,
 }
 
 impl<Message> canvas::Program<Message> for Graph<'_> {
     type State = ();
+
+    /// While moving, ask for the next frame — only the canvas redraws,
+    /// not the window's view — until the next reading is due. A hidden
+    /// window gets no frames from the compositor, so it costs nothing.
+    fn update(&self, _state: &mut (), event: &canvas::Event, _bounds: Rectangle, _cursor: mouse::Cursor) -> Option<canvas::Action<Message>> {
+        let motion = self.motion?;
+        match event {
+            canvas::Event::Window(iced::window::Event::RedrawRequested(now)) if motion.phase(*now) < 1.0 => Some(canvas::Action::request_redraw_at(*now + FRAME)),
+            _ => None,
+        }
+    }
 
     fn draw(&self, _state: &(), renderer: &Renderer, _theme: &Theme, bounds: Rectangle, _cursor: mouse::Cursor) -> Vec<Geometry> {
         let mut frame = Frame::new(renderer, bounds.size());
@@ -31,25 +100,31 @@ impl<Message> canvas::Program<Message> for Graph<'_> {
         let ceiling = if self.ceiling > 0.0 { self.ceiling } else { 1.0 };
         let values: Vec<f32> = self.series.values().map(|v| (v / ceiling).min(1.0)).collect();
         if values.len() >= 2 {
-            // Placed from the right, so a graph that has only a few
-            // readings fills in from where the newest one is.
-            let step = width / (LEN - 1) as f32;
-            let x0 = width - step * (values.len() - 1) as f32;
-            let point = |i: usize, v: f32| Point::new(x0 + step * i as f32, height - v * (height - 1.0));
+            // Still, the newest reading is at the edge (phase 1); moving,
+            // it slides in from just past it.
+            let phase = self.motion.map_or(1.0, |m| m.phase(Instant::now()));
+            let xs = positions(values.len(), width, phase);
+            let point = |i: usize, v: f32| Point::new(xs[i], height - v * (height - 1.0));
+            let at_edge = Point::new(width, height - edge(&values, phase) * (height - 1.0));
+            // Every reading up to the one before the newest, then the
+            // edge — the newest itself is past it until it slides in.
+            let shown = values.len() - 1;
             let line = Path::new(|b| {
-                for (i, v) in values.iter().enumerate() {
+                for (i, v) in values.iter().take(shown).enumerate() {
                     if i == 0 {
                         b.move_to(point(i, *v));
                     } else {
                         b.line_to(point(i, *v));
                     }
                 }
+                b.line_to(at_edge);
             });
             let area = Path::new(|b| {
-                b.move_to(Point::new(x0, height));
-                for (i, v) in values.iter().enumerate() {
+                b.move_to(Point::new(xs[0], height));
+                for (i, v) in values.iter().take(shown).enumerate() {
                     b.line_to(point(i, *v));
                 }
+                b.line_to(at_edge);
                 b.line_to(Point::new(width, height));
                 b.close();
             });
@@ -146,5 +221,45 @@ impl<Message> canvas::Program<Message> for DayGraph<'_, Message> {
             frame.stroke(&Path::line(Point::new(rule, 0.0), Point::new(rule, height)), Stroke::default().with_color(self.mark).with_width(2.0));
         }
         vec![frame.into_geometry()]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The property that makes it look smooth: a reading about to be
+    /// pushed past sits exactly where its successor appears once the new
+    /// reading arrives — so nothing jumps when a reading lands.
+    #[test]
+    fn a_new_reading_lands_where_the_line_already_was() {
+        let before = positions(10, 590.0, 1.0);
+        let after = positions(11, 590.0, 0.0);
+        for (b, a) in before.iter().zip(&after) {
+            assert!((b - a).abs() < 1e-3, "{b} vs {a}");
+        }
+        assert!((after[9] - 590.0).abs() < 1e-3, "the old newest is at the edge as the new one arrives");
+        assert!(after[10] > 590.0, "and the new one just past it, to slide in");
+    }
+
+    /// The other half: the edge's value moves from the old newest to the
+    /// new one across the interval, so the end of the line never snaps.
+    #[test]
+    fn the_edge_moves_from_one_reading_to_the_next_without_a_jump() {
+        assert_eq!(edge(&[0.2, 0.4], 1.0), 0.4, "still: the newest itself");
+        // A reading of 0.9 lands: the edge starts where it was, at 0.4.
+        assert_eq!(edge(&[0.2, 0.4, 0.9], 0.0), 0.4);
+        assert!((edge(&[0.2, 0.4, 0.9], 0.5) - 0.65).abs() < 1e-6);
+        assert_eq!(edge(&[0.5], 0.3), 0.5);
+    }
+
+    #[test]
+    fn the_phase_runs_from_a_reading_to_the_next_and_holds_if_it_is_late() {
+        let t = Instant::now();
+        let m = Motion { sampled: t, interval: Duration::from_secs(1) };
+        assert_eq!(m.phase(t), 0.0);
+        assert!((m.phase(t + Duration::from_millis(500)) - 0.5).abs() < 1e-3);
+        assert_eq!(m.phase(t + Duration::from_secs(3)), 1.0, "late: held, not run past");
+        assert_eq!(m.phase(t - Duration::from_secs(1)), 0.0);
     }
 }

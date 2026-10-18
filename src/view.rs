@@ -208,6 +208,16 @@ impl App {
             .into()
     }
 
+    /// How the graphs move between readings: from the last one, at the
+    /// refresh interval — or not at all while paused, when nothing new is
+    /// coming and a sliding line would be a lie.
+    pub(crate) fn motion(&self) -> Option<hyprforge_procman::graph::Motion> {
+        if self.paused {
+            return None;
+        }
+        self.last_at.map(|sampled| hyprforge_procman::graph::Motion { sampled, interval: self.interval })
+    }
+
     /// CPU, memory and I/O wait, on every tab: the three a glance at the
     /// header should answer. I/O wait in the warning colour past a tenth,
     /// where it starts to be why things feel slow.
@@ -957,7 +967,7 @@ impl App {
     }
 
     fn graph<'a>(&self, series: &'a Series, ceiling: f32, height: f32) -> Element<'a, Message> {
-        container(canvas(Graph { series, ceiling, line: theme::text(), grid: surface::card_border() }).width(Length::Fill).height(Length::Fixed(height)))
+        container(canvas(Graph { series, ceiling, line: theme::text(), grid: surface::card_border(), motion: self.motion() }).width(Length::Fill).height(Length::Fixed(height)))
             .style(|_t: &iced::Theme| container::Style {
                 background: Some(Background::Color(surface::card())),
                 border: Border { radius: density::inner_radius().into(), width: 1.0, color: surface::card_border() },
