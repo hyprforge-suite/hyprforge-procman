@@ -209,9 +209,9 @@ mod tests {
         let lead = |pid| Entry { id: Id { pid, start: 1 }, own: true, ..Entry::default() };
         let table = Table {
             apps: vec![
-                App { lead: lead(13060), class: "ghostty".into(), title: String::new(), windows: 3, members: vec![lead(13060)], flatpak: None },
-                App { lead: lead(24764), class: "files".into(), title: String::new(), windows: 1, members: vec![lead(24764)], flatpak: None },
-                App { lead: lead(9), class: "bg".into(), title: String::new(), windows: 0, members: vec![lead(9)], flatpak: Some("x".into()) },
+                App { lead: lead(13060), class: "ghostty".into(), title: String::new(), windows: 3, members: vec![lead(13060)], flatpak: None, container: None },
+                App { lead: lead(24764), class: "files".into(), title: String::new(), windows: 1, members: vec![lead(24764)], flatpak: None, container: None },
+                App { lead: lead(9), class: "bg".into(), title: String::new(), windows: 0, members: vec![lead(9)], flatpak: Some("x".into()), container: None },
             ],
             background: Vec::new(),
         };

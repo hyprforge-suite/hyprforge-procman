@@ -318,6 +318,8 @@ pub enum Message {
     OpenRun(String),
     /// Start or stop waiting for a click on another window.
     PickWindow(bool),
+    /// Docker's names for the running containers, or why not.
+    ContainerNames(Result<HashMap<String, (String, String)>, String>),
     /// Which column a narrow Processes list keeps: Disk, Network or GPU.
     NarrowColumn(Column),
     DesktopLoaded(app_icons::Desktop),
@@ -441,6 +443,10 @@ pub struct App {
     pub held_back: std::collections::HashSet<Id>,
     /// Waiting for a click on another window, to select its app.
     pub picking: bool,
+    /// The containers last seen, so Docker is asked again only when
+    /// they change; and what it said.
+    pub container_ids: std::collections::BTreeSet<String>,
+    pub container_names: Result<HashMap<String, (String, String)>, String>,
     /// A window was just picked: bring this one back to the front.
     pub come_back: bool,
     /// The window that was focused when this was opened with
@@ -723,6 +729,8 @@ impl App {
             narrow_column: Column::Gpu,
             held_back: std::collections::HashSet::new(),
             picking: false,
+            container_ids: std::collections::BTreeSet::new(),
+            container_names: Ok(HashMap::new()),
             come_back: false,
             end_focused: END_FOCUSED.get().copied().flatten(),
             history_app: None,
@@ -957,6 +965,19 @@ impl App {
                         self.take(*reading);
                         if std::mem::take(&mut self.come_back) {
                             switch_to(std::process::id() as i32);
+                        }
+                        // Docker is asked for names when the containers
+                        // change, not every refresh: it is a program to
+                        // run, and the answer does not change between.
+                        let ids: std::collections::BTreeSet<String> = self.table.apps.iter().filter_map(|a| a.container.clone()).collect();
+                        if ids != self.container_ids {
+                            self.container_ids = ids.clone();
+                            if !ids.is_empty() {
+                                return Task::perform(
+                                    async { tokio::task::spawn_blocking(hyprforge_procman::containers::names).await.unwrap_or_else(|e| Err(e.to_string())) },
+                                    Message::ContainerNames,
+                                );
+                            }
                         }
                     }
                     Err(e) => self.notice = Some(e),
@@ -1233,6 +1254,7 @@ impl App {
             }
             Message::NarrowColumn(column) => self.narrow_column = column,
             Message::PickWindow(on) => self.picking = on,
+            Message::ContainerNames(names) => self.container_names = names,
             Message::DesktopLoaded(desktop) => {
                 self.desktop = Some(desktop);
                 self.find_icons();
@@ -1509,7 +1531,8 @@ impl App {
         self.take_power(&usage, snapshot.cores.len(), seconds);
         let users = &mut self.users;
         let flatpaks = hyprforge_procman::flatpak::scopes(std::path::Path::new("/sys/fs/cgroup"));
-        self.table = model::table(&snapshot, &usage, &windows, &flatpaks, self.me, &mut |uid| users.name(uid));
+        let containers = hyprforge_procman::containers::scopes(std::path::Path::new("/sys/fs/cgroup"));
+        self.table = model::table(&snapshot, &usage, &windows, &flatpaks, &containers, self.me, &mut |uid| users.name(uid));
         // A window picked: the first reading in which another window has
         // the focus is the click. Its app is selected and this window
         // comes back to the front to show it.
@@ -1839,6 +1862,8 @@ mod render {
             app.take(r);
             std::thread::sleep(Duration::from_millis(500));
         }
+        // Docker's answer as this machine gives it: names, or why not.
+        app.container_names = hyprforge_procman::containers::names();
         draw_sized(&mut app, "overview", &dir, 1420.0);
         // Half and a quarter of this machine's 1600 × 1000 screen, tiled.
         draw_at(&mut app, "overview-half", &dir, 770.0, 930.0);

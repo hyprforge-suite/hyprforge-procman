@@ -77,6 +77,9 @@ pub struct App {
     pub members: Vec<Entry>,
     /// Its Flatpak app id, when it runs in one's sandbox.
     pub flatpak: Option<String>,
+    /// Its Docker container's full id, when it is one — listed under
+    /// Containers rather than Apps, and never with a window.
+    pub container: Option<String>,
 }
 
 impl App {
@@ -122,12 +125,15 @@ pub struct Table {
 
 /// Builds the table from one refresh. `user_name` turns a uid into a
 /// name; `me` is the uid running this; `flatpaks` is each sandboxed
-/// process's app id ([`crate::flatpak::scopes`]).
+/// process's app id ([`crate::flatpak::scopes`]); `containers` each
+/// container process's id ([`crate::containers::scopes`]).
+#[allow(clippy::too_many_arguments)]
 pub fn table(
     snapshot: &Snapshot,
     usage: &Use,
     windows: &[Window],
     flatpaks: &HashMap<i32, String>,
+    containers: &HashMap<i32, String>,
     me: u32,
     user_name: &mut dyn FnMut(u32) -> String,
 ) -> Table {
@@ -214,7 +220,7 @@ pub fn table(
             }
         }
         let lead = members[0].clone();
-        apps.push(App { lead, class: window.class.clone(), title: window.title.clone(), windows: count, members, flatpak });
+        apps.push(App { lead, class: window.class.clone(), title: window.title.clone(), windows: count, members, flatpak, container: None });
     }
     // A Flatpak with no window — a background service, a command run
     // in its sandbox — is still one app, not five loose bwrap rows: its
@@ -239,7 +245,29 @@ pub fn table(
         // own names, so the open group still says which one is bwrap.
         let mut lead = members[0].clone();
         lead.name = crate::flatpak::short_name(app_id).to_string();
-        apps.push(App { lead, class: app_id.to_string(), title: String::new(), windows: 0, members, flatpak: Some(app_id.to_string()) });
+        apps.push(App { lead, class: app_id.to_string(), title: String::new(), windows: 0, members, flatpak: Some(app_id.to_string()), container: None });
+    }
+    // A container is one group too, by its scope: its first process (the
+    // one whose parent, Docker's shim, is outside it) leads, and keeps
+    // its own name — "postgres" — until Docker's name for it is known.
+    let mut boxed: HashMap<&str, Vec<i32>> = HashMap::new();
+    for (pid, id) in containers {
+        if !claimed.contains(pid) && by_pid.contains_key(pid) {
+            boxed.entry(id.as_str()).or_default().push(*pid);
+        }
+    }
+    let mut boxed: Vec<(&str, Vec<i32>)> = boxed.into_iter().collect();
+    boxed.sort();
+    for (id, mut pids) in boxed {
+        pids.sort_unstable();
+        let inside: HashSet<i32> = pids.iter().copied().collect();
+        let lead_pid = pids.iter().copied().find(|p| !inside.contains(&by_pid[p].ppid)).unwrap_or(pids[0]);
+        pids.retain(|p| *p != lead_pid);
+        pids.insert(0, lead_pid);
+        let members: Vec<Entry> = pids.iter().map(|p| entry(by_pid[p])).collect();
+        claimed.extend(pids.iter().copied());
+        let lead = members[0].clone();
+        apps.push(App { lead, class: id.to_string(), title: String::new(), windows: 0, members, flatpak: None, container: Some(id.to_string()) });
     }
     let background = snapshot.procs.iter().filter(|p| !claimed.contains(&p.pid)).map(&mut entry).collect();
     Table { apps, background }
@@ -427,9 +455,13 @@ pub fn lines(table: &Table, view: &View) -> Vec<Line> {
     background.sort_by(|a, b| compare(view.sort, key(a), key(b)));
 
     let mut out = Vec::new();
-    if !apps.is_empty() {
-        out.push(Line::Heading { label: "Apps", count: apps.len() });
-        for (app, open) in apps {
+    let (boxed, apps): (Vec<_>, Vec<_>) = apps.into_iter().partition(|(a, _): &(App, bool)| a.container.is_some());
+    for (label, group) in [("Apps", apps), ("Containers", boxed)] {
+        if group.is_empty() {
+            continue;
+        }
+        out.push(Line::Heading { label, count: group.len() });
+        for (app, open) in group {
             let mut members: Vec<Entry> = app.members.clone();
             members.sort_by(|a, b| compare(view.sort, key(a), key(b)));
             out.push(Line::App { app, open });
@@ -633,7 +665,28 @@ mod tests {
         };
         let flatpaks: HashMap<i32, String> = [830281, 830302, 830303, 830306, 830307].into_iter().map(|p| (p, "com.github.tchx84.Flatseal".to_string())).collect();
         let windows = if with_window { vec![window(830307, "com.github.tchx84.Flatseal", "Flatseal")] } else { Vec::new() };
-        table(&snapshot, &Use::default(), &windows, &flatpaks, 1000, &mut |_| "voldemort".into())
+        table(&snapshot, &Use::default(), &windows, &flatpaks, &HashMap::new(), 1000, &mut |_| "voldemort".into())
+    }
+
+    /// A container is one row under Containers, led by its first process
+    /// — the one whose parent, Docker's shim, is outside it — and its
+    /// processes are not loose in the background.
+    #[test]
+    fn a_containers_processes_are_one_row_under_containers() {
+        let id = "a86a270095c4b3d04beef4f9bad7569b682a6f9d4198e2b278e3b1f5369187ac".to_string();
+        let snapshot = Snapshot {
+            procs: vec![proc(1, 0, "systemd", 0), proc(100, 1, "containerd-shim", 0), proc(200, 100, "postgres", 999), proc(201, 200, "postgres", 999)],
+            cpu: CpuTimes::default(),
+            ..Snapshot::default()
+        };
+        let boxed: HashMap<i32, String> = [(200, id.clone()), (201, id.clone())].into();
+        let t = table(&snapshot, &Use::default(), &[], &HashMap::new(), &boxed, 1000, &mut |_| "x".into());
+        let c = t.apps.iter().find(|a| a.container.is_some()).expect("a container row");
+        assert_eq!((c.lead.id.pid, c.members.len(), c.windows), (200, 2, 0));
+        assert!(t.background.iter().all(|e| e.id.pid != 200 && e.id.pid != 201));
+        assert!(t.background.iter().any(|e| e.name == "containerd-shim"), "the shim is Docker's, outside the container");
+        let out = lines(&t, &View::default());
+        assert!(matches!(&out[0], Line::Heading { label: "Containers", count: 1 }), "{:?}", out[0]);
     }
 
     /// A window's pid can be any process of its app — a browser's window
@@ -642,7 +695,7 @@ mod tests {
     fn a_pid_lands_on_its_apps_row_or_its_own() {
         let member = Entry { id: Id { pid: 11, start: 1 }, ..Entry::default() };
         let lead = Entry { id: Id { pid: 10, start: 1 }, ..Entry::default() };
-        let app = App { lead: lead.clone(), class: "c".into(), title: String::new(), windows: 1, members: vec![lead, member], flatpak: None };
+        let app = App { lead: lead.clone(), class: "c".into(), title: String::new(), windows: 1, members: vec![lead, member], flatpak: None, container: None };
         let t = Table { apps: vec![app], background: vec![bg(30, "daemon", 0.0)] };
         assert_eq!(row_of(&t, 11), Some(Id { pid: 10, start: 1 }));
         assert_eq!(row_of(&t, 30), Some(Id { pid: 30, start: 1 }));
@@ -731,7 +784,7 @@ mod tests {
             ..Snapshot::default()
         };
         let windows = [window(100, "firefox", "The Daily Prophet"), window(200, "kitty", "~"), window(202, "gedit", "spells.txt"), window(100, "firefox", "Owl Post")];
-        table(&snapshot, &usage, &windows, &HashMap::new(), 1000, &mut |uid| if uid == 0 { "root".into() } else { "voldemort".into() })
+        table(&snapshot, &usage, &windows, &HashMap::new(), &HashMap::new(), 1000, &mut |uid| if uid == 0 { "root".into() } else { "voldemort".into() })
     }
 
     fn pids(app: &App) -> Vec<i32> {

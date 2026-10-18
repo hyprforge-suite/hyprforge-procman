@@ -58,7 +58,7 @@ fn gather(me: u32) -> Result<(Vec<efficiency::Seen>, HashMap<i32, Plan>), String
     let windows = hyprforge_procman::windows::read()?;
     let shown = hyprforge_procman::windows::read_shown()?;
     let flatpaks = hyprforge_procman::flatpak::scopes(std::path::Path::new("/sys/fs/cgroup"));
-    let table = hyprforge_procman::model::table(&snapshot, &Default::default(), &windows, &flatpaks, me, &mut |_| String::new());
+    let table = hyprforge_procman::model::table(&snapshot, &Default::default(), &windows, &flatpaks, &Default::default(), me, &mut |_| String::new());
     let seen = efficiency::seen(&table, &windows, &shown);
     let plans = seen.iter().map(|a| (a.lead, efficiency::plan_for(a, me))).collect();
     Ok((seen, plans))

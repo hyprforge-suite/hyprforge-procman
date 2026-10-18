@@ -41,6 +41,17 @@ pub struct Figures {
     pub gpu: (Option<f32>, Vec<String>),
 }
 
+/// Whose a process is, for its label: a uid with no name on this
+/// machine — a container's own user, most often — says that it is one,
+/// rather than standing there as a bare number.
+fn user_label(user: &str) -> String {
+    if !user.is_empty() && user.bytes().all(|b| b.is_ascii_digit()) {
+        format!("uid {user}")
+    } else {
+        user.to_string()
+    }
+}
+
 /// The name a run of [`Line::Same`] is opened by.
 fn name_of(members: &[Entry]) -> String {
     members.first().map(|m| m.name.clone()).unwrap_or_default()
@@ -435,6 +446,10 @@ impl App {
     /// The name an app is shown by: its launcher entry's, when one is
     /// installed for its window class, or the process's own.
     pub(crate) fn app_label(&self, app: &model::App) -> String {
+        // A container by Docker's name for it, when Docker would say.
+        if let Some(id) = &app.container {
+            return self.container_names.as_ref().ok().and_then(|n| n.get(id)).map_or_else(|| app.lead.name.clone(), |(name, _)| name.clone());
+        }
         match (&self.desktop, &app.flatpak) {
             // A Flatpak's lead is already named after its app.
             (_, Some(_)) => app.lead.name.clone(),
@@ -452,9 +467,15 @@ impl App {
         };
         let caption = |content: String, selected: bool| widgets::clamped_text(content, 1).size(s.apply(density::META_TEXT_BASE)).width(Length::Fill).color(ink(selected));
         match line {
-            Line::Heading { label, count } => container(widgets::section_label(&format!("{label} ({count})"), s))
-                .padding(iced::Padding { top: spacing::SM + spacing::XS, right: spacing::SM, bottom: spacing::XS, left: spacing::SM })
-                .into(),
+            Line::Heading { label, count } => {
+                let mut head = row![widgets::section_label(&format!("{label} ({count})"), s)].spacing(spacing::MD).align_y(Alignment::Center);
+                // Why containers go by their first process's name, said
+                // once where they are listed.
+                if let ("Containers", Err(why)) = (label, &self.container_names) {
+                    head = head.push(widgets::meta_text(format!("{why}, so they go by their first process."), density::META_TEXT_BASE, s));
+                }
+                container(head).padding(iced::Padding { top: spacing::SM + spacing::XS, right: spacing::SM, bottom: spacing::XS, left: spacing::SM }).into()
+            }
             Line::App { app, open } => {
                 let id = app.lead.id;
                 let selected = self.selected == Some(id);
@@ -472,6 +493,14 @@ impl App {
                         parts.push(app.title.clone());
                     }
                 }
+                if let Some(id) = &app.container {
+                    parts.push(format!("container {}", hyprforge_procman::containers::short(id)));
+                    if let Some((_, image)) = self.container_names.as_ref().ok().and_then(|n| n.get(id)) {
+                        parts.push(image.clone());
+                    } else if label != app.lead.name {
+                        parts.push(app.lead.name.clone());
+                    }
+                }
                 match (&app.flatpak, app.windows) {
                     (Some(_), 0) => parts.push("Flatpak · no window".to_string()),
                     (Some(_), _) => parts.push("Flatpak".to_string()),
@@ -487,7 +516,7 @@ impl App {
                 let class = app.flatpak.as_deref().unwrap_or(&app.class);
                 let mut title = row![widgets::clamped_text(label, 1).size(s.apply(density::ROW_TEXT_BASE)).width(Length::Shrink)].spacing(spacing::SM).align_y(Alignment::Center);
                 if !app.lead.own {
-                    title = title.push(widgets::chip(app.lead.user.clone(), widgets::Tint::Dim, s));
+                    title = title.push(widgets::chip(user_label(&app.lead.user), widgets::Tint::Dim, s));
                 }
                 // Efficiency mode giving it less CPU while it has no window
                 // on screen: said on the row, since it is why the app is
@@ -545,7 +574,7 @@ impl App {
     fn process_name(&self, e: &Entry, wide: bool, s: FontScale) -> Element<'_, Message> {
         let mut name = row![self.entry_name(e, s)].spacing(spacing::SM).align_y(Alignment::Center);
         if !e.own {
-            name = name.push(widgets::chip(e.user.clone(), widgets::Tint::Dim, s));
+            name = name.push(widgets::chip(user_label(&e.user), widgets::Tint::Dim, s));
         }
         if wide {
             return name.into();
@@ -1030,6 +1059,12 @@ mod tests {
 
     /// One number, as CPU is: measured, unmeasurable, or no GPU at all —
     /// and never two lines in a row of one.
+    #[test]
+    fn a_user_with_no_name_here_reads_as_a_uid() {
+        assert_eq!(user_label("999"), "uid 999");
+        assert_eq!(user_label("root"), "root");
+    }
+
     #[test]
     fn the_gpu_column_is_a_figure_a_dash_or_nothing() {
         let cards = |c: &[&str]| c.iter().map(|s| s.to_string()).collect::<Vec<_>>();

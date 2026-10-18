@@ -273,6 +273,7 @@ mod tests {
             windows: 3,
             members: vec![lead],
             flatpak: None,
+            container: None,
         }];
         assert!(!app.limit_would_endanger(&[terminal]));
         assert!(app.limit_would_endanger(&[compositor]));
