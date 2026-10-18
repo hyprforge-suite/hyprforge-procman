@@ -8,7 +8,9 @@
 
 use crate::{App, Message, Resource, Tab, INTERVALS};
 use hyprforge_procman::machine::{DiskRate, NetRate};
+use hyprforge_procman::fit::{fit, Fit};
 use hyprforge_procman::graph::Graph;
+use std::time::Duration;
 use hyprforge_procman::history::Series;
 use hyprforge_procman::model::{self, Column, Entry, Line};
 use hyprforge_procman::sample::Id;
@@ -113,8 +115,13 @@ impl App {
             Tab::Crashes => self.crashes_view(s),
             Tab::Rules => self.rules_view(s),
         };
-        let middle: Element<'_, Message> = if self.sidebar { row![self.sidebar(s), body].height(Length::Fill).into() } else { body };
-        let page = column![self.header(s), widgets::divider(), middle, widgets::divider(), self.status(s)];
+        let middle: Element<'_, Message> = if self.sidebar_shown() { row![self.sidebar(s), body].height(Length::Fill).into() } else { body };
+        let mut page = column![self.header(s), widgets::divider(), middle];
+        // A quarter of a screen has no room for a line that repeats what
+        // the tiles say — unless it has something to say of its own.
+        if self.fit() != Fit::Quarter || self.notice.is_some() {
+            page = page.push(widgets::divider()).push(self.status(s));
+        }
         let page = container(page).width(Length::Fill).height(Length::Fill).style(|_t: &iced::Theme| container::Style {
             background: Some(Background::Color(surface::root())),
             ..container::Style::default()
@@ -164,14 +171,27 @@ impl App {
         nav_sidebar(groups, s.apply(190.0), s)
     }
 
+    /// What the window has room for, from its size ([`Fit`]).
+    pub(crate) fn fit(&self) -> Fit {
+        fit(self.window_size.width, self.window_size.height)
+    }
+
+    /// The sidebar as someone last set it, or — until anyone has — open
+    /// only when the window has room for it beside the page.
+    pub(crate) fn sidebar_shown(&self) -> bool {
+        self.sidebar.unwrap_or(self.fit() == Fit::Full)
+    }
+
     fn header(&self, s: FontScale) -> Element<'_, Message> {
-        let mut bar = row![widgets::sidebar_toggle(self.sidebar, Message::ToggleSidebar, s)].spacing(spacing::MD).align_y(Alignment::Center);
+        let full = self.fit() == Fit::Full;
+        let mut bar = row![widgets::sidebar_toggle(self.sidebar_shown(), Message::ToggleSidebar, s)].spacing(spacing::MD).align_y(Alignment::Center);
         // The search sits by the sidebar, where it is found; the Overview
         // has the processes' one, and typing there opens Processes.
         let search: Option<Element<'_, Message>> = match self.tab {
             Tab::Services => Some(widgets::search_field("Search services", &self.services.query, Message::ServiceQuery, None, None, s).into()),
             Tab::Overview | Tab::Processes | Tab::Details => {
-                Some(widgets::search_field("Search, or port:8080, file:~/notes.txt", &self.view.query, Message::Query, None, Some(crate::search_id()), s).into())
+                let hint = if full { "Search, or port:8080, file:~/notes.txt" } else { "Search, or port:8080" };
+                Some(widgets::search_field(hint, &self.view.query, Message::Query, None, Some(crate::search_id()), s).into())
             }
             _ => None,
         };
@@ -181,25 +201,43 @@ impl App {
             // the edge.
             bar = bar.push(container(field).width(Length::FillPortion(3)).max_width(s.apply(520.0)));
         }
-        bar = bar.push(self.readouts(s)).push(Space::new().width(Length::FillPortion(1)));
-        let speeds = widgets::segmented_choice(
-            &INTERVALS,
-            (!self.paused).then_some(&self.interval),
-            |d| if d.as_millis() < 1000 { format!("{:.1} s", d.as_secs_f32()) } else { format!("{} s", d.as_secs()) },
-            Message::Interval,
-            s,
-        );
+        // Narrow, the readouts leave for the status line and the speeds
+        // fold into one button that steps through them: the search field
+        // is what the header is for, and at half a screen these two were
+        // a third of it.
+        if full {
+            bar = bar.push(self.readouts(s));
+        }
+        bar = bar.push(Space::new().width(Length::FillPortion(1)));
+        let label = |d: &Duration| if d.as_millis() < 1000 { format!("{:.1} s", d.as_secs_f32()) } else { format!("{} s", d.as_secs()) };
+        let speeds: Element<'_, Message> = if full {
+            widgets::segmented_choice(&INTERVALS, (!self.paused).then_some(&self.interval), label, Message::Interval, s)
+        } else {
+            let next = INTERVALS.iter().position(|d| *d == self.interval).map_or(INTERVALS[0], |i| INTERVALS[(i + 1) % INTERVALS.len()]);
+            widgets::secondary_button(label(&self.interval)).on_press(Message::Interval(next)).into()
+        };
         let pause = if self.paused {
             widgets::primary_button("Paused").on_press(Message::Pause(false))
         } else {
             widgets::secondary_button("Pause").on_press(Message::Pause(true))
         };
-        let everything = match self.everything {
-            crate::Everything::Locked => widgets::secondary_button("Show everything").on_press(Message::ShowEverything),
-            crate::Everything::Asking => widgets::secondary_button("Asking…"),
-            crate::Everything::Open(_) => widgets::primary_button("Showing everything"),
+        let everything = match (&self.everything, full) {
+            (crate::Everything::Locked, true) => widgets::secondary_button("Show everything").on_press(Message::ShowEverything),
+            (crate::Everything::Locked, false) => widgets::secondary_button("Everything").on_press(Message::ShowEverything),
+            (crate::Everything::Asking, _) => widgets::secondary_button("Asking…"),
+            (crate::Everything::Open(_), true) => widgets::primary_button("Showing everything"),
+            (crate::Everything::Open(_), false) => widgets::primary_button("Everything"),
         };
+        // A quarter of a screen keeps the search and Pause; the rest are
+        // a wider window's.
+        if self.fit() == Fit::Quarter {
+            return self.header_bar(bar.push(pause), s);
+        }
         bar = bar.push(everything).push(speeds).push(pause);
+        self.header_bar(bar, s)
+    }
+
+    fn header_bar<'a>(&self, bar: iced::widget::Row<'a, Message>, s: FontScale) -> Element<'a, Message> {
         container(bar)
             .padding([0.0, spacing::MD])
             .height(Length::Fixed(density::bar_height(s)))
@@ -378,6 +416,13 @@ impl App {
             bytes(t.memory_total)
         );
         let mut bar = row![widgets::meta_text(summary, density::META_TEXT_BASE, s)].spacing(spacing::MD).align_y(Alignment::Center);
+        // The header's I/O wait, when the header had no room for it.
+        let iowait = self.overview.split[4];
+        if self.fit() != Fit::Full {
+            let ink = if iowait > 0.1 { theme::warning() } else { theme::text_dim() };
+            bar = bar.push(text(format!("I/O wait {}", percent(Some(iowait * 100.0)))).size(s.apply(density::META_TEXT_BASE)).color(ink));
+        }
+        let mut bar = bar.spacing(spacing::MD).align_y(Alignment::Center);
         if let Some(notice) = &self.notice {
             bar = bar.push(container(text(notice.clone()).size(s.apply(density::META_TEXT_BASE)).color(theme::error())).width(Length::Fill));
             if let Some(c) = &self.admin_offer {

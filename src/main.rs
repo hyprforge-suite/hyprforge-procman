@@ -392,8 +392,10 @@ pub struct App {
     /// Waiting on systemd to switch it.
     pub efficiency_busy: bool,
     pub rules: rules_view::Tab,
-    /// Whether the sidebar of tabs is showing.
-    pub sidebar: bool,
+    /// Whether the sidebar of tabs is showing, once someone has said;
+    /// until then it follows the window — open when there is room for
+    /// it, hidden at half a screen ([`App::sidebar_shown`]).
+    pub sidebar: Option<bool>,
     /// Where the rules are kept; a test's own directory in tests.
     pub rules_path: std::path::PathBuf,
     /// Wakeups a second, by process, averaged over about ten seconds.
@@ -665,7 +667,7 @@ impl App {
             efficiency: None,
             efficiency_busy: false,
             rules: rules_view::Tab::default(),
-            sidebar: true,
+            sidebar: None,
             rules_path: hyprforge_procman::rules::path(),
             wakeups: HashMap::new(),
             activity: HashMap::new(),
@@ -1013,7 +1015,7 @@ impl App {
                 return efficiency_state();
             }
             Message::EfficiencyState(state) => self.efficiency = state,
-            Message::ToggleSidebar => self.sidebar = !self.sidebar,
+            Message::ToggleSidebar => self.sidebar = Some(!self.sidebar_shown()),
             Message::RulesEdit(..)
             | Message::RulesAdd
             | Message::RulesRemove(_)
@@ -1596,12 +1598,19 @@ mod render {
         Reading { snapshot, gpu, machine: { let mut sys = SysFs::default(); sys.drive_temperatures = true; sys.read() }, windows: windows::read(), at: std::time::Instant::now(), nvidia: None, everything_lapsed: false, held: None }
     }
 
-    fn draw(app: &App, name: &str, dir: &std::path::Path) {
+    fn draw(app: &mut App, name: &str, dir: &std::path::Path) {
         draw_sized(app, name, dir, 800.0);
     }
 
-    fn draw_sized(app: &App, name: &str, dir: &std::path::Path, h: f32) {
-        let (w, scale) = (1280.0f32, 1.6f32);
+    fn draw_sized(app: &mut App, name: &str, dir: &std::path::Path, h: f32) {
+        draw_at(app, name, dir, 1280.0, h);
+    }
+
+    /// Drawn at `w` × `h` logical pixels, and told so: the layout follows
+    /// the window's size ([`hyprforge_procman::fit`]).
+    fn draw_at(app: &mut App, name: &str, dir: &std::path::Path, w: f32, h: f32) {
+        app.window_size = Size::new(w, h);
+        let scale = 1.6f32;
         let (pw, ph) = ((w * scale) as u32, (h * scale) as u32);
         let theme = hyprforge_ui::theme::active();
         let font = iced::Font::with_name(Box::leak(theme.font.clone().into_boxed_str()));
@@ -1654,9 +1663,15 @@ mod render {
             app.take(r);
             std::thread::sleep(Duration::from_millis(500));
         }
-        draw_sized(&app, "overview", &dir, 1420.0);
+        draw_sized(&mut app, "overview", &dir, 1420.0);
+        // Half and a quarter of this machine's 1600 × 1000 screen, tiled.
+        draw_at(&mut app, "overview-half", &dir, 770.0, 930.0);
+        draw_at(&mut app, "overview-quarter", &dir, 770.0, 455.0);
         app.tab = Tab::Processes;
-        draw(&app, "processes", &dir);
+        draw_at(&mut app, "processes-half", &dir, 770.0, 930.0);
+        app.tab = Tab::Overview;
+        app.tab = Tab::Processes;
+        draw(&mut app, "processes", &dir);
         // A right click on the first app, as if the pointer were half
         // way down its row — the menu, placed and drawn.
         if let Some(lead) = app.table.apps.first().map(|a| a.lead.id) {
@@ -1665,19 +1680,19 @@ mod render {
             if let Some(menu) = app.menu.as_mut() {
                 menu.at = (420.0, 140.0);
             }
-            draw(&app, "processes-menu", &dir);
+            draw(&mut app, "processes-menu", &dir);
             let _ = app.update(Message::CloseMenu);
         }
 
         app.tab = Tab::Performance;
-        draw(&app, "performance", &dir);
+        draw(&mut app, "performance", &dir);
         if let Some(disk) = app.machine.disks.first() {
             app.resource = Resource::Disk(disk.name.clone());
-            draw(&app, "performance-disk", &dir);
+            draw(&mut app, "performance-disk", &dir);
         }
         if let Some(gpu) = app.machine.gpus.iter().find(|g| g.driver == "nvidia").or(app.machine.gpus.first()) {
             app.resource = Resource::Gpu(gpu.card.clone());
-            draw(&app, "performance-gpu", &dir);
+            draw(&mut app, "performance-gpu", &dir);
         }
         if app.machine.battery.is_some() {
             // Wakeups need two readings with the per-thread counts in
@@ -1690,16 +1705,16 @@ mod render {
                 app.take(r);
                 std::thread::sleep(Duration::from_millis(500));
             }
-            draw(&app, "performance-battery", &dir);
+            draw(&mut app, "performance-battery", &dir);
         }
 
         app.tab = Tab::History;
         app.apps_db = Some(hyprforge_mime::MimeDb::load());
-        draw(&app, "history", &dir);
+        draw(&mut app, "history", &dir);
 
         app.tab = Tab::Startup;
         app.startup = Some(runtime.block_on(load_startup()));
-        draw(&app, "startup", &dir);
+        draw(&mut app, "startup", &dir);
 
         // Two rules, as the tab draws them — in memory, not the user's file.
         app.tab = Tab::Rules;
@@ -1711,7 +1726,7 @@ mod render {
             service: Some(false),
             ..Default::default()
         };
-        draw_sized(&app, "rules", &dir, 600.0);
+        draw_sized(&mut app, "rules", &dir, 600.0);
 
         // This machine's own journal, with the newest crash opened.
         app.tab = Tab::Crashes;
@@ -1719,22 +1734,22 @@ mod render {
         let crashes = runtime.block_on(crashes_view::load());
         app.crash_selected = crashes.incidents.as_ref().ok().and_then(|f| f.list.iter().find(|i| matches!(i, hyprforge_procman::incidents::Incident::Crash(_)))).map(|i| i.at());
         app.crashes = Some(crashes);
-        draw_sized(&app, "crashes", &dir, 1100.0);
+        draw_sized(&mut app, "crashes", &dir, 1100.0);
 
         app.tab = Tab::Users;
         app.sessions = runtime.block_on(sessions::list());
-        draw(&app, "users", &dir);
+        draw(&mut app, "users", &dir);
 
         // Details on the compositor, the process with the most to show.
         app.tab = Tab::Details;
         app.selected = app.table.apps.first().map(|a| a.lead.id).or_else(|| app.table.background.first().map(|e| e.id));
         let r = reading(&fs, &app.gpu_scan);
         app.take(r);
-        draw(&app, "details", &dir);
+        draw(&mut app, "details", &dir);
         // The limits card on the first app, as it would open.
         if let Some(lead) = app.table.apps.first().map(|a| a.lead.id) {
             app.open_limits(lead);
-            draw(&app, "limits", &dir);
+            draw(&mut app, "limits", &dir);
             app.limits = None;
         }
 
@@ -1746,7 +1761,7 @@ mod render {
         app.service_counters();
         app.services.selected = Some("NetworkManager.service".into());
         app.services.journal = services::journal(Scope::System, "NetworkManager.service", 30);
-        draw(&app, "services", &dir);
+        draw(&mut app, "services", &dir);
     }
 
     #[test]
@@ -1761,6 +1776,6 @@ mod render {
         let (mut app, _) = App::new();
         app.tab = Tab::Recorded;
         app.recorded = recorded_view::RecordedTab::read_now(&journal, 0.6);
-        draw_sized(&app, "recorded", &dir, 1500.0);
+        draw_sized(&mut app, "recorded", &dir, 1500.0);
     }
 }

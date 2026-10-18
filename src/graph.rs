@@ -42,10 +42,10 @@ impl Motion {
 ///
 /// One interval behind, on purpose: the newest reading enters at the
 /// right edge plus a step and slides in as `phase` runs to 1, so the
-/// edge itself is a point on the line between the last two readings
-/// ([`edge`]). Drawn level with the newest instead, the end of the line
-/// would snap up or down each time a reading landed — smooth sideways,
-/// still jumping. Placed from the right, so a graph with only a few
+/// edge itself is a point on the curve between the last two readings.
+/// Drawn level with the newest instead, the end of the line would snap
+/// up or down each time a reading landed — smooth sideways, still
+/// jumping. Placed from the right, so a graph with only a few
 /// readings fills in from where the newest is.
 pub fn positions(count: usize, width: f32, phase: f32) -> Vec<f32> {
     let step = width / (LEN - 1) as f32;
@@ -53,28 +53,128 @@ pub fn positions(count: usize, width: f32, phase: f32) -> Vec<f32> {
     (0..count).map(|i| x0 + step * i as f32).collect()
 }
 
-/// Where the line starts: at the oldest reading if it is on the graph,
-/// or — once a full minute has it past the left edge — at the edge,
-/// between the two oldest, so the start slides off rather than jumping
-/// a step each time the oldest is let go.
-pub fn left_edge(values: &[f32], xs: &[f32]) -> Option<(f32, f32)> {
-    match (values, xs) {
-        ([a, b, ..], [xa, xb, ..]) if *xa < 0.0 => {
-            let t = -xa / (xb - xa);
-            Some((0.0, a + (b - a) * t))
-        }
-        ([a, ..], [xa, ..]) => Some((*xa, *a)),
-        _ => None,
+/// One stretch of a line between two readings: a cubic from `a` to `b`.
+///
+/// Its controls sit a third and two thirds of the way across, so x runs
+/// *linearly* along it — which is what lets [`clip`] cut it at an edge
+/// exactly, and [`Piece::y_at`] read it at any x without solving a cubic.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Piece {
+    pub a: Point,
+    pub c1: Point,
+    pub c2: Point,
+    pub b: Point,
+}
+
+impl Piece {
+    fn at(&self, t: f32) -> Point {
+        let u = 1.0 - t;
+        let (w0, w1, w2, w3) = (u * u * u, 3.0 * u * u * t, 3.0 * u * t * t, t * t * t);
+        Point::new(
+            w0 * self.a.x + w1 * self.c1.x + w2 * self.c2.x + w3 * self.b.x,
+            w0 * self.a.y + w1 * self.c1.y + w2 * self.c2.y + w3 * self.b.y,
+        )
+    }
+
+    /// The curve's height at `x`, if `x` is within this piece.
+    pub fn y_at(&self, x: f32) -> Option<f32> {
+        let span = self.b.x - self.a.x;
+        (span > 0.0 && (self.a.x..=self.b.x).contains(&x)).then(|| self.at((x - self.a.x) / span).y)
+    }
+
+    /// The two halves either side of `t`, by de Casteljau.
+    fn split(&self, t: f32) -> (Piece, Piece) {
+        let mix = |p: Point, q: Point| Point::new(p.x + (q.x - p.x) * t, p.y + (q.y - p.y) * t);
+        let (ab, bc, cd) = (mix(self.a, self.c1), mix(self.c1, self.c2), mix(self.c2, self.b));
+        let (abc, bcd) = (mix(ab, bc), mix(bc, cd));
+        let mid = mix(abc, bcd);
+        (Piece { a: self.a, c1: ab, c2: abc, b: mid }, Piece { a: mid, c1: bcd, c2: cd, b: self.b })
     }
 }
 
-/// The value at the right edge: between the last two readings, `phase`
-/// of the way to the newest.
-pub fn edge(values: &[f32], phase: f32) -> f32 {
-    match values {
-        [.., before, newest] => before + (newest - before) * phase,
-        [only] => *only,
-        [] => 0.0,
+/// Each reading's slope, by Steffen's method: a curve through readings
+/// that never goes past either of the two it joins. A peak is drawn at
+/// the value that was measured, not above it, and a run of zeros —
+/// an idle disk — stays on the floor rather than dipping under it, which
+/// the usual smoothing (Catmull–Rom) does on every burst.
+///
+/// Steffen rather than Fritsch–Carlson because every slope here depends
+/// only on its own two neighbours. A reading arriving or leaving changes
+/// the curve beside it and nowhere else — and both happen off the edge
+/// of the graph, so the visible line never changes shape under the eye.
+/// Fritsch–Carlson's correcting pass carries a change along the line.
+pub fn slopes(p: &[Point]) -> Vec<f32> {
+    // `signum` calls 0 positive; a flat stretch has to count as neither.
+    let sign = |v: f32| if v > 0.0 { 1.0 } else if v < 0.0 { -1.0 } else { 0.0 };
+    let n = p.len();
+    if n < 2 {
+        return vec![0.0; n];
+    }
+    let d: Vec<f32> = p.windows(2).map(|w| if w[1].x > w[0].x { (w[1].y - w[0].y) / (w[1].x - w[0].x) } else { 0.0 }).collect();
+    let mut m = vec![0.0; n];
+    m[0] = d[0];
+    m[n - 1] = d[n - 2];
+    for i in 1..n - 1 {
+        let (h0, h1) = (p[i].x - p[i - 1].x, p[i + 1].x - p[i].x);
+        if h0 + h1 <= 0.0 {
+            continue;
+        }
+        let through = (d[i - 1] * h1 + d[i] * h0) / (h0 + h1);
+        m[i] = (sign(d[i - 1]) + sign(d[i])) * d[i - 1].abs().min(d[i].abs()).min(0.5 * through.abs());
+    }
+    m
+}
+
+/// The line through `p` with slopes `m`, as one piece per pair.
+pub fn pieces(p: &[Point], m: &[f32]) -> Vec<Piece> {
+    p.windows(2)
+        .zip(m.windows(2))
+        .map(|(w, s)| {
+            let third = (w[1].x - w[0].x) / 3.0;
+            Piece { a: w[0], c1: Point::new(w[0].x + third, w[0].y + s[0] * third), c2: Point::new(w[1].x - third, w[1].y - s[1] * third), b: w[1] }
+        })
+        .collect()
+}
+
+/// The part of a line between `from` and `to` across, cut exactly where
+/// it crosses either. iced's canvas does not clip to its bounds, so a
+/// line that runs past an edge would be drawn over its neighbour.
+pub fn clip(line: &[Piece], from: f32, to: f32) -> Vec<Piece> {
+    line.iter()
+        .filter(|p| p.b.x > from && p.a.x < to)
+        .map(|p| {
+            let mut p = *p;
+            if p.a.x < from {
+                p = p.split((from - p.a.x) / (p.b.x - p.a.x)).1;
+            }
+            if p.b.x > to {
+                p = p.split((to - p.a.x) / (p.b.x - p.a.x)).0;
+            }
+            p
+        })
+        .collect()
+}
+
+/// The slopes of a sliding graph's readings. The newest is past the
+/// right edge and the one before it at the edge; when a reading lands,
+/// the one at the edge stops being the end of the line and its slope
+/// would change in one step — a kink just inside the edge, every
+/// second. So its slope moves from the end-of-line one to the
+/// in-the-middle one across the interval instead, and the line at the
+/// edge changes continuously.
+pub fn sliding_slopes(p: &[Point], phase: f32) -> Vec<f32> {
+    let mut m = slopes(p);
+    let n = p.len();
+    if n >= 3 {
+        let at_end = slopes(&p[..n - 1])[n - 2];
+        m[n - 2] = at_end + (m[n - 2] - at_end) * phase;
+    }
+    m
+}
+
+fn trace(b: &mut canvas::path::Builder, line: &[Piece]) {
+    for p in line {
+        b.bezier_curve_to(p.c1, p.c2, p.b);
     }
 }
 
@@ -119,33 +219,28 @@ impl<Message> canvas::Program<Message> for Graph<'_> {
             // it slides in from just past it.
             let phase = self.motion.map_or(1.0, |m| m.phase(Instant::now()));
             let xs = positions(values.len(), width, phase);
-            let point = |i: usize, v: f32| Point::new(xs[i], height - v * (height - 1.0));
-            let at_edge = Point::new(width, height - edge(&values, phase) * (height - 1.0));
-            // From the left edge (or the oldest reading, if it is on the
-            // graph), every reading inside, then the right edge — the
-            // newest itself is past it until it slides in.
-            let (lx, lv) = left_edge(&values, &xs).unwrap_or((0.0, 0.0));
-            let start = Point::new(lx, height - lv * (height - 1.0));
-            let inside = (1..values.len() - 1).filter(|i| xs[*i] > lx);
-            let line = Path::new(|b| {
+            let p: Vec<Point> = values.iter().zip(&xs).map(|(v, x)| Point::new(*x, height - v * (height - 1.0))).collect();
+            // The whole line through every kept reading, then the part of
+            // it on the graph: the oldest are past the left edge and the
+            // newest past the right one, sliding in.
+            let line = clip(&pieces(&p, &sliding_slopes(&p, phase)), 0.0, width);
+            let (Some(first), Some(last)) = (line.first(), line.last()) else {
+                return vec![frame.into_geometry()];
+            };
+            let (start, end) = (first.a, last.b);
+            let stroke = Path::new(|b| {
                 b.move_to(start);
-                for i in inside.clone() {
-                    b.line_to(point(i, values[i]));
-                }
-                b.line_to(at_edge);
+                trace(b, &line);
             });
             let area = Path::new(|b| {
-                b.move_to(Point::new(lx, height));
+                b.move_to(Point::new(start.x, height));
                 b.line_to(start);
-                for i in inside.clone() {
-                    b.line_to(point(i, values[i]));
-                }
-                b.line_to(at_edge);
-                b.line_to(Point::new(width, height));
+                trace(b, &line);
+                b.line_to(Point::new(end.x, height));
                 b.close();
             });
             frame.fill(&area, Color { a: 0.12, ..self.line });
-            frame.stroke(&line, Stroke::default().with_color(self.line).with_width(1.5));
+            frame.stroke(&stroke, Stroke::default().with_color(self.line).with_width(1.5));
         }
         vec![frame.into_geometry()]
     }
@@ -214,19 +309,17 @@ impl<Message> canvas::Program<Message> for DayGraph<'_, Message> {
             frame.stroke(&Path::line(Point::new(0.0, y), Point::new(width, y)), Stroke::default().with_color(self.grid).with_width(1.0));
         }
         if self.points.len() >= 2 {
-            let point = |&(at, v): &(i64, f32)| Point::new(x(at), height - v.clamp(0.0, 1.0) * (height - 1.0));
+            let p: Vec<Point> = self.points.iter().map(|&(at, v)| Point::new(x(at), height - v.clamp(0.0, 1.0) * (height - 1.0))).collect();
+            let curve = pieces(&p, &slopes(&p));
             let line = Path::new(|b| {
-                b.move_to(point(&self.points[0]));
-                for p in &self.points[1..] {
-                    b.line_to(point(p));
-                }
+                b.move_to(p[0]);
+                trace(b, &curve);
             });
             let area = Path::new(|b| {
-                b.move_to(Point::new(x(self.points[0].0), height));
-                for p in self.points {
-                    b.line_to(point(p));
-                }
-                b.line_to(Point::new(x(self.points[self.points.len() - 1].0), height));
+                b.move_to(Point::new(p[0].x, height));
+                b.line_to(p[0]);
+                trace(b, &curve);
+                b.line_to(Point::new(p[p.len() - 1].x, height));
                 b.close();
             });
             frame.fill(&area, Color { a: 0.12, ..self.line });
@@ -258,38 +351,61 @@ mod tests {
         assert!(after[10] > 590.0, "and the new one just past it, to slide in");
     }
 
-    /// The left edge, as the user saw it jump: a full minute slides its
-    /// oldest reading off, and the start of the line must move with it —
-    /// from the second-oldest as one reading lands to the same place
-    /// after it, never a step to the right.
-    #[test]
-    fn the_left_edge_slides_off_without_a_jump() {
-        let full: Vec<f32> = (0..=LEN).map(|i| i as f32 / LEN as f32).collect();
-        let w = 590.0;
-        // Just before the next reading: the oldest is a whole step off.
-        let before = left_edge(&full, &positions(full.len(), w, 1.0)).unwrap();
-        assert_eq!(before.0, 0.0);
-        assert!((before.1 - full[1]).abs() < 1e-4, "{before:?}: at the second-oldest");
-        // It lands: the oldest goes, a new one comes, phase starts again.
-        let mut after_vals = full[1..].to_vec();
-        after_vals.push(1.0);
-        let after = left_edge(&after_vals, &positions(after_vals.len(), w, 0.0)).unwrap();
-        assert!((after.0 - before.0).abs() < 1e-3 && (after.1 - before.1).abs() < 1e-4, "{before:?} then {after:?}");
-        // A graph not yet full starts at its oldest reading, inside.
-        let few = [0.2, 0.3, 0.4];
-        let xs = positions(3, w, 0.5);
-        assert_eq!(left_edge(&few, &xs), Some((xs[0], 0.2)));
+    /// A curve drawn as `positions` and the graph place it, sampled
+    /// across the visible width.
+    fn visible(values: &[f32], phase: f32, width: f32) -> Vec<f32> {
+        let xs = positions(values.len(), width, phase);
+        let p: Vec<Point> = values.iter().zip(&xs).map(|(v, x)| Point::new(*x, 100.0 - v * 99.0)).collect();
+        let line = clip(&pieces(&p, &sliding_slopes(&p, phase)), 0.0, width);
+        (0..=200).map(|i| i as f32 * width / 200.0).map(|x| line.iter().find_map(|piece| piece.y_at(x)).expect("covers the width")).collect()
     }
 
-    /// The other half: the edge's value moves from the old newest to the
-    /// new one across the interval, so the end of the line never snaps.
+    /// The whole of "smooth": the line on screen just before a reading
+    /// lands and just after it is the same line. Both ends are tested
+    /// at once — a full graph drops its oldest reading in the same
+    /// moment — so a kink at either edge, a step at the start or a
+    /// change of shape anywhere fails it.
     #[test]
-    fn the_edge_moves_from_one_reading_to_the_next_without_a_jump() {
-        assert_eq!(edge(&[0.2, 0.4], 1.0), 0.4, "still: the newest itself");
-        // A reading of 0.9 lands: the edge starts where it was, at 0.4.
-        assert_eq!(edge(&[0.2, 0.4, 0.9], 0.0), 0.4);
-        assert!((edge(&[0.2, 0.4, 0.9], 0.5) - 0.65).abs() < 1e-6);
-        assert_eq!(edge(&[0.5], 0.3), 0.5);
+    fn the_line_on_screen_does_not_change_when_a_reading_lands() {
+        let full: Vec<f32> = (0..LEN + 2).map(|i| ((i as f32 * 0.7).sin() + 1.0) / 2.0).collect();
+        let before = visible(&full, 1.0, 590.0);
+        let mut next = full[1..].to_vec();
+        next.push(0.05);
+        let after = visible(&next, 0.0, 590.0);
+        for (i, (b, a)) in before.iter().zip(&after).enumerate() {
+            assert!((b - a).abs() < 1e-3, "sample {i}: {b} then {a}");
+        }
+    }
+
+    /// Monotone: between two readings the curve stays between them, so
+    /// a peak is drawn at what was measured and a quiet disk's zeros sit
+    /// on the floor. A Catmull–Rom line fails both on this series.
+    #[test]
+    fn the_curve_never_goes_past_the_readings_it_joins() {
+        let bursty = [0.0, 0.0, 0.9, 0.0, 0.0, 0.0, 0.4, 0.45, 0.0, 1.0, 0.2, 0.0];
+        let p: Vec<Point> = bursty.iter().enumerate().map(|(i, v)| Point::new(i as f32 * 10.0, 100.0 - v * 100.0)).collect();
+        for piece in pieces(&p, &slopes(&p)) {
+            let (lo, hi) = (piece.a.y.min(piece.b.y), piece.a.y.max(piece.b.y));
+            for k in 0..=50 {
+                let y = piece.at(k as f32 / 50.0).y;
+                assert!(y >= lo - 1e-3 && y <= hi + 1e-3, "{piece:?} at {k}/50: {y} outside {lo}..{hi}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_curve_is_cut_exactly_at_the_edges() {
+        let p = [Point::new(-10.0, 50.0), Point::new(10.0, 0.0), Point::new(30.0, 80.0)];
+        let whole = pieces(&p, &slopes(&p));
+        let cut = clip(&whole, 0.0, 20.0);
+        assert_eq!(cut.first().unwrap().a.x, 0.0);
+        assert!((cut.last().unwrap().b.x - 20.0).abs() < 1e-4);
+        // And the cut pieces lie on the original curve.
+        for x in [0.0, 5.0, 10.0, 15.0, 20.0] {
+            let want = whole.iter().find_map(|q| q.y_at(x)).unwrap();
+            let got = cut.iter().find_map(|q| q.y_at(x)).unwrap();
+            assert!((want - got).abs() < 1e-3, "at {x}: {want} vs {got}");
+        }
     }
 
     #[test]

@@ -10,6 +10,7 @@
 use crate::details::duration;
 use crate::view::{bytes, percent, rate};
 use crate::{App, Message};
+use hyprforge_procman::fit::Fit;
 use hyprforge_procman::graph::Graph;
 use hyprforge_procman::model;
 use hyprforge_ui::theme::{self, spacing, surface, FontScale};
@@ -127,6 +128,51 @@ fn core_cell<'a>(used: f32, clock: String, s: FontScale) -> Element<'a, Message>
     .into()
 }
 
+/// One of the quarter-screen glance's tiles: what it is, the figure, a
+/// minute of it, and a note — the edge in the warning colour when the
+/// tile is the likely answer. Pressing one opens Performance.
+fn tile<'a>(label: &'static str, value: String, unit: String, graphs: Vec<Element<'a, Message>>, note: String, warn: bool, s: FontScale) -> Element<'a, Message> {
+    let ink = if warn { theme::warning() } else { theme::text_dim() };
+    let body = column![
+        widgets::section_label(label, s),
+        row![widgets::scaled_text(value, 20.0, s).font(theme::mono_font()), widgets::meta_text(unit, density::META_TEXT_BASE, s)].spacing(spacing::XS).align_y(Alignment::End),
+        iced::widget::Stack::with_children(graphs).width(Length::Fill).height(Length::Fixed(s.apply(34.0))),
+        widgets::clamped_text(note, 1).size(s.apply(density::META_TEXT_BASE)).color(ink),
+    ]
+    .spacing(spacing::XS);
+    iced::widget::button(body)
+        .padding(spacing::SM)
+        .width(Length::FillPortion(1))
+        .on_press(Message::Tab(crate::Tab::Performance))
+        .style(move |_t: &iced::Theme, status| {
+            let edge = match (warn, status) {
+                (true, _) => theme::warning(),
+                (false, iced::widget::button::Status::Hovered | iced::widget::button::Status::Pressed) => theme::text_dim(),
+                _ => surface::card_border(),
+            };
+            iced::widget::button::Style {
+                background: Some(Background::Color(surface::card())),
+                text_color: theme::text(),
+                border: Border { radius: density::card_radius().into(), width: 1.0, color: edge },
+                ..iced::widget::button::Style::default()
+            }
+        })
+        .into()
+}
+
+/// A core as a bar on its track, as full as the core is busy — never
+/// quite empty, so an idle core still reads as a core.
+fn core_bar<'a>(used: f32, s: FontScale) -> Element<'a, Message> {
+    let full = ((used.clamp(0.0, 1.0) * 100.0).round() as u16).max(2);
+    let fill = if used > 0.5 { theme::info() } else { Color { a: 0.55, ..theme::info() } };
+    let rounded = |color: Color| move |_t: &iced::Theme| container::Style { background: Some(Background::Color(color)), border: Border { radius: 2.0.into(), ..Border::default() }, ..container::Style::default() };
+    container(column![Space::new().height(Length::FillPortion(101 - full)), container(Space::new()).width(Length::Fill).height(Length::FillPortion(full)).style(rounded(fill))])
+        .width(Length::FillPortion(1))
+        .height(Length::Fixed(s.apply(18.0)))
+        .style(rounded(surface::card_border()))
+        .into()
+}
+
 /// A plain box for a card, sized by its share of the row.
 fn boxed<'a>(body: Element<'a, Message>, portion: u16) -> Element<'a, Message> {
     container(body)
@@ -146,13 +192,34 @@ impl App {
     /// 2026-10-17 design ("C"): what was the pressure card now sits in
     /// the cards it is about, and every resource with a history draws it
     /// as a line.
+    ///
+    /// At half a screen the processor and the GPUs take a row each, memory
+    /// sits beside the network, and storage and the busiest processes keep
+    /// what fits ([`Fit::Half`]). A quarter is the glance instead.
     pub fn overview_view(&self, s: FontScale) -> Element<'_, Message> {
-        let page = column![
-            row![self.cpu_card(s), self.memory_card(s)].spacing(spacing::MD),
-            row![self.gpus_card(s), self.network_card(s)].spacing(spacing::MD),
-            self.storage_card(s),
-            self.top_card(s),
-        ]
+        let wide = match self.fit() {
+            Fit::Quarter => return self.glance(s),
+            Fit::Half => false,
+            Fit::Full => true,
+        };
+        let page = if wide {
+            column![
+                row![self.cpu_card(s), self.memory_card(s)].spacing(spacing::MD),
+                row![self.gpus_card(s), self.network_card(s)].spacing(spacing::MD),
+                self.storage_card(true, s),
+                self.top_card(true, s),
+            ]
+        } else {
+            column![
+                self.cpu_card(s),
+                // Even halves here: the full layout's five-to-one is for a
+                // network card sharing a row with the GPUs.
+                row![container(self.memory_card(s)).width(Length::FillPortion(1)), container(self.network_card(s)).width(Length::FillPortion(1))].spacing(spacing::MD),
+                self.gpus_card(s),
+                self.storage_card(false, s),
+                self.top_card(false, s),
+            ]
+        }
         .spacing(spacing::MD)
         .padding(spacing::MD);
         scrollable(page).height(Length::Fill).into()
@@ -296,8 +363,9 @@ impl App {
     }
 
     /// What moved, as two lines — reads and writes, every disk together —
-    /// then each disk and each filesystem's free space side by side.
-    fn storage_card(&self, s: FontScale) -> Element<'_, Message> {
+    /// then each disk and each filesystem's free space — side by side when
+    /// `wide`, one above the other when not.
+    fn storage_card(&self, wide: bool, s: FontScale) -> Element<'_, Message> {
         let ceiling = self.history.reads.ceiling(64.0 * 1024.0).max(self.history.writes.ceiling(64.0 * 1024.0));
         let reads = self.history.reads.last().unwrap_or(0.0);
         let writes = self.history.writes.last().unwrap_or(0.0);
@@ -345,7 +413,11 @@ impl App {
             widgets::section_label("Storage", s),
             legend,
             graph,
-            row![container(disks).width(Length::FillPortion(1)), container(mounts).width(Length::FillPortion(1))].spacing(spacing::LG),
+            if wide {
+                Element::from(row![container(disks).width(Length::FillPortion(1)), container(mounts).width(Length::FillPortion(1))].spacing(spacing::LG))
+            } else {
+                column![disks, mounts].spacing(spacing::MD).into()
+            },
         ]
         .spacing(spacing::SM);
         boxed(body.into(), 1)
@@ -375,57 +447,151 @@ impl App {
         container(card("Network".to_string(), body.into(), s)).width(Length::FillPortion(5)).into()
     }
 
-    fn top_card(&self, s: FontScale) -> Element<'_, Message> {
+    /// The busiest processes, with a minute of each. Narrow, five
+    /// columns of the ten — name, the minute, CPU, memory and PID — and
+    /// eight rows: the rest are Processes' and Details' to show.
+    fn top_card(&self, wide: bool, s: FontScale) -> Element<'_, Message> {
         let mut busiest: Vec<&model::Entry> = model::entries(&self.table).filter(|e| !e.kernel).collect();
         busiest.sort_by(|a, b| b.cpu.unwrap_or(0.0).total_cmp(&a.cpu.unwrap_or(0.0)).then(b.private_bytes.cmp(&a.private_bytes)));
         let head = |label: &'static str, w: f32| container(widgets::meta_text(label, density::META_TEXT_BASE, s)).width(Length::Fixed(s.apply(w))).align_x(Alignment::End);
-        let mut body = column![row![
-            widgets::meta_text("Process", density::META_TEXT_BASE, s).width(Length::Fill),
-            head("Last minute", 130.0),
-            head("CPU", 64.0),
-            head("user · sys", 100.0),
-            head("Memory", 84.0),
-            head("Swap", 70.0),
-            head("Faults/s", 90.0),
-            head("Switches/s", 110.0),
-            head("Core", 50.0),
-            head("PID", 80.0),
-        ]
-        .spacing(spacing::SM)]
-        .spacing(spacing::XS);
-        for e in busiest.into_iter().take(14) {
+        let minute = if wide { 130.0 } else { 90.0 };
+        let mut heads = row![widgets::meta_text("Process", density::META_TEXT_BASE, s).width(Length::Fill), head("Last minute", minute), head("CPU", 64.0)].spacing(spacing::SM);
+        if wide {
+            heads = heads.push(head("user · sys", 100.0));
+        }
+        heads = heads.push(head("Memory", 84.0));
+        if wide {
+            heads = heads.push(head("Swap", 70.0)).push(head("Faults/s", 90.0)).push(head("Switches/s", 110.0)).push(head("Core", 50.0));
+        }
+        let mut body = column![heads.push(head("PID", 80.0))].spacing(spacing::XS);
+        for e in busiest.into_iter().take(if wide { 14 } else { 8 }) {
             let mono = |v: String, w: f32| container(widgets::scaled_text(v, density::META_TEXT_BASE, s).font(theme::mono_font())).width(Length::Fixed(s.apply(w))).align_x(Alignment::End);
             let d = e.detail.unwrap_or_default();
             let spark: Element<'_, Message> = match self.process_history.get(&e.id) {
                 Some(series) => {
                     let ceiling = series.values().fold(0.02f32, f32::max);
-                    canvas(Graph { series, ceiling, line: theme::text(), grid: Color::TRANSPARENT, motion: None }).width(Length::Fixed(s.apply(130.0))).height(Length::Fixed(s.apply(18.0))).into()
+                    canvas(Graph { series, ceiling, line: theme::text(), grid: Color::TRANSPARENT, motion: None }).width(Length::Fixed(s.apply(minute))).height(Length::Fixed(s.apply(18.0))).into()
                 }
-                None => Space::new().width(Length::Fixed(s.apply(130.0))).into(),
+                None => Space::new().width(Length::Fixed(s.apply(minute))).into(),
             };
-            let switches = match (d.voluntary, d.forced) {
-                (Some(v), Some(f)) => format!("{} · {}", count(v), count(f)),
-                _ => "—".to_string(),
-            };
-            let core = if e.processor >= 0 { e.processor.to_string() } else { "—".to_string() };
-            body = body.push(
-                row![
-                    widgets::scaled_text(e.name.clone(), density::META_TEXT_BASE, s).width(Length::Fill),
-                    spark,
-                    mono(percent(e.cpu), 64.0),
-                    mono(format!("{:.1} · {:.1}", d.user_pct, d.system_pct), 100.0),
-                    mono(bytes(e.private_bytes), 84.0),
-                    mono(e.swap_bytes.map_or("—".to_string(), bytes), 70.0),
-                    mono(format!("{} · {}", count(d.minor_faults), count(d.major_faults)), 90.0),
-                    mono(switches, 110.0),
-                    mono(core, 50.0),
-                    mono(e.id.pid.to_string(), 80.0),
-                ]
-                .spacing(spacing::SM)
-                .align_y(Alignment::Center),
-            );
+            let mut line = row![widgets::scaled_text(e.name.clone(), density::META_TEXT_BASE, s).width(Length::Fill), spark, mono(percent(e.cpu), 64.0)].spacing(spacing::SM).align_y(Alignment::Center);
+            if wide {
+                line = line.push(mono(format!("{:.1} · {:.1}", d.user_pct, d.system_pct), 100.0));
+            }
+            line = line.push(mono(bytes(e.private_bytes), 84.0));
+            if wide {
+                let switches = match (d.voluntary, d.forced) {
+                    (Some(v), Some(f)) => format!("{} · {}", count(v), count(f)),
+                    _ => "—".to_string(),
+                };
+                let core = if e.processor >= 0 { e.processor.to_string() } else { "—".to_string() };
+                line = line
+                    .push(mono(e.swap_bytes.map_or("—".to_string(), bytes), 70.0))
+                    .push(mono(format!("{} · {}", count(d.minor_faults), count(d.major_faults)), 90.0))
+                    .push(mono(switches, 110.0))
+                    .push(mono(core, 50.0));
+            }
+            body = body.push(line.push(mono(e.id.pid.to_string(), 80.0)));
         }
         card("Busiest processes".to_string(), body.into(), s)
+    }
+
+    /// A quarter of a screen: four tiles that each answer "is this the
+    /// problem?", every core as a bar, and the five processes most likely
+    /// to be it. Nothing scrolls; a tile opens Performance, where the rest
+    /// of it is.
+    fn glance(&self, s: FontScale) -> Element<'_, Message> {
+        let m = &self.machine;
+        let t = self.totals;
+        let motion = self.motion();
+        let line = |series, ceiling, color| -> Element<'_, Message> { canvas(Graph { series, ceiling, line: color, grid: Color::TRANSPARENT, motion }).width(Length::Fill).height(Length::Fill).into() };
+
+        let cpu = tile(
+            "CPU",
+            percent(t.cpu.map(|c| c * 100.0)),
+            m.cpu_celsius.map_or(String::new(), |c| format!("{c:.0} °C")),
+            vec![line(&self.history.cpu, 1.0, theme::text())],
+            m.load.map_or(String::new(), |l| format!("load {:.2}", l[0])),
+            false,
+            s,
+        );
+        let memory = tile(
+            "Memory",
+            bytes(t.memory_used),
+            format!("of {}", bytes(t.memory_total)),
+            vec![line(&self.history.memory, 1.0, theme::info())],
+            format!("{} available", bytes(t.memory_total.saturating_sub(t.memory_used))),
+            false,
+            s,
+        );
+        // The discrete card leads — on a laptop it is the one whose being
+        // busy is news — and every other is the second line and the note.
+        let mut gpus: Vec<&hyprforge_procman::machine::Gpu> = m.gpus.iter().collect();
+        gpus.sort_by_key(|g| g.driver != "nvidia");
+        let busy = |g: &hyprforge_procman::machine::Gpu| if g.power.as_deref() == Some("suspended") { "asleep".to_string() } else { percent(self.gpu_busy(g)) };
+        let maker = |g: &hyprforge_procman::machine::Gpu| hyprforge_procman::gpu::maker(&g.pci, &m.gpus).to_string();
+        let gpu = match gpus.split_first() {
+            Some((lead, rest)) => {
+                let mut graphs = Vec::new();
+                for (g, color) in rest.iter().take(1).map(|g| (g, theme::info())).chain([(lead, theme::text())]) {
+                    if let Some(series) = self.history.gpus.get(&g.card) {
+                        graphs.push(line(series, 1.0, color));
+                    }
+                }
+                let note = rest.iter().map(|g| format!("{} {}", maker(g), busy(g))).collect::<Vec<_>>().join(" · ");
+                tile("GPU", busy(lead), maker(lead), graphs, note, false, s)
+            }
+            None => tile("GPU", "—".to_string(), String::new(), Vec::new(), "No GPU this window can read".to_string(), false, s),
+        };
+        let ceiling = self.history.reads.ceiling(64.0 * 1024.0).max(self.history.writes.ceiling(64.0 * 1024.0));
+        let iowait = self.overview.split[4];
+        let disk = tile(
+            "Disk",
+            rate(Some(f64::from(self.history.writes.last().unwrap_or(0.0)))),
+            "write".to_string(),
+            vec![line(&self.history.reads, ceiling, theme::info()), line(&self.history.writes, ceiling, theme::text())],
+            format!("read {} · I/O wait {}", rate(Some(f64::from(self.history.reads.last().unwrap_or(0.0)))), percent(Some(iowait * 100.0))),
+            // Waiting on the disk is the thing at this size most likely to
+            // be why the machine feels slow, and the one a number alone
+            // does not flag.
+            iowait > 0.1,
+            s,
+        );
+
+        // Sixteen bars and no numbers: at this size the question is "is
+        // one core pinned", and a bar answers it faster than a figure.
+        let mut cores = row![widgets::section_label("Cores", s)].spacing(2.0).align_y(Alignment::Center);
+        cores = cores.push(Space::new().width(Length::Fixed(spacing::SM)));
+        for core in &self.history.cores {
+            cores = cores.push(core_bar(core.last().unwrap_or(0.0), s));
+        }
+
+        let mut busiest: Vec<&model::Entry> = model::entries(&self.table).filter(|e| !e.kernel).collect();
+        busiest.sort_by(|a, b| b.cpu.unwrap_or(0.0).total_cmp(&a.cpu.unwrap_or(0.0)).then(b.private_bytes.cmp(&a.private_bytes)));
+        let mut list = column![row![widgets::section_label("Busiest", s), Space::new().width(Length::Fill)]].spacing(spacing::XS);
+        for e in busiest.into_iter().take(5) {
+            let mono = |v: String, w: f32| container(widgets::scaled_text(v, density::META_TEXT_BASE, s).font(theme::mono_font())).width(Length::Fixed(s.apply(w))).align_x(Alignment::End);
+            let spark: Element<'_, Message> = match self.process_history.get(&e.id) {
+                Some(series) => {
+                    let ceiling = series.values().fold(0.02f32, f32::max);
+                    canvas(Graph { series, ceiling, line: theme::text(), grid: Color::TRANSPARENT, motion: None }).width(Length::Fixed(s.apply(80.0))).height(Length::Fixed(s.apply(16.0))).into()
+                }
+                None => Space::new().width(Length::Fixed(s.apply(80.0))).into(),
+            };
+            list = list.push(
+                row![widgets::scaled_text(e.name.clone(), density::META_TEXT_BASE, s).width(Length::Fill), spark, mono(percent(e.cpu), 64.0), mono(bytes(e.private_bytes), 84.0)]
+                    .spacing(spacing::SM)
+                    .align_y(Alignment::Center),
+            );
+        }
+        column![
+            row![cpu, memory, gpu, disk].spacing(spacing::SM),
+            boxed(column![cores, widgets::divider(), list].spacing(spacing::SM).into(), 1),
+        ]
+        .spacing(spacing::SM)
+        .padding(spacing::SM)
+        .height(Length::Fill)
+        .into()
     }
 
     /// The last reading's running and blocked counts.

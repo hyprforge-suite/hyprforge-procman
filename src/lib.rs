@@ -13,6 +13,7 @@ pub mod bound;
 pub mod cgroups;
 pub mod efficiency;
 pub mod exits;
+pub mod fit;
 pub mod flatpak;
 pub mod gpu;
 #[cfg(feature = "gui")]
