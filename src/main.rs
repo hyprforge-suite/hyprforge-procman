@@ -250,7 +250,6 @@ pub enum Message {
     Tree(bool),
     /// App history's range, in days.
     HistoryRange(usize),
-    Advanced(bool),
     StartupLoaded(Box<StartupData>),
     /// An autostart entry on or off, by id.
     Autostart(String, bool),
@@ -407,7 +406,6 @@ pub struct App {
     pub apps_db: Option<hyprforge_mime::MimeDb>,
     history_saved: std::time::Instant,
     /// The btop/atop-verbose view: the Overview tab and the extra columns.
-    pub advanced: bool,
     /// Machine-wide rates the Overview shows.
     pub overview: Overview,
     /// The last reading's running and blocked counts.
@@ -626,7 +624,8 @@ impl App {
     fn new() -> (App, Task<Message>) {
         let fs = ProcFs::default();
         let app = App {
-            tab: Tab::Processes,
+            // Everything at once, first: the dashboard is where it opens.
+            tab: Tab::Overview,
             fs: fs.clone(),
             users: Users::default(),
             // SAFETY: getuid has no preconditions.
@@ -670,7 +669,6 @@ impl App {
             recorded: recorded_view::RecordedTab::default(),
             apps_db: None,
             history_saved: std::time::Instant::now(),
-            advanced: false,
             overview: Overview::default(),
             counters: Default::default(),
             process_history: HashMap::new(),
@@ -789,10 +787,13 @@ impl App {
     /// The reader for the next refresh. Wakeups cost a small file per
     /// thread — about 1,300 here, 13 ms a reading becoming 20 — so they
     /// are read only while the Battery page shows them, as `status` is
-    /// read only for the Advanced view.
+    /// read only for the tabs that show it.
     pub(crate) fn reader(&self) -> ProcFs {
         let mut fs = self.fs.clone();
         fs.thread_schedstat = self.tab == Tab::Performance && self.resource == Resource::Battery;
+        // `status` is one more file per process: read only while a tab
+        // shows what it holds — the Overview's rates and Details' columns.
+        fs.verbose = matches!(self.tab, Tab::Overview | Tab::Details);
         fs
     }
 
@@ -875,18 +876,6 @@ impl App {
             }
             Message::Tree(on) => self.details.tree = on,
             Message::HistoryRange(days) => self.history_days = days,
-            Message::Advanced(on) => {
-                self.advanced = on;
-                // `status` is one more file per process: read only while
-                // something shows what it holds.
-                self.fs.verbose = on;
-                if !on && self.tab == Tab::Overview {
-                    self.tab = Tab::Processes;
-                }
-                if on {
-                    self.tab = Tab::Overview;
-                }
-            }
             Message::StartupLoaded(data) => self.startup = Some(*data),
             Message::Autostart(id, on) => {
                 let Some(entry) = self.startup.as_ref().and_then(|d| d.autostarts.iter().find(|a| a.id == id)).cloned() else {
@@ -1265,7 +1254,6 @@ impl App {
             Key::Char('7') if ctrl => return self.update(Message::Tab(Tab::Crashes)),
             Key::Char('8') if ctrl => return self.update(Message::Tab(Tab::Rules)),
             Key::Char('p') if ctrl => self.paused = !self.paused,
-            Key::Char('.') if ctrl => return self.update(Message::Advanced(!self.advanced)),
             _ => {}
         }
         Task::none()
@@ -1341,7 +1329,7 @@ impl App {
             usage.cpu = sample::shares(before, &snapshot);
             usage.disk = sample::disk_rates(before, &snapshot, seconds);
             usage.net = sample::net_rates(before, &snapshot, seconds);
-            if self.advanced && seconds > 0.0 {
+            if seconds > 0.0 {
                 usage.detail = sample::details(before, &snapshot, seconds);
                 let rate = |now: u64, then: u64| now.saturating_sub(then) as f64 / seconds;
                 let (c, b) = (snapshot.counters, before.counters);
@@ -1445,7 +1433,7 @@ impl App {
         }
         // A minute of CPU per process, for the Overview's sparklines; a
         // process that ended takes its history with it.
-        if self.advanced {
+        {
             let live: std::collections::HashSet<Id> = model::entries(&self.table).map(|e| e.id).collect();
             self.process_history.retain(|id, _| live.contains(id));
             for e in model::entries(&self.table) {
@@ -1644,7 +1632,6 @@ mod render {
         // History in memory only: a test never writes the user's file.
         app.app_history = Ok(Default::default());
         app.history_saved = std::time::Instant::now() + Duration::from_secs(3600);
-        let _ = app.update(Message::Advanced(true));
         let mut fs = ProcFs::default();
         fs.verbose = true;
         // A dozen readings half a second apart: the graphs get a line,

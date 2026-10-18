@@ -37,8 +37,8 @@ other Hyprforge component to start.
   cgroups, start, stop, restart, enable and disable, and the journal.
 - **Users**, **Details** (`port:8080` and `file:~/notes.txt` find who has
   them; a process's memory split into its own, what it shares with other
-  programs and its fair part of that, and what is swapped out), **App history** per app per day, and an **Advanced** view
-  (Ctrl+.) with btop's layout and atop's detail.
+  programs and its fair part of that, and what is swapped out), **App history** per app per day, and the **Overview**, where
+  the window opens: btop's layout with atop's detail.
 - **Crashes**: every program that crashed, with the crashing thread and
   its stack trace (Copy stack trace makes a bug report), and every one
   killed for memory — by the kernel because the machine ran out, at a

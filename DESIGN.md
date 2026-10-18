@@ -241,7 +241,7 @@ as administrator through pkexec.
 - **The helper:** polkit-checked and typed. Show everything, End as administrator, Raise priority.
 
 **Since added:**
-- **Advanced mode** (Ctrl+.): the Overview tab, btop's layout with atop's detail, and the extra columns in Details.
+- **Advanced mode** (Ctrl+.): the Overview tab, btop's layout with atop's detail, and the extra columns in Details. Since 2026-10-17 not a mode: the Overview is the first tab and where the window opens, Details always has every column, and `status` is read only while one of those two is showing.
 - **App history:** per app, per day, for 30 days. It records only while the window is open, and says so.
 - **GPUs:** every one is listed, NVIDIA's included, read without waking it. Each process shows which GPU it uses.
 - **The recorder** (`hyprforge-procman-recorder`): a sandboxed root unit that samples the whole machine every 10 s into a root-only journal, one file a day. It writes about 30 MB a day and costs 0.41% of a core. The helper's `OpenHistory` hands a day's journal over as an open file after a polkit check. atop keeps running beside it.

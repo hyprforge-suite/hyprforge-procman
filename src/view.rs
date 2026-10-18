@@ -140,11 +140,7 @@ impl App {
     }
 
     fn header(&self, s: FontScale) -> Element<'_, Message> {
-        // The Overview is the Advanced view's own tab, first when shown.
-        let mut list: Vec<(Tab, &str)> = Vec::new();
-        if self.advanced {
-            list.push((Tab::Overview, "Overview"));
-        }
+        let mut list: Vec<(Tab, &str)> = vec![(Tab::Overview, "Overview")];
         list.extend([
             (Tab::Processes, "Processes"),
             (Tab::Performance, "Performance"),
@@ -199,8 +195,7 @@ impl App {
             crate::Everything::Asking => widgets::secondary_button("Asking…"),
             crate::Everything::Open(_) => widgets::primary_button("Showing everything"),
         };
-        let advanced = widgets::toggle(self.advanced, s).label("Advanced").on_toggle(Message::Advanced);
-        bar = bar.push(advanced).push(everything).push(speeds).push(pause);
+        bar = bar.push(everything).push(speeds).push(pause);
         container(bar)
             .padding([0.0, spacing::MD])
             .height(Length::Fixed(density::bar_height(s)))

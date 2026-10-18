@@ -1,7 +1,7 @@
 //! The Details tab: every process, every column, as a tree or a flat
 //! list, and what the selected one has open.
 
-use crate::view::{bytes, percent, rate, CPU_W, DISK_W, MEM_W, NAME_PORTION, PID_W, USER_W};
+use crate::view::{bytes, percent, rate, CPU_W, DISK_W, MEM_W, PID_W, USER_W};
 use crate::{App, Message};
 use hyprforge_procman::model::{self, Column, Entry};
 use hyprforge_procman::signal::How;
@@ -96,8 +96,9 @@ pub fn duration(seconds: u64) -> String {
 
 impl App {
     pub fn details_view(&self, s: FontScale) -> Element<'_, Message> {
-        let advanced = self.advanced;
-        let name_width = if advanced { Length::Fixed(s.apply(ADVANCED_NAME_W)) } else { Length::FillPortion(NAME_PORTION) };
+        // Every column, always: the table is wider than the window and
+        // scrolls sideways, so the name has a width of its own.
+        let name_width = Length::Fixed(s.apply(ADVANCED_NAME_W));
         let mut heads = row![
             self.column_head("Name", Column::Name, name_width, false, s),
             self.column_head("PID", Column::Pid, Length::Fixed(s.apply(PID_W)), true, s),
@@ -110,12 +111,10 @@ impl App {
             container(widgets::meta_text("Priority", density::META_TEXT_BASE, s)).width(Length::Fixed(s.apply(NICE_W))).padding([spacing::XS, spacing::SM]).align_x(Alignment::End),
         ]
         .padding([0.0, spacing::SM]);
-        if advanced {
-            for (label, w) in ADVANCED {
-                heads = heads.push(
-                    container(widgets::meta_text(label, density::META_TEXT_BASE, s)).width(Length::Fixed(s.apply(w))).padding([spacing::XS, spacing::SM]).align_x(Alignment::End),
-                );
-            }
+        for (label, w) in ADVANCED {
+            heads = heads.push(
+                container(widgets::meta_text(label, density::META_TEXT_BASE, s)).width(Length::Fixed(s.apply(w))).padding([spacing::XS, spacing::SM]).align_x(Alignment::End),
+            );
         }
 
         let lines = model::details(&self.table, &self.view, self.details.tree);
@@ -144,7 +143,7 @@ impl App {
             Space::new().width(Length::Fill),
         ]
         .padding([spacing::SM, spacing::MD]);
-        let table: Element<'_, Message> = if advanced {
+        let table: Element<'_, Message> = {
             // Wider than the window: the header and the rows scroll
             // sideways together, and the rows alone scroll down.
             let fixed = [PID_W, USER_W, CPU_W, TIME_W, MEM_W, DISK_W, THREADS_W, NICE_W].iter().sum::<f32>() + ADVANCED.iter().map(|(_, w)| w).sum::<f32>();
@@ -157,8 +156,6 @@ impl App {
             .direction(iced::widget::scrollable::Direction::Horizontal(iced::widget::scrollable::Scrollbar::default()))
             .height(Length::FillPortion(3))
             .into()
-        } else {
-            column![heads, widgets::divider(), scrollable(list).height(Length::Fill)].height(Length::FillPortion(3)).into()
         };
         let mut page = column![controls, widgets::divider(), table];
         if let Some(entry) = self.selected.and_then(|id| model::entries(&self.table).find(|e| e.id == id)) {
@@ -177,7 +174,7 @@ impl App {
         };
         let indent = Space::new().width(Length::Fixed(s.apply(14.0) * depth as f32));
         let name = row![indent, self.entry_name(&e, s)].align_y(Alignment::Center);
-        let name_width = if self.advanced { Length::Fixed(s.apply(ADVANCED_NAME_W)) } else { Length::FillPortion(NAME_PORTION) };
+        let name_width = Length::Fixed(s.apply(ADVANCED_NAME_W));
         let mut line = row![
             container(name).width(name_width).padding([0.0, spacing::SM]).clip(true),
             cell(e.id.pid.to_string(), PID_W),
@@ -190,7 +187,7 @@ impl App {
             cell(e.nice.to_string(), NICE_W),
         ]
         .align_y(Alignment::Center);
-        if self.advanced {
+        {
             let d = e.detail;
             let values = [
                 d.map_or("—".to_string(), |d| format!("{:.1} · {:.1}", d.user_pct, d.system_pct)),
