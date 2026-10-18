@@ -40,3 +40,28 @@ mod tests {
         assert_eq!(within(QUICK, "systemd", async { Ok::<_, String>(7) }).await, Ok(7));
     }
 }
+
+/// The runtime a user service here runs on: one thread, with both of
+/// tokio's drivers. Efficiency mode and the rules service were each built
+/// with timers only, and the first D-Bus call panicked — "A Tokio 1.x
+/// context was found, but IO is disabled" — and systemd restarted them
+/// 31 times before anyone looked. Their dry runs never reached the bus,
+/// so nothing caught it; the live test below does.
+pub fn service_runtime() -> std::io::Result<tokio::runtime::Runtime> {
+    tokio::runtime::Builder::new_current_thread().enable_all().build()
+}
+
+#[cfg(test)]
+mod runtime_tests {
+    /// Read-only: the services' runtime reaches the session bus, as both
+    /// services do on their first call to systemd.
+    #[test]
+    #[ignore = "live (systemd): changes nothing"]
+    fn a_services_runtime_can_reach_the_session_bus() {
+        let rt = super::service_runtime().unwrap();
+        rt.block_on(async {
+            let conn = zbus::Connection::session().await.expect("the session bus, through this runtime");
+            assert!(conn.unique_name().is_some());
+        });
+    }
+}

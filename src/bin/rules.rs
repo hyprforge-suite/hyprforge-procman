@@ -180,7 +180,7 @@ fn main() -> std::process::ExitCode {
         return std::process::ExitCode::SUCCESS;
     }
 
-    let runtime = match tokio::runtime::Builder::new_current_thread().enable_time().build() {
+    let runtime = match hyprforge_procman::bound::service_runtime() {
         Ok(r) => r,
         Err(e) => {
             tracing::error!("couldn't start: {e}");
