@@ -316,6 +316,8 @@ pub enum Message {
     OpenLimits(Id),
     /// Open or close a run of same-named background processes.
     OpenRun(String),
+    /// Start or stop waiting for a click on another window.
+    PickWindow(bool),
     /// Which column a narrow Processes list keeps: Disk, Network or GPU.
     NarrowColumn(Column),
     DesktopLoaded(app_icons::Desktop),
@@ -437,6 +439,14 @@ pub struct App {
     /// Apps efficiency mode is holding back right now, by lead — read
     /// from their units' weights each refresh.
     pub held_back: std::collections::HashSet<Id>,
+    /// Waiting for a click on another window, to select its app.
+    pub picking: bool,
+    /// A window was just picked: bring this one back to the front.
+    pub come_back: bool,
+    /// The window that was focused when this was opened with
+    /// `--end-focused`: selected, and asked about ending, once the first
+    /// reading has the list it is in.
+    pub end_focused: Option<i32>,
     /// The app chosen on App history; until one is, the busiest.
     pub history_app: Option<String>,
     /// The processor's name and clocks, read once at start.
@@ -712,6 +722,9 @@ impl App {
             app_cpu: HashMap::new(),
             narrow_column: Column::Gpu,
             held_back: std::collections::HashSet::new(),
+            picking: false,
+            come_back: false,
+            end_focused: END_FOCUSED.get().copied().flatten(),
             history_app: None,
             processor: SysFs::default().processor(),
             history_saved: std::time::Instant::now(),
@@ -940,7 +953,12 @@ impl App {
             Message::Read(result) => {
                 self.reading = false;
                 match result {
-                    Ok(reading) => self.take(*reading),
+                    Ok(reading) => {
+                        self.take(*reading);
+                        if std::mem::take(&mut self.come_back) {
+                            switch_to(std::process::id() as i32);
+                        }
+                    }
                     Err(e) => self.notice = Some(e),
                 }
             }
@@ -1214,6 +1232,7 @@ impl App {
                 }
             }
             Message::NarrowColumn(column) => self.narrow_column = column,
+            Message::PickWindow(on) => self.picking = on,
             Message::DesktopLoaded(desktop) => {
                 self.desktop = Some(desktop);
                 self.find_icons();
@@ -1366,6 +1385,19 @@ impl App {
         Some(Confirm { id, name: entry.name.clone(), command: entry.command.clone(), how, windows: 0, critical, tree: false })
     }
 
+    /// Selects what the list shows `pid` as — its app, or itself — on
+    /// the Processes tab. False when it isn't listed.
+    fn land_on(&mut self, pid: i32) -> bool {
+        match model::row_of(&self.table, pid) {
+            Some(id) => {
+                self.tab = Tab::Processes;
+                self.selected = Some(id);
+                true
+            }
+            None => false,
+        }
+    }
+
     fn take(&mut self, reading: Reading) {
         let Reading { snapshot, gpu, mut machine, windows, at, nvidia, everything_lapsed, held } = reading;
         // Temperatures read now and then are kept between reads.
@@ -1478,6 +1510,33 @@ impl App {
         let users = &mut self.users;
         let flatpaks = hyprforge_procman::flatpak::scopes(std::path::Path::new("/sys/fs/cgroup"));
         self.table = model::table(&snapshot, &usage, &windows, &flatpaks, self.me, &mut |uid| users.name(uid));
+        // A window picked: the first reading in which another window has
+        // the focus is the click. Its app is selected and this window
+        // comes back to the front to show it.
+        let me = std::process::id() as i32;
+        if self.picking {
+            if let Some(pid) = hyprforge_procman::windows::focused(&windows, me) {
+                self.picking = false;
+                self.notice = None;
+                if !self.land_on(pid) {
+                    self.notice = Some("That window's process has already gone.".to_string());
+                }
+                // Done by whoever handed over the reading, not here: this
+                // is also what a test drives, and a test must never move
+                // the focus of the session it runs in.
+                self.come_back = true;
+            }
+        }
+        // Opened with `--end-focused`: the window that had the focus,
+        // selected and asked about — never ended without the question,
+        // since a key pressed by accident should cost nothing.
+        if let Some(pid) = self.end_focused.take() {
+            if self.land_on(pid) {
+                self.confirm = self.selected.and_then(|id| self.confirmation(id, How::Ask));
+            } else {
+                self.notice = Some("The window that was focused has already gone.".to_string());
+            }
+        }
 
         let m = snapshot.memory;
         let cpu = self.last.as_ref().map(|before| sample::busy(before.cpu, snapshot.cpu));
@@ -1662,7 +1721,15 @@ fn switch_to(pid: i32) {
     });
 }
 
+/// `--end-focused`: the window focused when this was started, read before
+/// this window exists to take the focus itself. For a key bind.
+static END_FOCUSED: std::sync::OnceLock<Option<i32>> = std::sync::OnceLock::new();
+
 fn main() -> iced::Result {
+    if std::env::args().any(|a| a == "--end-focused") {
+        let focused = hyprforge_procman::windows::read().ok().and_then(|w| hyprforge_procman::windows::focused(&w, std::process::id() as i32));
+        let _ = END_FOCUSED.set(focused);
+    }
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),

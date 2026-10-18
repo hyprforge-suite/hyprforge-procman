@@ -131,6 +131,59 @@ pub mod tests {
         app
     }
 
+    /// A reading of this machine with one window, focused, belonging to
+    /// whatever started this test — another process, as a click on
+    /// another window would be.
+    fn reading_with_focus_on(pid: i32) -> crate::Reading {
+        let window = hyprforge_procman::windows::Window { pid, class: "test.runner".into(), title: "picked".into(), focus: 0, ..Default::default() };
+        crate::Reading {
+            snapshot: ProcFs::default().snapshot().unwrap(),
+            gpu: Default::default(),
+            machine: Default::default(),
+            windows: Ok(vec![window]),
+            at: std::time::Instant::now(),
+            nvidia: None,
+            everything_lapsed: false,
+            held: None,
+        }
+    }
+
+    /// Picking: the first reading in which another window has the focus
+    /// selects its app, stops picking, and asks for this window back —
+    /// asks, because the dispatch belongs to the caller, never to a test.
+    #[test]
+    fn a_click_on_another_window_selects_its_app() {
+        let mut app = window();
+        app.picking = true;
+        let parent = std::os::unix::process::parent_id() as i32;
+        app.take(reading_with_focus_on(parent));
+        assert!(!app.picking && app.come_back);
+        assert_eq!(app.selected.map(|id| id.pid), Some(parent));
+        assert_eq!(app.tab, crate::Tab::Processes);
+    }
+
+    /// While this window is the focused one nothing has been clicked yet.
+    #[test]
+    fn this_window_focused_is_not_a_pick() {
+        let mut app = window();
+        app.picking = true;
+        app.take(reading_with_focus_on(std::process::id() as i32));
+        assert!(app.picking && !app.come_back);
+    }
+
+    /// `--end-focused` selects the window that had the focus and asks —
+    /// it never ends anything on a key press alone.
+    #[test]
+    fn end_focused_asks_about_the_focused_window() {
+        let mut app = window();
+        let parent = std::os::unix::process::parent_id() as i32;
+        app.end_focused = Some(parent);
+        app.take(reading_with_focus_on(parent));
+        let asked = app.confirm.as_ref().expect("a question, not an ending");
+        assert_eq!((asked.id.pid, asked.how), (parent, How::Ask));
+        assert_eq!(app.end_focused, None, "asked once");
+    }
+
     /// The window and this process's id, for other modules' tests.
     pub fn tests_window() -> App {
         window()

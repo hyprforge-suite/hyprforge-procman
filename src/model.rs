@@ -469,6 +469,18 @@ pub fn lines(table: &Table, view: &View) -> Vec<Line> {
     out
 }
 
+/// What the list shows `pid` as: the app it belongs to (by its lead), or
+/// itself when it is a background process — what selecting "the window
+/// under the pointer" or "the focused window" has to land on.
+pub fn row_of(table: &Table, pid: i32) -> Option<Id> {
+    table
+        .apps
+        .iter()
+        .find(|a| a.members.iter().any(|m| m.id.pid == pid))
+        .map(|a| a.lead.id)
+        .or_else(|| table.background.iter().find(|e| e.id.pid == pid).map(|e| e.id))
+}
+
 /// Every process in the table, apps' and background alike.
 pub fn entries(table: &Table) -> impl Iterator<Item = &Entry> {
     table.apps.iter().flat_map(|a| a.members.iter()).chain(table.background.iter())
@@ -622,6 +634,19 @@ mod tests {
         let flatpaks: HashMap<i32, String> = [830281, 830302, 830303, 830306, 830307].into_iter().map(|p| (p, "com.github.tchx84.Flatseal".to_string())).collect();
         let windows = if with_window { vec![window(830307, "com.github.tchx84.Flatseal", "Flatseal")] } else { Vec::new() };
         table(&snapshot, &Use::default(), &windows, &flatpaks, 1000, &mut |_| "voldemort".into())
+    }
+
+    /// A window's pid can be any process of its app — a browser's window
+    /// belongs to its lead's group — and the row to select is the app's.
+    #[test]
+    fn a_pid_lands_on_its_apps_row_or_its_own() {
+        let member = Entry { id: Id { pid: 11, start: 1 }, ..Entry::default() };
+        let lead = Entry { id: Id { pid: 10, start: 1 }, ..Entry::default() };
+        let app = App { lead: lead.clone(), class: "c".into(), title: String::new(), windows: 1, members: vec![lead, member], flatpak: None };
+        let t = Table { apps: vec![app], background: vec![bg(30, "daemon", 0.0)] };
+        assert_eq!(row_of(&t, 11), Some(Id { pid: 10, start: 1 }));
+        assert_eq!(row_of(&t, 30), Some(Id { pid: 30, start: 1 }));
+        assert_eq!(row_of(&t, 99), None);
     }
 
     fn bg(pid: i32, name: &str, cpu: f32) -> Entry {

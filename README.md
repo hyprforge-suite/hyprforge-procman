@@ -50,6 +50,12 @@ other Hyprforge component to start.
   memory and I/O pressure, strained stretches marked; pick a moment and
   see what was busiest, and what the hour around it added up to.
 
+**Which app is this window?** Pick a window (in the Processes tab's
+status line) and click any window: its app is selected here. For a key
+bind, `hyprforge-procman --end-focused` opens with the focused window's
+app selected and asks before ending it — a key pressed by accident ends
+nothing. In Lua: `hl.bind("SUPER + SHIFT + Escape", hl.dsp.exec_cmd("hyprforge-procman --end-focused"))`.
+
 **Efficiency mode** (`hyprforge-procman-efficiency`, a user service,
 off until switched on from the Processes tab) gives an app with no
 window on screen less CPU while something on screen wants it, through

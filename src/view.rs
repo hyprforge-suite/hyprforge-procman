@@ -713,6 +713,12 @@ impl App {
                 bar = bar.push(if self.efficiency_busy { toggle } else { toggle.on_toggle(Message::Efficiency) });
             }
             bar = bar.push(widgets::toggle(self.view.show_kernel, s).label("Kernel threads").on_toggle(Message::ShowKernel));
+            // Click this, then any window: its app is selected here.
+            bar = bar.push(if self.picking {
+                widgets::primary_button("Click a window… (stop)").on_press(Message::PickWindow(false))
+            } else {
+                widgets::secondary_button("Pick a window").on_press(Message::PickWindow(true))
+            });
         }
         container(bar).padding([spacing::SM, spacing::MD]).style(|_t: &iced::Theme| container::Style {
             background: Some(Background::Color(surface::sidebar())),

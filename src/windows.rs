@@ -66,6 +66,13 @@ pub fn read_shown() -> Result<std::collections::HashSet<i64>, String> {
 }
 
 /// The windows Hyprland has, or why there are none to show.
+/// The pid behind the focused window, unless it is `except`'s — this
+/// window's own, which is focused whenever someone is looking at it and
+/// so never the one they meant.
+pub fn focused(windows: &[Window], except: i32) -> Option<i32> {
+    windows.iter().find(|w| w.focus == 0 && w.pid != except).map(|w| w.pid)
+}
+
 pub fn read() -> Result<Vec<Window>, String> {
     let out = hyprforge_process::output(Command::new("hyprctl").args(["clients", "-j"]), hyprforge_process::TIMEOUT)
         .map_err(|e| format!("hyprctl didn't answer: {e}"))?;
@@ -109,6 +116,16 @@ mod tests {
         let json = fixture::clients(&[(4242, "firefox", "The Daily Prophet"), (-1, "ghost", "")]);
         let windows = parse(&json).unwrap();
         assert_eq!(windows, [Window { pid: 4242, class: "firefox".into(), title: "The Daily Prophet".into(), workspace: WorkspaceRef { id: 1 }, hidden: false, focus: 0 }]);
+    }
+
+    /// The focused window is the one picked — unless it is this window,
+    /// which is focused whenever anyone is looking at it.
+    #[test]
+    fn the_focused_window_is_never_this_one() {
+        let w = |pid, focus| Window { pid, focus, ..Window::default() };
+        assert_eq!(focused(&[w(10, 1), w(20, 0)], 99), Some(20));
+        assert_eq!(focused(&[w(99, 0), w(20, 1)], 99), None, "this window focused: nothing picked yet");
+        assert_eq!(focused(&[], 99), None);
     }
 
     /// This machine's monitor on 2026-10-17, and the window list's own
