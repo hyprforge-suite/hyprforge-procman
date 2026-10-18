@@ -218,12 +218,12 @@ impl App {
                 let o = &self.overview.split;
                 let legend = row![
                     key(theme::text(), "all", percent(t.cpu.map(|c| c * 100.0)), s),
-                    key(theme::warning(), "kernel", percent(Some((o[2] + o[5] + o[6]) * 100.0)), s),
+                    key(theme::text_dim(), "kernel", percent(Some((o[2] + o[5] + o[6]) * 100.0)), s),
                 ]
                 .spacing(spacing::MD);
                 let graph = stack![
                     canvas(Graph { series: &self.history.cpu, ceiling: 1.0, line: theme::text(), grid: surface::card_border(), motion: self.motion() }).width(Length::Fill).height(Length::Fixed(s.apply(if wide { 220.0 } else { 170.0 }))),
-                    canvas(Graph { series: &self.history.cpu_system, ceiling: 1.0, line: theme::warning(), grid: Color::TRANSPARENT, motion: self.motion() }).width(Length::Fill).height(Length::Fixed(s.apply(if wide { 220.0 } else { 170.0 }))),
+                    canvas(Graph { series: &self.history.cpu_system, ceiling: 1.0, line: theme::text_dim(), grid: Color::TRANSPARENT, motion: self.motion() }).width(Length::Fill).height(Length::Fixed(s.apply(if wide { 220.0 } else { 170.0 }))),
                 ];
                 let title = p.model.clone().unwrap_or_else(|| "Processor".to_string());
                 self.page(title, about.join(" · "), percent(t.cpu.map(|c| c * 100.0)), boxed(column![legend, graph].spacing(spacing::SM).into()), facts, columns, Some(self.threads(wide, s)), s)
@@ -322,7 +322,7 @@ impl App {
         }
     }
 
-    /// Every thread as a cell: its share in the info colour, deeper the
+    /// Every thread as a cell: its share in the text colour, deeper the
     /// busier, its own minute as a line, and its clock. Eight to a row,
     /// where sixteen separate graphs took a screen.
     fn threads(&self, wide: bool, s: FontScale) -> Element<'_, Message> {
@@ -333,8 +333,8 @@ impl App {
                 let index = n * 8 + i;
                 let used = series.last().unwrap_or(0.0).clamp(0.0, 1.0);
                 let hot = used > 0.5;
-                let base = theme::info();
-                let fill = if hot { base } else { Color { a: 0.06 + used * 0.9, ..base } };
+                let base = theme::text();
+                let fill = if hot { base } else { Color { a: 0.05 + used * 0.5, ..base } };
                 let ink = if hot { surface::root() } else { theme::text() };
                 let sub = if hot { surface::root() } else { theme::text_dim() };
                 let mhz = self.machine.clocks.get(index).and_then(|c| c.0).map_or("—".to_string(), clock);

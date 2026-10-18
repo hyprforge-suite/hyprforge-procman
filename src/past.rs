@@ -95,11 +95,14 @@ impl App {
         };
 
         let mut page = column![bar].spacing(spacing::MD);
+        // The chosen app's part of each day is the selection drawn as a
+        // chart, so it takes the accent, as the row it belongs to does.
+        let accent = hyprforge_ui::color::to_iced(theme::active().accent);
         // A day has nothing to compare: the chart is for a range.
         if self.history_days > 1 {
             let days = history.daily(&today, self.history_days, chosen.as_deref());
             if !days.is_empty() {
-                let chart = canvas(Days { days: days.iter().map(|d| (d.1, d.2)).collect(), track: surface::card_border(), part: theme::info() }).width(Length::Fill).height(Length::Fixed(s.apply(130.0)));
+                let chart = canvas(Days { days: days.iter().map(|d| (d.1, d.2)).collect(), track: surface::card_border(), part: accent }).width(Length::Fill).height(Length::Fixed(s.apply(130.0)));
                 // A label under every bar for a week; for a month, only
                 // the newest of each week and today.
                 let mut labels = row![].spacing(0.0);
@@ -146,7 +149,7 @@ impl App {
                 ..container::Style::default()
             });
             let fill = container(Space::new()).width(Length::FillPortion(((share * 1000.0) as u16).max(1))).height(Length::Fixed(4.0)).style(move |_t: &iced::Theme| container::Style {
-                background: Some(iced::Background::Color(if selected { theme::info() } else { theme::text_dim() })),
+                background: Some(iced::Background::Color(if selected { theme::text() } else { theme::text_dim() })),
                 ..container::Style::default()
             });
             let rest = Space::new().width(Length::FillPortion((((1.0 - share) * 1000.0) as u16).max(1)));

@@ -101,13 +101,21 @@ fn titled<'a>(title: &str, aside: String, s: FontScale) -> Element<'a, Message> 
         .into()
 }
 
-/// A core's cell in the heat grid: its share in the info colour, deeper
+/// The text colour at `alpha`: how this tab tells data apart without
+/// borrowing a state colour, whose whole worth is that it means one
+/// thing ("info" is somewhere else, "warning" is look here).
+pub(crate) fn shade(alpha: f32) -> Color {
+    Color { a: alpha, ..theme::text() }
+}
+
+/// A core's cell in the heat grid: its share in the text colour, deeper
 /// the busier — and solid, with dark ink, past half. Not the accent: on
-/// this tab nothing is selected, and the accent means selected.
+/// this tab nothing is selected, and the accent means selected. Not a
+/// state colour either: a busy core is not news of any kind.
 fn core_cell<'a>(used: f32, clock: String, s: FontScale) -> Element<'a, Message> {
     let hot = used > 0.5;
-    let base = theme::info();
-    let fill = if hot { base } else { Color { a: 0.08 + used.clamp(0.0, 1.0) * 0.9, ..base } };
+    let base = theme::text();
+    let fill = if hot { base } else { Color { a: 0.05 + used.clamp(0.0, 1.0) * 0.5, ..base } };
     let ink = if hot { theme::surface::root() } else { theme::text() };
     container(
         column![
@@ -164,7 +172,7 @@ fn tile<'a>(label: &'static str, value: String, unit: String, graphs: Vec<Elemen
 /// quite empty, so an idle core still reads as a core.
 fn core_bar<'a>(used: f32, s: FontScale) -> Element<'a, Message> {
     let full = ((used.clamp(0.0, 1.0) * 100.0).round() as u16).max(2);
-    let fill = if used > 0.5 { theme::info() } else { Color { a: 0.55, ..theme::info() } };
+    let fill = if used > 0.5 { theme::text() } else { shade(0.5) };
     let rounded = |color: Color| move |_t: &iced::Theme| container::Style { background: Some(Background::Color(color)), border: Border { radius: 2.0.into(), ..Border::default() }, ..container::Style::default() };
     container(column![Space::new().height(Length::FillPortion(101 - full)), container(Space::new()).width(Length::Fill).height(Length::FillPortion(full)).style(rounded(fill))])
         .width(Length::FillPortion(1))
@@ -249,7 +257,11 @@ impl App {
         .align_y(Alignment::End);
         // Where the time went, in /proc/stat's kinds; idle is the track.
         let (user, nice, system, iowait, irq, softirq, steal) = (o.split[0], o.split[1], o.split[2], o.split[4], o.split[5], o.split[6], o.split[7]);
-        let colors = [theme::info(), theme::success(), theme::warning(), theme::error(), theme::text_dim(), theme::text()];
+        // Kinds of time are not states, so they are shades of the text
+        // colour, each part distinct from the next — save I/O wait, which
+        // is the warning colour because waiting on the disk is the thing
+        // to look at.
+        let colors = [shade(1.0), shade(0.7), shade(0.45), theme::warning(), theme::text_dim(), shade(0.28)];
         let split = widgets::stacked_bar(
             &[(user, colors[0]), (nice, colors[1]), (system, colors[2]), (iowait, colors[3]), (irq + softirq, colors[4]), (steal, colors[5])],
             s,
@@ -295,7 +307,9 @@ impl App {
         let t = self.totals;
         let total = t.memory_total.max(1) as f32;
         let f = |b: u64| b as f32 / total;
-        let colors = [theme::info(), theme::success(), theme::text_dim(), theme::warning(), theme::error()];
+        // Kinds of memory, in shades of the text colour: none of them is
+        // good, bad or elsewhere.
+        let colors = [shade(1.0), shade(0.45), shade(0.28), shade(0.7), theme::text_dim()];
         let cache = d.cached.saturating_sub(d.shmem);
         let bar = widgets::stacked_bar(
             &[(f(d.anon), colors[0]), (f(cache), colors[1]), (f(d.buffers), colors[2]), (f(d.shmem), colors[3]), (f(d.slab), colors[4])],
@@ -371,10 +385,10 @@ impl App {
         let writes = self.history.writes.last().unwrap_or(0.0);
         let graph = iced::widget::stack![
             canvas(Graph { series: &self.history.writes, ceiling, line: theme::text(), grid: surface::card_border(), motion: self.motion() }).width(Length::Fill).height(Length::Fixed(s.apply(72.0))),
-            canvas(Graph { series: &self.history.reads, ceiling, line: theme::info(), grid: Color::TRANSPARENT, motion: self.motion() }).width(Length::Fill).height(Length::Fixed(s.apply(72.0))),
+            canvas(Graph { series: &self.history.reads, ceiling, line: theme::text_dim(), grid: Color::TRANSPARENT, motion: self.motion() }).width(Length::Fill).height(Length::Fixed(s.apply(72.0))),
         ];
         let legend = row![
-            key(theme::info(), "read", rate(Some(f64::from(reads))), s),
+            key(theme::text_dim(), "read", rate(Some(f64::from(reads))), s),
             key(theme::text(), "write", rate(Some(f64::from(writes))), s),
         ]
         .spacing(spacing::MD);
@@ -519,7 +533,7 @@ impl App {
             "Memory",
             bytes(t.memory_used),
             format!("of {}", bytes(t.memory_total)),
-            vec![line(&self.history.memory, 1.0, theme::info())],
+            vec![line(&self.history.memory, 1.0, theme::text())],
             format!("{} available", bytes(t.memory_total.saturating_sub(t.memory_used))),
             false,
             s,
@@ -533,7 +547,7 @@ impl App {
         let gpu = match gpus.split_first() {
             Some((lead, rest)) => {
                 let mut graphs = Vec::new();
-                for (g, color) in rest.iter().take(1).map(|g| (g, theme::info())).chain([(lead, theme::text())]) {
+                for (g, color) in rest.iter().take(1).map(|g| (g, theme::text_dim())).chain([(lead, theme::text())]) {
                     if let Some(series) = self.history.gpus.get(&g.card) {
                         graphs.push(line(series, 1.0, color));
                     }
@@ -549,7 +563,7 @@ impl App {
             "Disk",
             rate(Some(f64::from(self.history.writes.last().unwrap_or(0.0)))),
             "write".to_string(),
-            vec![line(&self.history.reads, ceiling, theme::info()), line(&self.history.writes, ceiling, theme::text())],
+            vec![line(&self.history.reads, ceiling, theme::text_dim()), line(&self.history.writes, ceiling, theme::text())],
             format!("read {} · I/O wait {}", rate(Some(f64::from(self.history.reads.last().unwrap_or(0.0)))), percent(Some(iowait * 100.0))),
             // Waiting on the disk is the thing at this size most likely to
             // be why the machine feels slow, and the one a number alone

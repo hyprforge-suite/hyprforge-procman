@@ -47,17 +47,19 @@ fn name_of(members: &[Entry]) -> String {
 }
 
 /// A figure on a tint as deep as `share` (0 to 1) — the heat the
-/// Processes list draws its CPU, memory and GPU in. The info colour,
-/// never the accent: the accent means selected. Nothing below half a
-/// percent is tinted, so an idle list is a quiet one.
+/// Processes list draws its CPU, memory and GPU in. The text colour,
+/// faint: never the accent, which means selected, and never a state
+/// colour, which would say a busy process is news. Kept under a quarter,
+/// so the figure on it still reads. Nothing below half a percent is
+/// tinted, so an idle list is a quiet one.
 pub fn heat_cell<'a, Message: 'a>(content: String, share: f32, width: f32, s: FontScale) -> Element<'a, Message> {
-    let alpha = if share <= 0.005 { 0.0 } else { (0.06 + share * 1.6).min(0.5) };
+    let alpha = if share <= 0.005 { 0.0 } else { (0.04 + share * 0.8).min(0.24) };
     container(widgets::scaled_text(content, density::ROW_TEXT_BASE, s).font(theme::mono_font()))
         .width(Length::Fixed(s.apply(width)))
         .padding([2.0, spacing::SM])
         .align_x(Alignment::End)
         .style(move |_t: &iced::Theme| container::Style {
-            background: (alpha > 0.0).then(|| Background::Color(iced::Color { a: alpha, ..theme::info() })),
+            background: (alpha > 0.0).then(|| Background::Color(iced::Color { a: alpha, ..theme::text() })),
             border: Border { radius: density::inner_radius().into(), ..Border::default() },
             ..container::Style::default()
         })

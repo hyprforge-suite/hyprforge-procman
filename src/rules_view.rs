@@ -152,7 +152,7 @@ impl App {
                 cell(widths[0], mono(r.priority.clone(), theme::text())),
                 cell(widths[1], mono(r.memory.clone(), theme::text())),
                 cell(widths[2], mono(cpu, theme::text())),
-                cell(widths[3], mono(r.warn.clone(), theme::warning())),
+                cell(widths[3], mono(r.warn.clone(), theme::text())),
                 cell(widths[4], mono(if running == 0 { String::new() } else { running.to_string() }, theme::text_dim())),
             ]
             .spacing(spacing::MD)
