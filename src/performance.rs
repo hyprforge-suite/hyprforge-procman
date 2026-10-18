@@ -7,7 +7,6 @@
 //! 5070"), not by their index ("Disk 0", "GPU 0 · nvidia"), and grouped,
 //! so three drives read as storage rather than three strangers.
 
-use crate::details::duration;
 use crate::view::{bytes, percent, rate};
 use crate::{App, Message, Resource};
 use hyprforge_procman::fit::Fit;
@@ -58,6 +57,17 @@ fn clock(mhz: u32) -> String {
     if mhz >= 1000 { format!("{:.1} GHz", f64::from(mhz) / 1000.0) } else { format!("{mhz} MHz") }
 }
 
+/// `1 d 17 h`, `5 h 12 m`, `14 m`: how long the machine has been up,
+/// in the two units that matter at that length.
+fn uptime(seconds: u64) -> String {
+    let (d, h, m) = (seconds / 86_400, seconds % 86_400 / 3600, seconds % 3600 / 60);
+    match (d, h) {
+        (0, 0) => format!("{m} m"),
+        (0, _) => format!("{h} h {m} m"),
+        _ => format!("{d} d {h} h"),
+    }
+}
+
 /// A GPU's name: the driver's own, without the maker it repeats, or the
 /// maker's when the driver gives none.
 fn gpu_name(maker: &str, reading: Option<&str>) -> String {
@@ -79,10 +89,10 @@ impl App {
             let strip = scrollable(strip).direction(scrollable::Direction::Horizontal(scrollable::Scrollbar::new().width(4.0).scroller_width(4.0)));
             return column![strip, widgets::divider(), detail].height(Length::Fill).into();
         }
-        let mut rail = column![].spacing(spacing::SM).padding(spacing::MD);
+        let mut rail = column![].spacing(2.0).padding(spacing::SM);
         for item in items {
             if let Some(group) = item.group {
-                rail = rail.push(container(widgets::section_label(group, s)).padding(iced::Padding { top: spacing::SM, bottom: 0.0, left: spacing::XS, right: 0.0 }));
+                rail = rail.push(container(widgets::meta_text(group, density::META_TEXT_BASE, s)).padding(iced::Padding { top: spacing::MD, bottom: 0.0, left: spacing::SM, right: 0.0 }));
             }
             rail = rail.push(self.resource_card(item, None, s));
         }
@@ -90,9 +100,8 @@ impl App {
         row![rail, widgets::vertical_divider(), detail].height(Length::Fill).into()
     }
 
-    /// A resource as a card: its name and figure, and its minute as a
-    /// line. The chosen one has the accent edge — filled, it hid the
-    /// line it was chosen for.
+    /// A resource as a row: its name and figure, and its minute as a
+    /// line, chosen the way every list here is.
     fn resource_card<'a>(&'a self, item: Item<'a>, width: Option<f32>, s: FontScale) -> Element<'a, Message> {
         let selected = self.resource == item.resource;
         let ink = if selected { theme::text() } else { theme::text_dim() };
@@ -106,29 +115,16 @@ impl App {
         };
         let body = column![
             label,
-            canvas(Graph { series: item.series, ceiling: item.ceiling, line: if selected { theme::text() } else { theme::text_dim() }, grid: Color::TRANSPARENT, motion: self.motion() })
+            canvas(Graph { series: item.series, ceiling: item.ceiling, line: theme::text(), grid: Color::TRANSPARENT, motion: self.motion() })
                 .width(Length::Fill)
                 .height(Length::Fixed(s.apply(26.0))),
         ]
         .spacing(spacing::XS);
         button(body)
-            .padding([spacing::SM, spacing::SM + spacing::XS])
+            .padding([spacing::SM, spacing::SM])
             .width(width.map_or(Length::Fill, |w| Length::Fixed(s.apply(w))))
             .on_press(Message::Resource(item.resource))
-            .style(move |t: &iced::Theme, status| {
-                let accent = t.extended_palette().primary.base.color;
-                let edge = match (selected, status) {
-                    (true, _) => accent,
-                    (false, button::Status::Hovered | button::Status::Pressed) => theme::text_dim(),
-                    _ => surface::card_border(),
-                };
-                button::Style {
-                    background: Some(Background::Color(surface::card())),
-                    text_color: theme::text(),
-                    border: Border { radius: density::card_radius().into(), width: if selected { 2.0 } else { 1.0 }, color: edge },
-                    ..button::Style::default()
-                }
-            })
+            .style(move |t, status| widgets::selectable_row_style(t, status, selected))
             .into()
     }
 
@@ -205,7 +201,7 @@ impl App {
                 }
                 facts.push(fact("Waiting for CPU", waited(m.pressure.map(|p| p.cpu_some))).note("of the last 10 s"));
                 if let Some(up) = m.uptime_seconds {
-                    facts.push(fact("Up", duration(up)).note("since boot"));
+                    facts.push(fact("Up", uptime(up)).note("since boot"));
                 }
                 facts.push(fact("Temperature", celsius(m.cpu_celsius)));
                 if let Some((first, rest)) = m.fans.split_first() {
@@ -330,7 +326,7 @@ impl App {
     /// busier, its own minute as a line, and its clock. Eight to a row,
     /// where sixteen separate graphs took a screen.
     fn threads(&self, wide: bool, s: FontScale) -> Element<'_, Message> {
-        let mut grid = column![widgets::section_label("Each thread", s)].spacing(spacing::SM);
+        let mut grid = column![widgets::meta_text("Each thread", density::META_TEXT_BASE, s)].spacing(spacing::SM);
         for (n, chunk) in self.history.cores.chunks(8).enumerate() {
             let mut r = row![].spacing(spacing::XS);
             for (i, series) in chunk.iter().enumerate() {
@@ -377,10 +373,10 @@ impl App {
             head = head.push(Space::new().width(Length::Fill));
         }
         head = head.push(widgets::scaled_text(figure, 26.0, s).font(theme::mono_font()));
-        let mut tiles = column![].spacing(spacing::SM);
+        let mut tiles = column![].spacing(spacing::MD);
         let mut facts = facts.into_iter().peekable();
         while facts.peek().is_some() {
-            let mut r = row![].spacing(spacing::SM);
+            let mut r = row![].spacing(spacing::LG);
             let mut n = 0;
             for f in facts.by_ref().take(columns) {
                 r = r.push(container(widgets::stat_tile(f.label, f.value, f.note.filter(|n| !n.is_empty()), f.warn, s)).width(Length::FillPortion(1)));
@@ -408,17 +404,9 @@ impl App {
     }
 }
 
-/// A card around a graph.
+/// A graph on the page: no card around it, its grid lines are its frame.
 fn boxed(body: Element<'_, Message>) -> Element<'_, Message> {
-    container(body)
-        .padding(spacing::MD)
-        .width(Length::Fill)
-        .style(|_t: &iced::Theme| container::Style {
-            background: Some(Background::Color(surface::card())),
-            border: Border { radius: density::card_radius().into(), width: 1.0, color: surface::card_border() },
-            ..container::Style::default()
-        })
-        .into()
+    container(body).width(Length::Fill).into()
 }
 
 /// A legend entry: a swatch, a name and a share.
@@ -440,6 +428,13 @@ fn key<'a>(color: Color, label: &'static str, value: String, s: FontScale) -> El
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn uptime_reads_in_its_two_largest_units() {
+        assert_eq!(uptime(41 * 3600 + 27 * 60 + 29), "1 d 17 h");
+        assert_eq!(uptime(5 * 3600 + 12 * 60), "5 h 12 m");
+        assert_eq!(uptime(14 * 60 + 5), "14 m");
+    }
 
     #[test]
     fn a_gpu_is_named_by_its_model_without_the_maker_it_repeats() {

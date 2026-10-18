@@ -147,11 +147,44 @@ impl History {
         out.sort_by(|a, b| b.1.cpu_seconds.total_cmp(&a.1.cpu_seconds));
         (out, covered)
     }
+
+    /// Each recorded day of the range, oldest first: its date, every
+    /// app's CPU seconds together, and `class`'s part of them — what the
+    /// tab's chart draws, one bar a day with the chosen app's part filled.
+    /// Days with nothing recorded are not invented as zeros.
+    pub fn daily(&self, today: &str, days: usize, class: Option<&str>) -> Vec<(String, f64, f64)> {
+        let mut out: Vec<(String, f64, f64)> = self
+            .days
+            .iter()
+            .filter(|(d, _)| d.as_str() <= today)
+            .rev()
+            .take(days)
+            .map(|(d, apps)| {
+                let total = apps.values().map(|u| u.cpu_seconds).sum();
+                let mine = class.and_then(|c| apps.get(c)).map_or(0.0, |u| u.cpu_seconds);
+                (d.clone(), total, mine)
+            })
+            .collect();
+        out.reverse();
+        out
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn each_day_says_its_total_and_the_chosen_apps_part_oldest_first() {
+        let mut h = History::default();
+        let u = |cpu| Use { cpu_seconds: cpu, ..Use::default() };
+        h.days.insert("2026-10-16".into(), [("steam".to_string(), u(30.0)), ("ghostty".to_string(), u(10.0))].into());
+        h.days.insert("2026-10-17".into(), [("ghostty".to_string(), u(5.0))].into());
+        h.days.insert("2026-10-19".into(), [("steam".to_string(), u(99.0))].into());
+        let d = h.daily("2026-10-18", 7, Some("steam"));
+        assert_eq!(d, vec![("2026-10-16".to_string(), 40.0, 30.0), ("2026-10-17".to_string(), 5.0, 0.0)], "tomorrow is not in today's week");
+        assert_eq!(h.daily("2026-10-18", 1, None), vec![("2026-10-17".to_string(), 5.0, 0.0)]);
+    }
 
     fn sample(class: &str, cpu: f32, memory: u64) -> Sample {
         Sample { class: class.into(), cpu: Some(cpu), disk: Some(1000.0), gpu: Some(50.0), memory }

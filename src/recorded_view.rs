@@ -277,38 +277,25 @@ impl App {
         };
         let t: &Timeline = &l.timeline;
         let window = self.recorded_window();
-        let label_width = s.apply(130.0);
         let at = r.at;
-        let graph = |label: &'static str, points: fn(&Timeline) -> &[(i64, f32)]| day_graph(t, label, points(t), at, window, label_width, s);
-        let meta = |v: String| widgets::meta_text(v, density::META_TEXT_BASE, s);
-        let axis = row![
-            Space::new().width(Length::Fixed(label_width + spacing::MD)),
-            meta(clock(t.first_ms)),
-            Space::new().width(Length::Fill),
-            meta(clock((t.first_ms + t.last_ms) / 2)),
-            Space::new().width(Length::Fill),
-            meta(clock(t.last_ms)),
-        ];
-        let strained = match t.strained.len() {
-            0 => "Memory and I/O pressure stayed under 40 % all day.".to_string(),
-            n => format!("Shaded: {n} stretch{} where memory or I/O pressure reached 40 % — something was waiting.", if n == 1 { "" } else { "es" }),
+        let lane = |label: &'static str, points: fn(&Timeline) -> &[(i64, f32)]| day_graph(t, label, points(t), at, window, s);
+        let meta = |v: String| widgets::meta_text(v, density::META_TEXT_BASE, s).font(theme::mono_font());
+        let axis = row![meta(clock(t.first_ms)), Space::new().width(Length::Fill), meta(clock((t.first_ms + t.last_ms) / 2)), Space::new().width(Length::Fill), meta(clock(t.last_ms))];
+        // The day is the page: three lanes on one axis, no box, the
+        // strained stretches and the moment running through all three.
+        let day = column![lane("CPU busy", |t| &t.cpu), lane("Memory in use", |t| &t.memory), lane("I/O pressure", |t| &t.io), axis].spacing(2.0);
+        let strained: Element<'_, Message> = match t.strained.len() {
+            0 => Space::new().into(),
+            n => widgets::scaled_text(format!("{n} stretch{} under pressure", if n == 1 { "" } else { "es" }), density::META_TEXT_BASE, s).color(theme::warning()).into(),
         };
-        let graphs = column![graph("CPU busy", |t| &t.cpu), graph("Memory in use", |t| &t.memory), graph("I/O pressure", |t| &t.io), axis, meta(strained), meta("Press or drag on a graph to pick a moment.".into())].spacing(spacing::SM);
-
-        let moment_title = at.map_or_else(|| "The moment".to_string(), |a| format!("At {}", clock(a)));
-        let summary_title = window.map_or_else(|| "What happened".to_string(), |(a, b)| format!("What happened, {} – {}", clock(a), clock(b)));
-        scrollable(
-            column![
-                bar,
-                widgets::section("The day", s, graphs),
-                widgets::section(moment_title, s, self.recorded_moment(s)),
-                widgets::section(summary_title, s, self.recorded_happened(s)),
-            ]
-            .spacing(spacing::LG)
-            .padding(spacing::LG),
-        )
-        .height(Length::Fill)
-        .into()
+        let bar = row![bar, strained].spacing(spacing::MD).align_y(Alignment::Center);
+        let wide = self.fit() == hyprforge_procman::fit::Fit::Full;
+        let below: Element<'_, Message> = if wide {
+            row![container(self.recorded_moment(s)).width(Length::FillPortion(1)), container(self.recorded_happened(s)).width(Length::FillPortion(1))].spacing(spacing::XL).into()
+        } else {
+            column![self.recorded_moment(s), self.recorded_happened(s)].spacing(spacing::LG).into()
+        };
+        scrollable(column![bar, day, below].spacing(spacing::LG).padding(spacing::LG)).height(Length::Fill).into()
     }
 
     /// The processes busiest in the interval picked.
@@ -322,22 +309,24 @@ impl App {
         let c = m.system.cpu;
         let busy = (100.0 - c[3] - c[4]).max(0.0) / 100.0;
         let memory = 1.0 - at.available_memory as f32 / at.total_memory.max(1) as f32;
-        let mut headline = format!("CPU {} busy · memory {} in use", share(busy), share(memory));
+        let mut figures = format!("CPU {} · memory {}", share(busy), share(memory));
         if let Some(p) = &at.pressure {
-            headline.push_str(&format!(" · I/O pressure {:.0} % · memory pressure {:.0} %", p.io_some.avg10, p.memory_some.avg10));
+            figures.push_str(&format!(" · I/O {:.0}%", p.io_some.avg10));
         }
-        headline.push_str(&format!(" · {} processes, {} ended", m.system.processes, m.system.ended()));
+        figures.push_str(&format!(" · {} processes", m.system.processes));
         let mut rows: Vec<&Row> = m.rows.iter().filter(|r| r.cpu_pct > 0.0 || r.read.unwrap_or(0) + r.written.unwrap_or(0) > 0 || r.exit.is_some()).collect();
         rows.sort_by(|a, b| b.cpu_pct.total_cmp(&a.cpu_pct).then(b.resident_bytes.cmp(&a.resident_bytes)));
-        let mut table = column![header(&["Process", "PID", "User", "CPU", "Memory", "Read", "Written", "Network"], s)].spacing(spacing::SM);
+        const W: [f32; 3] = [64.0, 84.0, 84.0];
+        let mut table = column![header(&["Process", "CPU", "Memory", "Disk"], &W, s)].spacing(0.0);
         for r in rows.into_iter().take(12) {
-            table = table.push(cells(
-                row_name(r),
-                &[r.id.pid.to_string(), r.user.clone(), format!("{:.1} %", r.cpu_pct), bytes(r.resident_bytes), r.read.map_or_else(|| "—".into(), bytes), r.written.map_or_else(|| "—".into(), bytes), network(r.net_rx, r.net_tx)],
-                s,
-            ));
+            let disk = match (r.read, r.written) {
+                (None, None) => String::new(),
+                (rd, wr) => bytes(rd.unwrap_or(0) + wr.unwrap_or(0)),
+            };
+            table = table.push(widgets::divider()).push(cells(format!("{} {}", row_name(r), r.id.pid), &[format!("{:.1}%", r.cpu_pct), bytes(r.resident_bytes), disk], &W, s));
         }
-        column![widgets::scaled_text(headline, density::ROW_TEXT_BASE, s), table].spacing(spacing::MD).into()
+        let when = self.recorded.at.map_or_else(String::new, clock);
+        column![row![widgets::scaled_text(when, density::ROW_TEXT_BASE, s), widgets::meta_text(figures, density::META_TEXT_BASE, s).font(theme::mono_font())].spacing(spacing::MD).align_y(Alignment::Center), table].spacing(spacing::SM).into()
     }
 
     /// The stretch around the moment, added up.
@@ -354,85 +343,69 @@ impl App {
         let seconds: f64 = report.cpu.iter().map(|l| l.seconds).sum::<f64>().max(0.001);
         let mut said = Vec::new();
         if let Some(c) = report.cpu.first() {
-            said.push(format!("CPU averaged {} busy", share(1.0 - (c.idle + c.wait) / cpus)));
+            said.push(format!("CPU {} avg", share(1.0 - (c.idle + c.wait) / cpus)));
         }
         if let Some(m) = report.mem.first() {
-            said.push(format!("memory got down to {} available", bytes(m.least_available)));
+            said.push(format!("{} least free", bytes(m.least_available)));
         }
         if let Some(p) = report.psi.first() {
-            said.push(format!("I/O pressure peaked at {:.0} %, memory pressure at {:.0} %", p.io.max, p.memory.max));
+            said.push(format!("I/O peak {:.0}%", p.io.max));
         }
         if let Some(m) = report.mem.first().filter(|m| m.oom_kills > 0) {
-            said.push(format!("{} process{} killed for memory", m.oom_kills, if m.oom_kills == 1 { " was" } else { "es were" }));
+            said.push(format!("{} killed for memory", m.oom_kills));
         }
-        let mut table = column![header(&["Program", "Processes", "CPU time", "Average", "Peak memory", "Read", "Written", "Network"], s)].spacing(spacing::SM);
+        const W: [f32; 4] = [84.0, 64.0, 90.0, 84.0];
+        let mut table = column![header(&["Program", "CPU time", "Avg", "Peak mem", "Written"], &W, s)].spacing(0.0);
         // A program that used nothing worth a digit is filler, not news.
         for c in report.top.iter().filter(|c| c.cpu_seconds >= 0.5 || c.read + c.written + c.received.unwrap_or(0) + c.sent.unwrap_or(0) > 0) {
             let average = c.cpu_seconds / (seconds * f64::from(report.cpus.max(1))) * 100.0;
-            table = table.push(cells(
-                c.name.clone(),
-                &[c.processes.to_string(), duration(c.cpu_seconds.round() as u64), format!("{average:.1} %"), bytes(c.peak_resident), bytes(c.read), bytes(c.written), network(c.received, c.sent)],
+            table = table.push(widgets::divider()).push(cells(
+                format!("{} ×{}", c.name, c.processes),
+                &[duration(c.cpu_seconds.round() as u64), format!("{average:.1}%"), bytes(c.peak_resident), bytes(c.written)],
+                &W,
                 s,
             ));
         }
-        let sentence = {
-            let mut t = said.join("; ");
-            if let Some(first) = t.get(..1) {
-                t = first.to_uppercase() + &t[1..];
-            }
-            t + "."
-        };
-        column![widgets::scaled_text(sentence, density::ROW_TEXT_BASE, s), table].spacing(spacing::MD).into()
+        let title = self.recorded_window().map_or_else(String::new, |(a, b)| format!("{} – {}", short_clock(a), short_clock(b)));
+        column![row![widgets::scaled_text(title, density::ROW_TEXT_BASE, s), widgets::meta_text(said.join(" · "), density::META_TEXT_BASE, s).font(theme::mono_font())].spacing(spacing::MD).align_y(Alignment::Center), table].spacing(spacing::SM).into()
     }
 }
 
 /// One measure across the day, its value at the moment beside it.
-fn day_graph<'a>(t: &'a Timeline, label: &'static str, points: &'a [(i64, f32)], at: Option<i64>, window: Option<(i64, i64)>, label_width: f32, s: FontScale) -> Element<'a, Message> {
-    let value = at.and_then(|a| recorded::value_at(points, a)).map_or_else(|| "—".into(), share);
+fn day_graph<'a>(t: &'a Timeline, label: &'static str, points: &'a [(i64, f32)], at: Option<i64>, window: Option<(i64, i64)>, s: FontScale) -> Element<'a, Message> {
+    let value = at.and_then(|a| recorded::value_at(points, a)).map_or_else(String::new, share);
     // The picked moment is a selection, so it takes the accent; the lines
     // are the foreground colour, as every graph in this app is.
     let accent = hyprforge_ui::color::to_iced(theme::active().accent);
-    row![
-        column![widgets::meta_text(label, density::META_TEXT_BASE, s), widgets::scaled_text(value, density::ROW_TEXT_BASE, s).font(theme::mono_font())]
-            .spacing(2.0)
-            .width(Length::Fixed(label_width)),
-        canvas(DayGraph { timeline: t, points, at, window, line: theme::text(), grid: surface::card_border(), strain: theme::warning(), mark: accent, on_pick: |at| Message::Recorded(Msg::At(at)) })
-            .width(Length::Fill)
-            .height(Length::Fixed(s.apply(56.0))),
-    ]
-    .spacing(spacing::MD)
-    .align_y(Alignment::Center)
-    .into()
+    let graph = canvas(DayGraph { timeline: t, points, at, window, line: theme::text(), grid: surface::card_border(), strain: theme::warning(), mark: accent, on_pick: |at| Message::Recorded(Msg::At(at)) })
+        .width(Length::Fill)
+        .height(Length::Fixed(s.apply(80.0)));
+    // What it is and its value at the moment, written over the lane's
+    // corner rather than given a column of their own.
+    let label = container(row![widgets::meta_text(label, density::META_TEXT_BASE, s), widgets::scaled_text(value, density::META_TEXT_BASE, s).font(theme::mono_font())].spacing(spacing::SM)).padding([2.0, spacing::SM]);
+    iced::widget::stack![graph, label].into()
 }
 
-/// The figure columns' widths, after a name that takes the rest.
-const WIDTHS: [f32; 7] = [90.0, 100.0, 90.0, 100.0, 90.0, 90.0, 110.0];
-
-/// In and out together — the column has room for one figure. A dash where
-/// nothing was counting, which is not the same as nothing sent.
-fn network(rx: Option<u64>, tx: Option<u64>) -> String {
-    match (rx, tx) {
-        (None, None) => "—".into(),
-        (rx, tx) => bytes(rx.unwrap_or(0) + tx.unwrap_or(0)),
-    }
-}
-
-fn header<'a>(titles: &[&'static str], s: FontScale) -> Element<'a, Message> {
-    let mut r = row![widgets::meta_text(titles[0], density::META_TEXT_BASE, s).width(Length::Fill)].spacing(spacing::SM);
-    for (t, w) in titles[1..].iter().zip(WIDTHS) {
-        r = r.push(container(widgets::meta_text(*t, density::META_TEXT_BASE, s)).width(Length::Fixed(s.apply(w))).align_x(Alignment::End));
+fn header<'a>(titles: &[&'static str], widths: &[f32], s: FontScale) -> Element<'a, Message> {
+    let mut r = row![widgets::meta_text(titles[0], density::META_TEXT_BASE, s).width(Length::Fill)].spacing(spacing::SM).padding([spacing::XS, spacing::XS]);
+    for (t, w) in titles[1..].iter().zip(widths) {
+        r = r.push(container(widgets::meta_text(*t, density::META_TEXT_BASE, s)).width(Length::Fixed(s.apply(*w))).align_x(Alignment::End));
     }
     r.into()
 }
 
-fn cells<'a>(name: String, figures: &[String], s: FontScale) -> Element<'a, Message> {
-    let mut r = row![widgets::scaled_text(name, density::ROW_TEXT_BASE, s).width(Length::Fill)].spacing(spacing::SM).align_y(Alignment::Center);
-    for (f, w) in figures.iter().zip(WIDTHS) {
-        r = r.push(container(widgets::scaled_text(f.clone(), density::ROW_TEXT_BASE, s).font(theme::mono_font())).width(Length::Fixed(s.apply(w))).align_x(Alignment::End));
+fn cells<'a>(name: String, figures: &[String], widths: &[f32], s: FontScale) -> Element<'a, Message> {
+    let mut r = row![widgets::clamped_text(name, 1).size(s.apply(density::ROW_TEXT_BASE)).width(Length::Fill)].spacing(spacing::SM).align_y(Alignment::Center).padding([spacing::XS + 1.0, spacing::XS]);
+    for (f, w) in figures.iter().zip(widths) {
+        r = r.push(container(widgets::scaled_text(f.clone(), density::ROW_TEXT_BASE, s).font(theme::mono_font())).width(Length::Fixed(s.apply(*w))).align_x(Alignment::End));
     }
     r.into()
 }
 
+fn short_clock(at_ms: i64) -> String {
+    use chrono::TimeZone;
+    chrono::Local.timestamp_millis_opt(at_ms).single().map_or_else(|| "?".into(), |t| t.format("%H:%M").to_string())
+}
 
 /// `Today`, `Yesterday`, else `Wed 7`.
 fn day_label(name: &str) -> String {
@@ -451,7 +424,7 @@ fn clock(at_ms: i64) -> String {
 }
 
 fn share(v: f32) -> String {
-    format!("{:.0} %", v * 100.0)
+    format!("{:.0}%", v * 100.0)
 }
 
 /// A process's row at the moment, with its name in brackets if it ended

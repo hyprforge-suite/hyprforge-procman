@@ -252,6 +252,8 @@ pub enum Message {
     Tree(bool),
     /// App history's range, in days.
     HistoryRange(usize),
+    /// The app whose part of each day the App history chart fills in.
+    HistoryApp(String),
     StartupLoaded(Box<StartupData>),
     /// An autostart entry on or off, by id.
     Autostart(String, bool),
@@ -306,6 +308,9 @@ pub enum Message {
     CrashesLoaded(Box<crashes_view::CrashesData>),
     /// Open one incident's details, or close them with `None`.
     CrashSelect(Option<i64>),
+    /// By program (true) or every crash.
+    CrashView(bool),
+    CrashProgram(Option<String>),
     CrashRange(usize),
     /// The limits card: open it on a process's app, edit, apply, close.
     OpenLimits(Id),
@@ -327,6 +332,8 @@ pub enum Message {
     /// The Rules tab: a field edited, a row added or removed, the list
     /// saved, a broken file replaced, the service switched.
     RulesEdit(usize, rules_view::Field, String),
+    /// Open a rule's row for editing, or close it.
+    RulesOpen(Option<usize>),
     RulesAdd,
     RulesRemove(usize),
     RulesSave,
@@ -388,6 +395,8 @@ pub struct App {
     pub crashes: Option<crashes_view::CrashesData>,
     /// The open incident, by its journal timestamp.
     pub crash_selected: Option<i64>,
+    pub crash_by_program: bool,
+    pub crash_program: Option<String>,
     pub crash_days: usize,
     /// The limits card, while it is open.
     pub limits: Option<limits_view::Dialog>,
@@ -425,6 +434,8 @@ pub struct App {
     pub app_cpu: HashMap<Id, hyprforge_procman::history::Series>,
     /// The column a narrow Processes list keeps besides CPU and Memory.
     pub narrow_column: Column,
+    /// The app chosen on App history; until one is, the busiest.
+    pub history_app: Option<String>,
     /// The processor's name and clocks, read once at start.
     pub processor: hyprforge_procman::machine::Processor,
     history_saved: std::time::Instant,
@@ -678,6 +689,8 @@ impl App {
             history_days: 1,
             crashes: None,
             crash_selected: None,
+            crash_by_program: true,
+            crash_program: None,
             crash_days: 7,
             limits: None,
             limiter: std::sync::Arc::new(hyprforge_procman::limits::UserSystemd),
@@ -695,6 +708,7 @@ impl App {
             icons: app_icons::Cache::default(),
             app_cpu: HashMap::new(),
             narrow_column: Column::Gpu,
+            history_app: None,
             processor: SysFs::default().processor(),
             history_saved: std::time::Instant::now(),
             overview: Overview::default(),
@@ -820,6 +834,20 @@ impl App {
             let class = a.flatpak.as_deref().unwrap_or(&a.class);
             self.icons.get(desktop, class);
         }
+        if let Some(data) = &self.startup {
+            for a in &data.autostarts {
+                self.icons.get_named(desktop, &a.desktop.icon);
+            }
+        }
+        // And every app App history has a day for: looked up once each,
+        // and remembered, so this is a few lookups a session.
+        if let Ok(history) = &self.app_history {
+            for apps in history.days.values() {
+                for class in apps.keys() {
+                    self.icons.get(desktop, class);
+                }
+            }
+        }
     }
 
     /// The reader for the next refresh. Wakeups cost a small file per
@@ -914,7 +942,11 @@ impl App {
             }
             Message::Tree(on) => self.details.tree = on,
             Message::HistoryRange(days) => self.history_days = days,
-            Message::StartupLoaded(data) => self.startup = Some(*data),
+            Message::HistoryApp(class) => self.history_app = Some(class),
+            Message::StartupLoaded(data) => {
+                self.startup = Some(*data);
+                self.find_icons();
+            }
             Message::Autostart(id, on) => {
                 let Some(entry) = self.startup.as_ref().and_then(|d| d.autostarts.iter().find(|a| a.id == id)).cloned() else {
                     return Task::none();
@@ -1007,6 +1039,14 @@ impl App {
             Message::CloseMenu => self.menu = None,
             Message::CrashesLoaded(data) => self.crashes = Some(*data),
             Message::CrashSelect(at) => self.crash_selected = at,
+            Message::CrashView(by) => {
+                self.crash_by_program = by;
+                self.crash_selected = None;
+            }
+            Message::CrashProgram(name) => {
+                self.crash_program = name;
+                self.crash_selected = None;
+            }
             Message::CrashRange(days) => self.crash_days = days,
             Message::OpenLimits(id) => self.open_limits(id),
             Message::LimitsMemory(text) => {
@@ -1049,6 +1089,7 @@ impl App {
             Message::ToggleSidebar => self.sidebar = Some(!self.sidebar_shown()),
             Message::RulesEdit(..)
             | Message::RulesAdd
+            | Message::RulesOpen(_)
             | Message::RulesRemove(_)
             | Message::RulesSave
             | Message::RulesStartOver
@@ -1761,11 +1802,32 @@ mod render {
         }
 
         app.tab = Tab::History;
+        // A made-up week, in memory: the real file holds what this
+        // machine recorded, which may be minutes — enough for the table,
+        // not for the chart.
+        {
+            use hyprforge_procman::app_history::{History, Use};
+            let mut h = History::default();
+            let day = |d: u32| format!("2026-10-{d:02}");
+            let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+            let apps = [("steam", [120.0, 540.0, 0.0, 840.0, 1320.0, 1800.0, 360.0]), ("google-chrome", [360.0, 300.0, 420.0, 300.0, 360.0, 240.0, 180.0]), ("com.mitchellh.ghostty", [240.0, 180.0, 180.0, 240.0, 300.0, 180.0, 120.0])];
+            for i in 0..7u32 {
+                let date = if i == 6 { today.clone() } else { day(12 + i) };
+                for (class, cpu) in &apps {
+                    h.days.entry(date.clone()).or_default().insert(class.to_string(), Use { cpu_seconds: cpu[i as usize], disk_bytes: 4e7, gpu_seconds: cpu[i as usize] / 3.0, peak_memory: 1 << 30, seconds_open: 3600.0 });
+                }
+                h.recorded.insert(date, 3600.0);
+            }
+            app.app_history = Ok(h);
+            app.history_days = 7;
+            app.find_icons();
+        }
 
         draw(&mut app, "history", &dir);
 
         app.tab = Tab::Startup;
         app.startup = Some(runtime.block_on(load_startup()));
+        app.find_icons();
         draw(&mut app, "startup", &dir);
 
         // Two rules, as the tab draws them — in memory, not the user's file.
@@ -1776,9 +1838,10 @@ mod render {
                 rules_view::Row { program: "blender".into(), warn: "24 GB".into(), ..Default::default() },
             ],
             service: Some(false),
+            editing: Some(0),
             ..Default::default()
         };
-        draw_sized(&mut app, "rules", &dir, 600.0);
+        draw(&mut app, "rules", &dir);
 
         // This machine's own journal, with the newest crash opened.
         app.tab = Tab::Crashes;

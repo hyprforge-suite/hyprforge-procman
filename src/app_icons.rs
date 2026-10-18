@@ -41,7 +41,16 @@ pub const SIDE: u32 = 24;
 /// may also be a path, which is drawn as it is.
 pub fn find(desktop: &Desktop, class: &str) -> Option<Icon> {
     let name = app_history::entry(&desktop.db, class)?.icon.clone()?;
-    let path = if Path::new(&name).is_absolute() { Some(name.into()) } else { desktop.icons.lookup(&[&name], SIDE, 2) }?;
+    named(desktop, &name)
+}
+
+/// The icon an entry's `Icon=` names, through the theme — or the file,
+/// when it names a path.
+pub fn named(desktop: &Desktop, name: &str) -> Option<Icon> {
+    if name.is_empty() {
+        return None;
+    }
+    let path = if Path::new(name).is_absolute() { Some(name.into()) } else { desktop.icons.lookup(&[name], SIDE, 2) }?;
     Some(match path.extension().and_then(|e| e.to_str()) {
         Some("svg" | "svgz") => Icon::Svg(svg::Handle::from_path(path)),
         _ => Icon::Raster(image::Handle::from_path(path)),
@@ -58,6 +67,16 @@ pub struct Cache {
 impl Cache {
     pub fn get(&mut self, desktop: &Desktop, class: &str) -> Option<Icon> {
         self.found.entry(class.to_string()).or_insert_with(|| find(desktop, class)).clone()
+    }
+
+    /// By the icon's own name, as an autostart entry gives it — kept
+    /// apart from window classes, which are a different namespace.
+    pub fn get_named(&mut self, desktop: &Desktop, name: &str) -> Option<Icon> {
+        self.found.entry(format!("icon:{name}")).or_insert_with(|| named(desktop, name)).clone()
+    }
+
+    pub fn peek_named(&self, name: &str) -> Option<&Icon> {
+        self.found.get(&format!("icon:{name}")).and_then(Option::as_ref)
     }
 
     pub fn peek(&self, class: &str) -> Option<&Icon> {

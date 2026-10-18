@@ -43,6 +43,8 @@ pub struct Tab {
     /// The service: running, stopped, or `None` for not installed.
     pub service: Option<bool>,
     pub busy: bool,
+    /// The row open for editing; the rest are read as text.
+    pub editing: Option<usize>,
 }
 
 impl Row {
@@ -95,24 +97,29 @@ pub fn save(path: &std::path::Path, rows: &[Row]) -> Result<(), String> {
 }
 
 impl App {
+    /// A table, because a rule is a row of settings: unset is blank, the
+    /// row being edited opens in place, and the service being off is one
+    /// line beside its switch — the thing to notice before the rules.
     pub fn rules_view(&self, s: FontScale) -> Element<'_, Message> {
         let tab = &self.rules;
-        let mut page = column![].spacing(spacing::MD).padding(spacing::LG);
-        let switch: Element<'_, Message> = match tab.service {
-            Some(on) => {
-                let t = widgets::toggle(on, s).label("Apply rules");
-                if tab.busy { t.into() } else { t.on_toggle(Message::RulesSwitch).into() }
-            }
-            None => widgets::hint_text("The rules service isn't installed, so rules here are saved and not applied.", s).into(),
+        let (state, warn) = match tab.service {
+            Some(true) => ("On", false),
+            Some(false) => ("Off — nothing is applying these", true),
+            None => ("The rules service isn't installed — these are saved, not applied", true),
         };
-        page = page.push(row![widgets::section_label("Rules", s), Space::new().width(Length::Fill), switch].align_y(Alignment::Center));
-        page = page.push(widgets::meta_text(
-            "Each applies to a program, by the name the Processes tab shows, every time it starts — never to one already running. \
-             Priority goes from 0 (as usual) to 19 (last in line). A cap moves the program into a unit of its own, and is refused \
-             if it would take another app with it.",
-            density::META_TEXT_BASE,
-            s,
-        ));
+        let mut bar = row![
+            widgets::scaled_text("Rules", density::ROW_TEXT_BASE, s),
+            widgets::meta_text("applied to each program as it starts", density::META_TEXT_BASE, s),
+            Space::new().width(Length::Fill),
+            widgets::scaled_text(state, density::META_TEXT_BASE, s).color(if warn { theme::warning() } else { theme::text_dim() }),
+        ]
+        .spacing(spacing::MD)
+        .align_y(Alignment::Center);
+        if let Some(on) = tab.service {
+            let t = widgets::toggle(on, s);
+            bar = bar.push(if tab.busy { Element::from(t) } else { t.on_toggle(Message::RulesSwitch).into() });
+        }
+        let mut page = column![bar].spacing(spacing::MD).padding(spacing::LG);
         if let Some(why) = &tab.broken {
             page = page.push(widgets::meta_text(format!("{why}. Nothing in it is being applied."), density::ROW_TEXT_BASE, s).color(theme::error()));
             page = page.push(row![
@@ -122,48 +129,83 @@ impl App {
             ]);
             return scrollable(page).height(Length::Fill).into();
         }
-        let head = |label: &'static str, w: f32| container(widgets::meta_text(label, density::META_TEXT_BASE, s)).width(Length::Fixed(s.apply(w)));
-        page = page.push(
-            row![
-                container(widgets::meta_text("Program", density::META_TEXT_BASE, s)).width(Length::Fill),
-                head("Priority", 90.0),
-                head("Memory cap", 120.0),
-                head("CPU cap %", 100.0),
-                head("Warn past", 120.0),
-                Space::new().width(Length::Fixed(s.apply(90.0))),
-            ]
-            .spacing(spacing::SM),
-        );
-        if tab.rows.is_empty() {
-            page = page.push(widgets::hint_text("No rules yet.", s));
-        }
+        let cell = |w: f32, content: Element<'static, Message>| container(content).width(Length::Fixed(s.apply(w))).align_x(Alignment::End);
+        let widths = [90.0, 110.0, 90.0, 100.0, 90.0];
+        let head = |label: &'static str, w: f32| cell(w, widgets::meta_text(label, density::META_TEXT_BASE, s).into());
+        let mut table = column![row![
+            widgets::meta_text("Program", density::META_TEXT_BASE, s).width(Length::Fill),
+            head("Priority", widths[0]),
+            head("Memory cap", widths[1]),
+            head("CPU cap", widths[2]),
+            head("Warn past", widths[3]),
+            head("Running", widths[4]),
+        ]
+        .spacing(spacing::MD)
+        .padding([spacing::XS, spacing::SM])]
+        .spacing(0.0);
         for (i, r) in tab.rows.iter().enumerate() {
-            let field = |value: &str, hint: &'static str, f: Field, w: Option<f32>| -> Element<'_, Message> {
-                let input = text_input(hint, value).on_input(move |v| Message::RulesEdit(i, f, v)).padding(spacing::SM).style(widgets::inset_input_style);
-                match w {
-                    Some(w) => input.width(Length::Fixed(s.apply(w))).into(),
-                    None => input.width(Length::Fill).into(),
-                }
-            };
-            page = page.push(
-                row![
-                    field(&r.program, "cargo", Field::Program, None),
-                    field(&r.priority, "—", Field::Priority, Some(90.0)),
-                    field(&r.memory, "—", Field::Memory, Some(120.0)),
-                    field(&r.cpu, "—", Field::Cpu, Some(100.0)),
-                    field(&r.warn, "—", Field::Warn, Some(120.0)),
-                    container(widgets::secondary_button("Remove").on_press(Message::RulesRemove(i))).width(Length::Fixed(s.apply(90.0))),
-                ]
-                .spacing(spacing::SM)
-                .align_y(Alignment::Center),
+            let running = hyprforge_procman::model::entries(&self.table).filter(|e| !r.program.trim().is_empty() && e.name == r.program.trim()).count();
+            let mono = |v: String, color: iced::Color| -> Element<'static, Message> { widgets::scaled_text(v, density::ROW_TEXT_BASE, s).font(theme::mono_font()).color(color).into() };
+            let cpu = if r.cpu.trim().is_empty() { String::new() } else { format!("{}%", r.cpu.trim().trim_end_matches('%')) };
+            let line = row![
+                container(mono(r.program.clone(), theme::text())).width(Length::Fill),
+                cell(widths[0], mono(r.priority.clone(), theme::text())),
+                cell(widths[1], mono(r.memory.clone(), theme::text())),
+                cell(widths[2], mono(cpu, theme::text())),
+                cell(widths[3], mono(r.warn.clone(), theme::warning())),
+                cell(widths[4], mono(if running == 0 { String::new() } else { running.to_string() }, theme::text_dim())),
+            ]
+            .spacing(spacing::MD)
+            .align_y(Alignment::Center);
+            let open = tab.editing == Some(i);
+            table = table.push(widgets::divider()).push(
+                iced::widget::button(line)
+                    .padding([spacing::SM, spacing::SM])
+                    .width(Length::Fill)
+                    .on_press(Message::RulesOpen(if open { None } else { Some(i) }))
+                    .style(move |t, status| widgets::selectable_row_style(t, status, false)),
             );
+            if open {
+                let field = |value: &str, hint: &'static str, f: Field, w: Option<f32>| -> Element<'_, Message> {
+                    let input = text_input(hint, value).on_input(move |v| Message::RulesEdit(i, f, v)).padding(spacing::SM).style(widgets::inset_input_style);
+                    match w {
+                        Some(w) => input.width(Length::Fixed(s.apply(w))).align_x(Alignment::End).into(),
+                        None => input.width(Length::Fill).into(),
+                    }
+                };
+                let edit = column![
+                    row![
+                        field(&r.program, "program, as Processes names it", Field::Program, None),
+                        field(&r.priority, "0 – 19", Field::Priority, Some(widths[0])),
+                        field(&r.memory, "GB", Field::Memory, Some(widths[1])),
+                        field(&r.cpu, "%", Field::Cpu, Some(widths[2])),
+                        field(&r.warn, "GB", Field::Warn, Some(widths[3])),
+                        container(row![widgets::secondary_button("Remove").on_press(Message::RulesRemove(i)), widgets::primary_button("Done").on_press(Message::RulesSave)].spacing(spacing::XS))
+                            .width(Length::Fixed(s.apply(widths[4] + 60.0)))
+                            .align_x(Alignment::End),
+                    ]
+                    .spacing(spacing::MD)
+                    .align_y(Alignment::Center),
+                    widgets::meta_text(
+                        "Priority 0 is as usual, 19 is last in line. A cap gives the program a unit of its own, unless that would take another app with it.",
+                        density::META_TEXT_BASE,
+                        s
+                    ),
+                ]
+                .spacing(spacing::SM);
+                table = table.push(container(edit).padding(spacing::SM).width(Length::Fill).style(|_t: &iced::Theme| container::Style {
+                    background: Some(iced::Background::Color(hyprforge_ui::theme::surface::card())),
+                    ..container::Style::default()
+                }));
+            }
         }
+        table = table.push(widgets::divider()).push(container(widgets::secondary_button("Add a rule").on_press(Message::RulesAdd)).padding(spacing::SM));
+        page = page.push(table);
         if let Some(e) = &tab.error {
             page = page.push(widgets::meta_text(e.clone(), density::ROW_TEXT_BASE, s).color(theme::error()));
         } else if tab.saved {
-            page = page.push(widgets::hint_text("Saved. The service reads it within a couple of seconds.", s));
+            page = page.push(widgets::meta_text("Saved.", density::META_TEXT_BASE, s));
         }
-        page = page.push(row![widgets::secondary_button("Add a rule").on_press(Message::RulesAdd), Space::new().width(Length::Fill), widgets::primary_button("Save").on_press(Message::RulesSave)].spacing(spacing::SM));
         scrollable(page).height(Length::Fill).into()
     }
 
@@ -182,17 +224,25 @@ impl App {
                     tab.saved = false;
                 }
             }
-            Message::RulesAdd => tab.rows.push(Row::default()),
+            Message::RulesAdd => {
+                tab.rows.push(Row::default());
+                tab.editing = Some(tab.rows.len() - 1);
+            }
+            Message::RulesOpen(i) => tab.editing = i,
+            // Removing is saved at once, as Done is: there is no other
+            // Save to forget.
             Message::RulesRemove(i) => {
                 if i < tab.rows.len() {
                     tab.rows.remove(i);
-                    tab.saved = false;
+                    tab.editing = None;
+                    return self.rules_update(Message::RulesSave);
                 }
             }
             Message::RulesSave => match save(&self.rules_path, &tab.rows) {
                 Ok(()) => {
                     tab.error = None;
                     tab.saved = true;
+                    tab.editing = None;
                 }
                 Err(e) => {
                     tab.error = Some(e);

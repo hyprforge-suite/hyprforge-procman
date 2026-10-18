@@ -19,65 +19,16 @@ fn took(ms: Option<u32>) -> String {
 }
 
 impl App {
+    /// One table, Task Manager's shape: what starts, whether it is
+    /// running, how long it took — beside a bar against the slowest — and
+    /// its switch. The slowest first.
     pub fn startup_view(&self, s: FontScale) -> Element<'_, Message> {
         let Some(data) = &self.startup else {
             return container(widgets::hint_text("Reading what starts with you…", s)).padding(spacing::LG).into();
         };
         let state_of = |unit: &str| data.units.iter().find(|u| u.name == unit);
-        let line = |name: String, detail: String, running: Option<bool>, ms: Option<u32>, control: Element<'static, Message>| -> Element<'static, Message> {
-            let status = match running {
-                Some(true) => row![widgets::status_dot(widgets::Tint::Success, s), widgets::meta_text("Running", density::META_TEXT_BASE, s)],
-                Some(false) => row![widgets::status_dot(widgets::Tint::Dim, s), widgets::meta_text("Not running", density::META_TEXT_BASE, s)],
-                None => row![Space::new()],
-            }
-            .spacing(spacing::SM)
-            .align_y(Alignment::Center);
-            row![
-                column![
-                    widgets::scaled_text(name, density::ROW_TEXT_BASE, s),
-                    widgets::clamped_text(detail, 1).size(s.apply(density::META_TEXT_BASE)).width(Length::Fill).font(theme::mono_font()).color(theme::text_dim()),
-                ]
-                .width(Length::Fill),
-                container(status).width(Length::Fixed(s.apply(130.0))),
-                container(widgets::scaled_text(took(ms), density::ROW_TEXT_BASE, s).font(theme::mono_font()))
-                    .width(Length::Fixed(s.apply(90.0)))
-                    .align_x(Alignment::End),
-                container(control).width(Length::Fixed(s.apply(170.0))).align_x(Alignment::End),
-            ]
-            .spacing(spacing::MD)
-            .align_y(Alignment::Center)
-            .padding([spacing::SM, spacing::MD])
-            .into()
-        };
-
-        let mut page = column![
-            widgets::meta_text(
-                "Start time is measured by systemd at this sign-in, not rated: the slowest come first.",
-                density::META_TEXT_BASE,
-                s
-            ),
-            widgets::section_label("Apps that start themselves", s),
-        ]
-        .spacing(spacing::SM)
-        .padding(spacing::LG);
-
         let mut apps: Vec<&startup::Autostart> = data.autostarts.iter().collect();
         apps.sort_by_key(|a| std::cmp::Reverse(data.blame.get(&startup::autostart_unit(&a.id)).copied().unwrap_or(0)));
-        if apps.is_empty() {
-            page = page.push(widgets::hint_text("Nothing installed asks to start with you.", s));
-        }
-        for a in apps {
-            let unit = startup::autostart_unit(&a.id);
-            let on = a.desktop.enabled();
-            let running = state_of(&unit).map(|u| u.active == "active").or(Some(false));
-            let toggle: Element<'static, Message> = {
-                let id = a.id.clone();
-                widgets::toggle(on, s).label(if on { "Starts" } else { "Off" }).on_toggle(move |v| Message::Autostart(id.clone(), v)).into()
-            };
-            page = page.push(line(a.desktop.name.clone(), a.desktop.exec.clone(), running, data.blame.get(&unit).copied(), toggle));
-        }
-
-        page = page.push(widgets::section_label("Services that start with you", s));
         let mut units: Vec<&hyprforge_procman::services::Unit> = data
             .units
             .iter()
@@ -85,36 +36,126 @@ impl App {
             .filter(|u| u.file.as_deref() == Some("enabled") || u.active == "active")
             .collect();
         units.sort_by_key(|u| std::cmp::Reverse(data.blame.get(&u.name).copied().unwrap_or(0)));
-        for u in units {
-            let on = u.file.as_deref() == Some("enabled");
-            let name = u.name.clone();
-            let toggle: Element<'static, Message> =
-                widgets::toggle(on, s).label(if on { "Starts" } else { "Off" }).on_toggle(move |v| Message::UnitAtLogin(name.clone(), v)).into();
-            let title = if u.description.is_empty() { u.name.clone() } else { u.description.clone() };
-            page = page.push(line(title, u.name.clone(), Some(u.active == "active"), data.blame.get(&u.name).copied(), toggle));
-        }
-
-        page = page.push(
-            row![widgets::section_label("Started by Hyprland", s), Space::new().width(Length::Fill), widgets::secondary_button("Edit in Settings").on_press(Message::OpenSessionSettings)]
-                .align_y(Alignment::Center),
-        );
-        match &data.hyprland {
-            Err(e) => page = page.push(widgets::hint_text(e.clone(), s)),
-            Ok(programs) if programs.is_empty() => {
-                page = page.push(widgets::hint_text("Settings → Session lists none.", s));
+        // Against the slowest on this list, not every unit systemd timed:
+        // a system unit's seconds would make every row here a sliver.
+        let slowest = apps
+            .iter()
+            .filter_map(|a| data.blame.get(&startup::autostart_unit(&a.id)))
+            .chain(units.iter().filter_map(|u| data.blame.get(&u.name)))
+            .copied()
+            .max()
+            .unwrap_or(1)
+            .max(1);
+        let icon_w = s.apply(20.0);
+        let line = |icon: Element<'static, Message>, name: String, detail: String, running: Option<bool>, ms: Option<u32>, control: Element<'static, Message>| -> Element<'static, Message> {
+            let status = match running {
+                Some(true) => widgets::scaled_text("Running", density::META_TEXT_BASE, s).color(theme::text()),
+                Some(false) => widgets::meta_text("Not running", density::META_TEXT_BASE, s),
+                None => widgets::meta_text("", density::META_TEXT_BASE, s),
+            };
+            // How long, as a figure and as a share of the slowest: a slow
+            // one is seen before it is read.
+            let share = ms.map_or(0.0, |ms| ms as f32 / slowest as f32);
+            let fill = container(Space::new()).width(Length::FillPortion(((share * 1000.0) as u16).max(1))).height(Length::Fixed(4.0)).style(|_t: &iced::Theme| container::Style {
+                background: Some(Background::Color(theme::text_dim())),
+                ..container::Style::default()
+            });
+            let track = container(row![fill, Space::new().width(Length::FillPortion((((1.0 - share) * 1000.0) as u16).max(1)))].width(Length::Fill)).width(Length::Fill).style(|_t: &iced::Theme| container::Style {
+                background: Some(Background::Color(surface::card_border())),
+                ..container::Style::default()
+            });
+            let time = row![
+                container(widgets::scaled_text(ms.map_or(String::new(), |ms| took(Some(ms))), density::ROW_TEXT_BASE, s).font(theme::mono_font())).width(Length::Fixed(s.apply(60.0))).align_x(Alignment::End),
+                if ms.is_some() { Element::from(track) } else { Space::new().width(Length::Fill).into() },
+            ]
+            .spacing(spacing::SM)
+            .align_y(Alignment::Center);
+            row![
+                container(icon).width(Length::Fixed(icon_w)),
+                row![
+                    widgets::clamped_text(name, 1).size(s.apply(density::ROW_TEXT_BASE)).width(Length::Shrink),
+                    widgets::clamped_text(detail, 1).size(s.apply(density::META_TEXT_BASE)).width(Length::Fill).font(theme::mono_font()).color(theme::text_dim()),
+                ]
+                .spacing(spacing::MD)
+                .align_y(Alignment::Center)
+                .width(Length::Fill),
+                container(status).width(Length::Fixed(s.apply(110.0))),
+                container(time).width(Length::Fixed(s.apply(220.0))),
+                container(control).width(Length::Fixed(s.apply(70.0))).align_x(Alignment::End),
+            ]
+            .spacing(spacing::MD)
+            .align_y(Alignment::Center)
+            .padding([spacing::SM, spacing::SM])
+            .into()
+        };
+        let heading = |label: &str, aside: Option<Element<'static, Message>>| -> Element<'static, Message> {
+            let mut r = row![widgets::meta_text(label.to_string(), density::META_TEXT_BASE, s), Space::new().width(Length::Fill)].align_y(Alignment::Center);
+            if let Some(aside) = aside {
+                r = r.push(aside);
             }
+            container(r).padding(iced::Padding { top: spacing::MD, bottom: spacing::XS, left: spacing::SM, right: spacing::SM }).into()
+        };
+        let switch = |on: bool, toggle: Box<dyn Fn(bool) -> Message>| -> Element<'static, Message> { widgets::toggle(on, s).on_toggle(toggle).into() };
+
+        let off = apps.iter().filter(|a| !a.desktop.enabled()).count() + units.iter().filter(|u| u.file.as_deref() != Some("enabled")).count();
+        let starting = apps.len() + units.len() - off;
+
+        let mut summary = row![widgets::scaled_text(format!("{starting} start when you sign in"), density::ROW_TEXT_BASE, s)].spacing(spacing::MD).align_y(Alignment::Center);
+        if off > 0 {
+            summary = summary.push(widgets::meta_text(format!("{off} switched off"), density::META_TEXT_BASE, s).font(theme::mono_font()));
+        }
+        let head = |label: &'static str, w: f32, end: bool| container(widgets::meta_text(label, density::META_TEXT_BASE, s)).width(Length::Fixed(s.apply(w))).align_x(if end { Alignment::End } else { Alignment::Start });
+        let mut table = column![row![
+            Space::new().width(Length::Fixed(icon_w)),
+            widgets::meta_text("Name", density::META_TEXT_BASE, s).width(Length::Fill),
+            head("Status", 110.0, false),
+            head("Start time ↓", 220.0, false),
+            head("Starts", 70.0, true),
+        ]
+        .spacing(spacing::MD)
+        .padding([spacing::XS, spacing::SM])]
+        .spacing(0.0);
+
+        table = table.push(heading("Apps", None));
+        if apps.is_empty() {
+            table = table.push(container(widgets::hint_text("Nothing installed asks to start with you.", s)).padding(spacing::SM));
+        }
+        for a in apps {
+            let unit = startup::autostart_unit(&a.id);
+            let id = a.id.clone();
+            let icon = crate::app_icons::view(self.icons.peek_named(&a.desktop.icon), icon_w);
+            let running = state_of(&unit).map(|u| u.active == "active").or(Some(false));
+            table = table
+                .push(widgets::divider())
+                .push(line(icon, a.desktop.name.clone(), a.desktop.exec.clone(), running, data.blame.get(&unit).copied(), switch(a.desktop.enabled(), Box::new(move |v| Message::Autostart(id.clone(), v)))));
+        }
+        table = table.push(heading("Services", None));
+        for u in units {
+            let name = u.name.clone();
+            let title = if u.description.is_empty() { u.name.clone() } else { u.description.clone() };
+            table = table.push(widgets::divider()).push(line(
+                crate::app_icons::view(None, icon_w),
+                title,
+                u.name.clone(),
+                Some(u.active == "active"),
+                data.blame.get(&u.name).copied(),
+                switch(u.file.as_deref() == Some("enabled"), Box::new(move |v| Message::UnitAtLogin(name.clone(), v))),
+            ));
+        }
+        table = table.push(heading("Started by Hyprland", Some(widgets::secondary_button("Edit in Settings").on_press(Message::OpenSessionSettings).into())));
+        match &data.hyprland {
+            Err(e) => table = table.push(container(widgets::hint_text(e.clone(), s)).padding(spacing::SM)),
+            Ok(programs) if programs.is_empty() => table = table.push(container(widgets::hint_text("Settings → Session lists none.", s)).padding(spacing::SM)),
             Ok(programs) => {
                 for p in programs {
                     let state: Element<'static, Message> = widgets::meta_text(if p.enabled { "Starts" } else { "Off" }, density::META_TEXT_BASE, s).into();
-                    page = page.push(line(p.command.clone(), p.when.label().to_string(), None, None, state));
+                    table = table.push(widgets::divider()).push(line(crate::app_icons::view(None, icon_w), p.command.clone(), p.when.label().to_string(), None, None, state));
                 }
             }
         }
-        page = page.push(widgets::hint_text(
-            "Lines written by hand in hyprland.lua aren't read here; Settings → Session keeps the ones it manages.",
-            s,
-        ));
-        scrollable(page).height(Length::Fill).into()
+        // Said once, because its absence is easy to mistake for a bug.
+        table = table.push(container(widgets::meta_text("Lines written by hand in hyprland.lua aren't listed.", density::META_TEXT_BASE, s)).padding(spacing::SM));
+        scrollable(column![summary, table].spacing(spacing::MD).padding(spacing::LG)).height(Length::Fill).into()
     }
 
     pub fn users_view(&self, s: FontScale) -> Element<'_, Message> {
