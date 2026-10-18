@@ -16,8 +16,12 @@ pub struct Series {
 }
 
 impl Series {
+    /// Keeps one reading more than a minute: a graph sliding between
+    /// readings draws its left edge from the line between the two oldest,
+    /// and with only a minute kept the oldest went as it reached the edge
+    /// and the line's start jumped a step to the right.
     pub fn push(&mut self, value: f32) {
-        if self.values.len() == LEN {
+        if self.values.len() == LEN + 1 {
             self.values.pop_front();
         }
         self.values.push_back(if value.is_finite() { value.max(0.0) } else { 0.0 });
@@ -73,7 +77,7 @@ mod tests {
         for i in 0..(LEN + 5) {
             s.push(i as f32);
         }
-        assert_eq!(s.values().len(), LEN);
+        assert_eq!(s.values().len(), LEN + 1, "a minute and the one before it, for the left edge");
         s.push(-3.0);
         assert_eq!(s.last(), Some(0.0));
         s.push(f32::NAN);

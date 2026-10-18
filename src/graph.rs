@@ -53,6 +53,21 @@ pub fn positions(count: usize, width: f32, phase: f32) -> Vec<f32> {
     (0..count).map(|i| x0 + step * i as f32).collect()
 }
 
+/// Where the line starts: at the oldest reading if it is on the graph,
+/// or — once a full minute has it past the left edge — at the edge,
+/// between the two oldest, so the start slides off rather than jumping
+/// a step each time the oldest is let go.
+pub fn left_edge(values: &[f32], xs: &[f32]) -> Option<(f32, f32)> {
+    match (values, xs) {
+        ([a, b, ..], [xa, xb, ..]) if *xa < 0.0 => {
+            let t = -xa / (xb - xa);
+            Some((0.0, a + (b - a) * t))
+        }
+        ([a, ..], [xa, ..]) => Some((*xa, *a)),
+        _ => None,
+    }
+}
+
 /// The value at the right edge: between the last two readings, `phase`
 /// of the way to the newest.
 pub fn edge(values: &[f32], phase: f32) -> f32 {
@@ -106,23 +121,24 @@ impl<Message> canvas::Program<Message> for Graph<'_> {
             let xs = positions(values.len(), width, phase);
             let point = |i: usize, v: f32| Point::new(xs[i], height - v * (height - 1.0));
             let at_edge = Point::new(width, height - edge(&values, phase) * (height - 1.0));
-            // Every reading up to the one before the newest, then the
-            // edge — the newest itself is past it until it slides in.
-            let shown = values.len() - 1;
+            // From the left edge (or the oldest reading, if it is on the
+            // graph), every reading inside, then the right edge — the
+            // newest itself is past it until it slides in.
+            let (lx, lv) = left_edge(&values, &xs).unwrap_or((0.0, 0.0));
+            let start = Point::new(lx, height - lv * (height - 1.0));
+            let inside = (1..values.len() - 1).filter(|i| xs[*i] > lx);
             let line = Path::new(|b| {
-                for (i, v) in values.iter().take(shown).enumerate() {
-                    if i == 0 {
-                        b.move_to(point(i, *v));
-                    } else {
-                        b.line_to(point(i, *v));
-                    }
+                b.move_to(start);
+                for i in inside.clone() {
+                    b.line_to(point(i, values[i]));
                 }
                 b.line_to(at_edge);
             });
             let area = Path::new(|b| {
-                b.move_to(Point::new(xs[0], height));
-                for (i, v) in values.iter().take(shown).enumerate() {
-                    b.line_to(point(i, *v));
+                b.move_to(Point::new(lx, height));
+                b.line_to(start);
+                for i in inside.clone() {
+                    b.line_to(point(i, values[i]));
                 }
                 b.line_to(at_edge);
                 b.line_to(Point::new(width, height));
@@ -240,6 +256,29 @@ mod tests {
         }
         assert!((after[9] - 590.0).abs() < 1e-3, "the old newest is at the edge as the new one arrives");
         assert!(after[10] > 590.0, "and the new one just past it, to slide in");
+    }
+
+    /// The left edge, as the user saw it jump: a full minute slides its
+    /// oldest reading off, and the start of the line must move with it —
+    /// from the second-oldest as one reading lands to the same place
+    /// after it, never a step to the right.
+    #[test]
+    fn the_left_edge_slides_off_without_a_jump() {
+        let full: Vec<f32> = (0..=LEN).map(|i| i as f32 / LEN as f32).collect();
+        let w = 590.0;
+        // Just before the next reading: the oldest is a whole step off.
+        let before = left_edge(&full, &positions(full.len(), w, 1.0)).unwrap();
+        assert_eq!(before.0, 0.0);
+        assert!((before.1 - full[1]).abs() < 1e-4, "{before:?}: at the second-oldest");
+        // It lands: the oldest goes, a new one comes, phase starts again.
+        let mut after_vals = full[1..].to_vec();
+        after_vals.push(1.0);
+        let after = left_edge(&after_vals, &positions(after_vals.len(), w, 0.0)).unwrap();
+        assert!((after.0 - before.0).abs() < 1e-3 && (after.1 - before.1).abs() < 1e-4, "{before:?} then {after:?}");
+        // A graph not yet full starts at its oldest reading, inside.
+        let few = [0.2, 0.3, 0.4];
+        let xs = positions(3, w, 0.5);
+        assert_eq!(left_edge(&few, &xs), Some((xs[0], 0.2)));
     }
 
     /// The other half: the edge's value moves from the old newest to the
