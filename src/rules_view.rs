@@ -67,11 +67,16 @@ impl Row {
                 Some(t) => t.trim_end_matches('%').trim().parse().map(Some).map_err(|_| format!("{}: {what} \"{t}\" isn't a number", self.program.trim())),
             }
         };
+        // `try_from`, never `as`: a cast wraps, so 2^32 + 10 became a
+        // valid priority of 10 and was saved as a rule nobody wrote.
+        let too_big = |what: &str| format!("{}: {what} is far too large", self.program.trim());
+        let priority = number("priority", &self.priority)?.map(i32::try_from).transpose().map_err(|_| too_big("priority"))?;
+        let cpu = number("cpu", &self.cpu)?.map(|n| u32::try_from(n.max(0))).transpose().map_err(|_| too_big("cpu"))?;
         Ok(Rule {
             program: self.program.trim().to_string(),
-            priority: number("priority", &self.priority)?.map(|n| n as i32),
+            priority,
             memory: opt(&self.memory),
-            cpu: number("cpu", &self.cpu)?.map(|n| n.max(0) as u32),
+            cpu,
             warn_memory: opt(&self.warn),
         })
     }
@@ -302,6 +307,17 @@ mod tests {
         assert!(save(&p, &[row("cargo", "ten", "")]).unwrap_err().contains("isn't a number"));
         assert!(save(&p, &[row("game", "-5", "")]).unwrap_err().contains("administrator"));
         assert!(!p.exists(), "nothing written");
+    }
+
+    /// 2^32 + 10 cast to an `i32` is 10, and 2^32 + 50 to a `u32` is 50:
+    /// both valid, so a typo with too many digits saved as a quite
+    /// different rule instead of being refused.
+    #[test]
+    fn a_number_too_big_for_its_field_is_refused_rather_than_wrapped() {
+        let priority = Row { program: "cargo".into(), priority: "4294967306".into(), ..Row::default() };
+        assert!(priority.rule().unwrap_err().contains("priority"));
+        let cpu = Row { program: "cargo".into(), cpu: "4294967346".into(), ..Row::default() };
+        assert!(cpu.rule().unwrap_err().contains("cpu"));
     }
 
     /// A hand-written file that doesn't parse is shown as broken and kept
