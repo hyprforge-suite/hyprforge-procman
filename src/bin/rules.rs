@@ -13,6 +13,7 @@
 use hyprforge_procman::limits::{self, Limiter, Plan, Target, UserSystemd};
 use hyprforge_procman::proc::ProcFs;
 use hyprforge_procman::rules::{self, Act, Checked, Loaded, Seen};
+use hyprforge_procman::sample::Id;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::time::{Duration, SystemTime};
@@ -25,18 +26,10 @@ fn seen(fs: &ProcFs, pid: i32, me: u32) -> Option<Seen> {
 }
 
 /// `setpriority` on a pid changes one thread; a program can have started
-/// several before the scan saw it, so every thread it has is set.
-/// Threads and children made afterwards inherit it.
+/// several before the scan saw it, so every thread it has is set — see
+/// `signal::nice_every_thread`, shared with the window's own renice.
 fn nice(pid: i32, to: i32) -> Result<(), String> {
-    let mut any = false;
-    for e in std::fs::read_dir(format!("/proc/{pid}/task")).map_err(|e| e.to_string())?.flatten() {
-        let Some(tid) = e.file_name().to_str().and_then(|n| n.parse::<libc::id_t>().ok()) else { continue };
-        // SAFETY: a plain syscall on a thread id; failure is reported.
-        if unsafe { libc::setpriority(libc::PRIO_PROCESS, tid, to) } == 0 {
-            any = true;
-        }
-    }
-    if any { Ok(()) } else { Err(std::io::Error::last_os_error().to_string()) }
+    hyprforge_procman::signal::nice_every_thread(pid, to).map_err(|e| e.to_string())
 }
 
 /// Every process's parent, read only when a cap is to be applied.
@@ -89,7 +82,9 @@ fn plan(pid: i32, name: &str, parents: &HashMap<i32, i32>, me: u32) -> Plan {
     })
 }
 
-async fn act(a: &Act, parents: &HashMap<i32, i32>, me: u32, cores: u32) {
+/// `all` is the scan the act came from, pid to start time: what a cap's
+/// pids are checked against right before they are moved.
+async fn act(a: &Act, all: &HashMap<i32, u64>, parents: &HashMap<i32, i32>, me: u32, cores: u32) {
     match a {
         Act::Nice { pid, to } => match nice(*pid, *to) {
             Ok(()) => tracing::info!(pid, to, "priority set"),
@@ -100,7 +95,15 @@ async fn act(a: &Act, parents: &HashMap<i32, i32>, me: u32, cores: u32) {
             let result = match plan(*pid, name, parents, me) {
                 Plan::Unit(unit) => UserSystemd.set(unit, props).await,
                 Plan::NewScope { name: scope, pids } => {
-                    UserSystemd.new_scope(scope, format!("{name} (capped by a Processes rule)"), pids.into_iter().map(|p| p as u32).collect(), props).await
+                    // Only the pids that still name what the scan saw: one
+                    // that ended since can already be somebody else's.
+                    let ids: Vec<Id> = all.iter().map(|(pid, start)| Id { pid: *pid, start: *start }).collect();
+                    let pids = limits::still_running(&pids, &ids, hyprforge_procman::proc::start_time);
+                    if pids.is_empty() {
+                        Err("it had already ended".to_string())
+                    } else {
+                        UserSystemd.new_scope(scope, format!("{name} (capped by a Processes rule)"), pids, props).await
+                    }
                 }
                 Plan::Refuse(why) => Err(why),
             };
@@ -235,7 +238,7 @@ fn main() -> std::process::ExitCode {
                                 continue;
                             }
                         }
-                        act(&a, &parents, me, cores).await;
+                        act(&a, &all, &parents, me, cores).await;
                     }
                 }
                 for p in fresh {

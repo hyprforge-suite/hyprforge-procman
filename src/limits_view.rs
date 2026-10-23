@@ -19,6 +19,10 @@ pub struct Dialog {
     pub id: Id,
     pub name: String,
     pub plan: Plan,
+    /// Every process the plan covers, as it was when the card opened —
+    /// pid *and* start time, so a pid reused while the card was open is
+    /// not moved into a scope (see `limits::still_running`).
+    pub ids: Vec<Id>,
     pub offer: Offer,
     /// What the kernel enforces on its unit now.
     pub current: Limits,
@@ -58,13 +62,13 @@ impl App {
     /// The app a process belongs to, for limiting: its whole group when
     /// it is part of one — people limit apps, not their helpers — and the
     /// process alone otherwise.
-    fn limit_target(&self, id: Id) -> Option<(String, Vec<i32>, bool, i32)> {
+    fn limit_target(&self, id: Id) -> Option<(String, Vec<Id>, bool, i32)> {
         if let Some(app) = self.table.apps.iter().find(|a| a.members.iter().any(|m| m.id == id)) {
-            let pids = app.members.iter().map(|m| m.id.pid).collect();
-            return Some((app.lead.name.clone(), pids, app.lead.own, app.lead.id.pid));
+            let ids = app.members.iter().map(|m| m.id).collect();
+            return Some((app.lead.name.clone(), ids, app.lead.own, app.lead.id.pid));
         }
         let e = self.entry(id)?;
-        Some((e.name.clone(), vec![e.id.pid], e.own, e.id.pid))
+        Some((e.name.clone(), vec![e.id], e.own, e.id.pid))
     }
 
     /// Whether limiting these could take the session with it. The
@@ -82,7 +86,8 @@ impl App {
     }
 
     pub fn open_limits(&mut self, id: Id) {
-        let Some((name, pids, own, lead)) = self.limit_target(id) else { return };
+        let Some((name, ids, own, lead)) = self.limit_target(id) else { return };
+        let pids: Vec<i32> = ids.iter().map(|i| i.pid).collect();
         let proc_root = Path::new("/proc");
         let cgroup = limits::cgroup_of(proc_root, lead);
         let in_unit = cgroup.as_deref().map(|c| limits::processes_in(&sys(c))).unwrap_or_default();
@@ -112,7 +117,7 @@ impl App {
             _ => Limits::default(),
         };
         let (memory, cpu) = field_text(current);
-        self.limits = Some(Dialog { id, name, plan, offer, current, memory, cpu, busy: false, error: None });
+        self.limits = Some(Dialog { id, name, plan, ids, offer, current, memory, cpu, busy: false, error: None });
     }
 
     /// Sends the card's limits to systemd — `None` removes them.
@@ -132,7 +137,16 @@ impl App {
         let pending = match d.plan.clone() {
             Plan::Unit(unit) => limiter.set(unit, wanted.properties(cores())),
             Plan::NewScope { name, pids } => {
-                limiter.new_scope(name, format!("{} (limited by Processes)", d.name), pids.into_iter().map(|p| p as u32).collect(), wanted.properties(cores()))
+                // Checked now, not when the card opened: the user may have
+                // spent a minute typing, and a pid that ended meanwhile can
+                // already name somebody else's process.
+                let pids = limits::still_running(&pids, &d.ids, hyprforge_procman::proc::start_time);
+                if pids.is_empty() {
+                    d.busy = false;
+                    d.error = Some(format!("{} has already ended.", d.name));
+                    return iced::Task::none();
+                }
+                limiter.new_scope(name, format!("{} (limited by Processes)", d.name), pids, wanted.properties(cores()))
             }
             Plan::Refuse(_) => return iced::Task::none(),
         };

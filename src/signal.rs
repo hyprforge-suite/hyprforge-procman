@@ -66,21 +66,53 @@ pub fn freeze(id: Id, frozen: bool) -> Result<(), Refused> {
     send(id, if frozen { libc::SIGSTOP } else { libc::SIGCONT })
 }
 
-/// Sets `id`'s nice value, after the same identity check as a signal.
+/// Sets `id`'s nice value, on every thread, after the same identity check
+/// as a signal.
 ///
-/// `setpriority` takes a pid, not a pidfd, so a reuse between the check
-/// and the call is possible in principle; it needs the pid space to wrap
-/// in that gap, and the held pidfd keeps the chosen process from being
-/// reaped meanwhile only if it is a child, so this is narrower than a
-/// signal's guarantee and is said so here rather than claimed.
+/// Weaker than a signal's guarantee, and said so here rather than
+/// claimed: `setpriority` takes a thread id, not a pidfd, and holding a
+/// pidfd does *not* stop a process being reaped or its pid being reused
+/// — it only stops the pidfd itself from naming a successor. So the
+/// start time is checked again afterwards: a process that ended in the
+/// gap reports [`Refused::Gone`] instead of success, though a reuse that
+/// happened inside it may already have had its priority changed. It
+/// needs the pid space to wrap in that gap, and a nice value is the
+/// mildest thing that can land on the wrong process.
 pub fn renice(id: Id, nice: i32) -> Result<(), Refused> {
     let _held = open(id)?;
-    // SAFETY: setpriority takes plain integers.
-    let rc = unsafe { libc::setpriority(libc::PRIO_PROCESS, id.pid as libc::id_t, nice) };
-    if rc != 0 {
-        return Err(refused(io::Error::last_os_error()));
+    let set = nice_every_thread(id.pid, nice);
+    if crate::proc::start_time(id.pid) != Some(id.start) {
+        return Err(Refused::Gone);
     }
-    Ok(())
+    set.map_err(refused)
+}
+
+/// `setpriority` on each thread of `pid`.
+///
+/// On Linux `setpriority(PRIO_PROCESS, pid)` changes one *thread* — the
+/// one whose id is `pid` — not the process, so a program that had
+/// already started its workers kept them at the old priority. Threads
+/// and children made afterwards inherit it from whichever thread makes
+/// them. Succeeds if any thread was set; a thread ending mid-walk is not
+/// a failure.
+pub fn nice_every_thread(pid: i32, to: i32) -> io::Result<()> {
+    let mut last = None;
+    let mut any = false;
+    for e in std::fs::read_dir(format!("/proc/{pid}/task"))?.flatten() {
+        let Some(tid) = e.file_name().to_str().and_then(|n| n.parse::<libc::id_t>().ok()) else { continue };
+        // SAFETY: a plain syscall on a thread id; failure is reported.
+        if unsafe { libc::setpriority(libc::PRIO_PROCESS, tid, to) } == 0 {
+            any = true;
+        } else {
+            last = Some(io::Error::last_os_error());
+        }
+    }
+    match (any, last) {
+        (true, _) => Ok(()),
+        (false, Some(e)) => Err(e),
+        // No threads at all: it ended between listing and reading.
+        (false, None) => Err(io::Error::from_raw_os_error(libc::ESRCH)),
+    }
 }
 
 /// A pidfd for `id`, once its start time has been checked against it.
@@ -177,6 +209,66 @@ mod tests {
         child.kill().unwrap();
         child.wait().unwrap();
         assert_eq!(end(id, How::Ask), Err(Refused::Gone));
+    }
+
+    /// Set when this test binary is re-run as the threaded process below.
+    const THREADED_CHILD: &str = "HYPRFORGE_PROCMAN_THREADED_CHILD";
+
+    /// A thread's nice value, field 19 of its `stat`.
+    fn nice_of(pid: i32, tid: &str) -> i32 {
+        let stat = std::fs::read_to_string(format!("/proc/{pid}/task/{tid}/stat")).unwrap();
+        stat.rsplit_once(") ").unwrap().1.split_whitespace().nth(16).unwrap().parse().unwrap()
+    }
+
+    /// `setpriority(PRIO_PROCESS, pid)` on Linux sets one *thread*, the
+    /// one whose id is the pid. A browser or a compiler has dozens, so
+    /// "lower its priority" changed the main thread and left the ones
+    /// doing the work as they were.
+    ///
+    /// The threaded process is this test binary run again, filtered to
+    /// this test, with [`THREADED_CHILD`] set: the only multi-threaded
+    /// program every machine running these tests is sure to have. The
+    /// child role parks threads and never returns; it is killed below.
+    #[test]
+    fn renice_reaches_every_thread_not_just_the_first() {
+        if std::env::var_os(THREADED_CHILD).is_some() {
+            for _ in 0..3 {
+                std::thread::spawn(|| loop {
+                    std::thread::park();
+                });
+            }
+            loop {
+                std::thread::sleep(std::time::Duration::from_secs(60));
+            }
+        }
+        let mut child = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "signal::tests::renice_reaches_every_thread_not_just_the_first", "--nocapture", "--test-threads=1"])
+            .env(THREADED_CHILD, "1")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let pid = child.id() as i32;
+        let tasks = || -> Vec<String> {
+            std::fs::read_dir(format!("/proc/{pid}/task"))
+                .map(|d| d.flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect())
+                .unwrap_or_default()
+        };
+        // The harness's own thread, the test's, and the three it starts.
+        let started = (0..500).any(|_| {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            tasks().len() >= 5
+        });
+        let id = Id { pid, start: crate::proc::start_time(pid).unwrap() };
+        let to = (nice_of(pid, &pid.to_string()) + 3).min(19);
+        let result = renice(id, to);
+        let nices: Vec<(String, i32)> = tasks().into_iter().map(|t| { let n = nice_of(pid, &t); (t, n) }).collect();
+        child.kill().unwrap();
+        child.wait().unwrap();
+
+        assert!(started, "the threaded child never started its threads");
+        result.unwrap();
+        assert!(nices.iter().all(|(_, n)| *n == to), "every thread at {to}, got {nices:?}");
     }
 
     /// pid 1 is root's: refused for permission. Asked with signal 0,

@@ -32,6 +32,7 @@
 //! `u64::MAX` is "no limit" for all of these: set on a probe scope, every
 //! one read back as `infinity` / `[not set]` (systemd 258 here).
 
+use crate::sample::Id;
 use std::path::Path;
 
 /// One app's limits. `None` is "no limit".
@@ -194,6 +195,23 @@ pub fn plan(t: &Target) -> Plan {
     }
 }
 
+/// The pids to move into a new scope: those in `pids` whose process is
+/// still the one `ids` saw, by start time.
+///
+/// A plan is made when the card opens (or when a rule's scan sees a
+/// program start) and carried out later — for the card, after the user
+/// has typed a limit. A pid that ended meanwhile can name a new process
+/// by then, and `StartTransientUnit` would move *that* into the scope and
+/// put the limit on it. So each is checked right before the call, the way
+/// a signal is ([`crate::signal`]); a pid with no `Id` to check against
+/// is left out rather than trusted. Empty when every one has ended.
+pub fn still_running(pids: &[i32], ids: &[Id], start_of: impl Fn(i32) -> Option<u64>) -> Vec<u32> {
+    pids.iter()
+        .filter(|p| ids.iter().any(|id| id.pid == **p && start_of(id.pid) == Some(id.start)))
+        .map(|p| *p as u32)
+        .collect()
+}
+
 /// A scope's name for `app`: `app-procman-<name>-<pid>.scope`, the name
 /// kept to what a unit name may hold without escaping.
 pub fn scope_name(app: &str, lead: i32) -> String {
@@ -313,6 +331,22 @@ mod client {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 13061 ended after the card opened and its pid went to something
+    /// else; 13062 was never seen at all. Only 13060 is still the
+    /// process the plan was made for.
+    #[test]
+    fn a_pid_that_now_names_another_process_is_not_moved_into_the_scope() {
+        let ids = [Id { pid: 13060, start: 100 }, Id { pid: 13061, start: 200 }];
+        let now = |pid: i32| match pid {
+            13060 => Some(100),
+            13061 => Some(999),
+            13062 => Some(300),
+            _ => None,
+        };
+        assert_eq!(still_running(&[13060, 13061, 13062], &ids, now), vec![13060]);
+        assert!(still_running(&[13061], &ids, now).is_empty());
+    }
 
     fn target(unit: &str, cgroup: &str, pids: &[i32], in_unit: &[i32]) -> Target {
         Target {
