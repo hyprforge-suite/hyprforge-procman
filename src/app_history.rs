@@ -87,6 +87,10 @@ pub fn app_name(db: &hyprforge_mime::MimeDb, class: &str) -> String {
 /// The launcher entry for a window class: on Wayland a class is the app
 /// id, which is the entry's file name — exactly, or in another case
 /// (`Steam` is `steam.desktop`).
+///
+/// Behind `desktop` like `app_name`: the recorder is built without it,
+/// and has no launcher entries to look anything up in.
+#[cfg(feature = "desktop")]
 pub fn entry<'a>(db: &'a hyprforge_mime::MimeDb, class: &str) -> Option<&'a hyprforge_mime::App> {
     let wanted = format!("{class}.desktop");
     db.app(&wanted).or_else(|| db.all_apps().into_iter().find(|a| a.id.eq_ignore_ascii_case(&wanted)))
