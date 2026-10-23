@@ -73,9 +73,28 @@ pub struct History {
     pub battery: Series,
 }
 
+/// Drops every series whose name is not in `present`.
+///
+/// Disks and interfaces come and go — a USB stick, a VPN, every
+/// container's `veth` — and a series per name kept for the life of the
+/// window grew by one for each that ever appeared, on a machine running
+/// containers without end. A name that returns starts a fresh minute,
+/// which is what its graph would show anyway.
+pub fn keep_only<'a>(series: &mut BTreeMap<String, Series>, present: impl IntoIterator<Item = &'a str>) {
+    let present: std::collections::HashSet<&str> = present.into_iter().collect();
+    series.retain(|name, _| present.contains(name.as_str()));
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_interface_that_is_gone_takes_its_graph_with_it() {
+        let mut nets: BTreeMap<String, Series> = ["wlan0", "veth1a2b", "veth3c4d"].iter().map(|n| (n.to_string(), Series::default())).collect();
+        keep_only(&mut nets, ["wlan0", "veth3c4d"]);
+        assert_eq!(nets.keys().map(String::as_str).collect::<Vec<_>>(), ["veth3c4d", "wlan0"]);
+    }
 
     #[test]
     fn a_series_keeps_the_last_minute_and_never_goes_negative() {

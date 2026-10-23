@@ -151,9 +151,11 @@ pub struct ServicesTab {
     pub selected: Option<String>,
     pub journal: Result<Vec<String>, String>,
     /// Running units' cgroups, refreshed with the list.
-    cgroups: HashMap<String, std::path::PathBuf>,
-    /// Last counters, for a CPU rate; and the rate, by unit.
-    counters: HashMap<String, (services::Counters, std::time::Instant)>,
+    /// By scope and name: a user unit and a system unit can share a name.
+    cgroups: HashMap<(Scope, String), std::path::PathBuf>,
+    /// Last counters, for a CPU rate; and the rate, by unit of the scope
+    /// shown.
+    counters: HashMap<(Scope, String), (services::Counters, std::time::Instant)>,
     pub cpu: HashMap<String, f32>,
     pub memory: HashMap<String, u64>,
     /// Refreshes since the list was read.
@@ -762,7 +764,7 @@ impl App {
     fn load_services(&mut self) -> Task<Message> {
         let scope = self.services.scope();
         self.services.age = 0;
-        self.services.cgroups = services::cgroups(std::path::Path::new("/sys/fs/cgroup"));
+        self.services.cgroups = services::cgroups(std::path::Path::new("/sys/fs/cgroup"), self.me);
         Task::perform(async move { (scope, Dbus.list(scope).await) }, |(scope, result)| Message::ServicesLoaded(scope, result))
     }
 
@@ -794,9 +796,13 @@ impl App {
         let cores = self.history.cores.len().max(1) as f32;
         let mut cpu = HashMap::new();
         let mut memory = HashMap::new();
-        for (name, path) in &self.services.cgroups {
+        let scope = self.services.scope();
+        // Only the scope on screen: the view looks units up by name, and
+        // the other scope's unit of the same name is a different unit.
+        for (key, path) in self.services.cgroups.iter().filter(|((s, _), _)| *s == scope) {
+            let name = &key.1;
             let Some(c) = services::counters(path) else { continue };
-            if let Some((before, at)) = self.services.counters.get(name) {
+            if let Some((before, at)) = self.services.counters.get(key) {
                 let seconds = now.duration_since(*at).as_secs_f32();
                 if seconds > 0.0 {
                     // A share of the whole machine, as the Processes tab's.
@@ -805,7 +811,7 @@ impl App {
                 }
             }
             memory.insert(name.clone(), c.memory);
-            self.services.counters.insert(name.clone(), (c, now));
+            self.services.counters.insert(key.clone(), (c, now));
         }
         self.services.cpu = cpu;
         self.services.memory = memory;
@@ -1455,6 +1461,10 @@ impl App {
             self.disk_rates = disks;
             self.net_rates = nets;
         }
+        // By the snapshot, not the rates: a reading with no interval has
+        // no rates at all and must not wipe every graph.
+        hyprforge_procman::history::keep_only(&mut self.history.disks, machine.disks.iter().map(|d| d.name.as_str()));
+        hyprforge_procman::history::keep_only(&mut self.history.nets, machine.nets.iter().map(|n| n.name.as_str()));
         for gpu in &machine.gpus {
             // Every card has a graph, even one with nothing to put in it.
             let series = self.history.gpus.entry(gpu.card.clone()).or_default();
@@ -1986,7 +1996,7 @@ mod render {
 
         app.tab = Tab::Services;
         app.services.units.insert(Scope::System, runtime.block_on(Dbus.list(Scope::System)).unwrap_or_default());
-        app.services.cgroups = services::cgroups(std::path::Path::new("/sys/fs/cgroup"));
+        app.services.cgroups = services::cgroups(std::path::Path::new("/sys/fs/cgroup"), app.me);
         app.service_counters();
         std::thread::sleep(Duration::from_millis(500));
         app.service_counters();

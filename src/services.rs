@@ -228,12 +228,22 @@ pub fn merge(units: Vec<(String, String, String, String, String)>, files: HashMa
     out
 }
 
-/// Every running unit's cgroup directory, by unit name, from one walk of
-/// the cgroup tree.
-pub fn cgroups(root: &Path) -> HashMap<String, PathBuf> {
+/// Every running unit's cgroup directory, by scope and unit name, from
+/// one walk of the cgroup tree.
+///
+/// Keyed by scope as well as name because a user unit and a system unit
+/// may share a name — `pipewire.service`, a `foo.service` someone wrote
+/// for both — and keyed by name alone, whichever the walk met first gave
+/// its counters to both rows. A unit is the user's when it sits under
+/// `user@<me>.service`, the user's manager; another user's manager's
+/// units are neither this user's nor the machine's and are left out. The
+/// manager itself is a system unit, and is listed as one.
+pub fn cgroups(root: &Path, me: u32) -> HashMap<(Scope, String), PathBuf> {
+    let mine = format!("user@{me}.service");
     let mut out = HashMap::new();
-    let mut stack = vec![(root.to_path_buf(), 0)];
-    while let Some((dir, depth)) = stack.pop() {
+    // `None`: under another user's manager.
+    let mut stack = vec![(root.to_path_buf(), 0, Some(Scope::System))];
+    while let Some((dir, depth, scope)) = stack.pop() {
         let Ok(entries) = std::fs::read_dir(&dir) else { continue };
         for entry in entries.flatten() {
             let Ok(kind) = entry.file_type() else { continue };
@@ -242,13 +252,17 @@ pub fn cgroups(root: &Path) -> HashMap<String, PathBuf> {
             }
             let name = entry.file_name().to_string_lossy().into_owned();
             let path = entry.path();
-            if name.ends_with(".service") {
-                // The first found wins: a user's manager runs in its own
-                // `user@1000.service`, under which its units are found.
-                out.entry(name).or_insert_with(|| path.clone());
+            let below = match scope {
+                Some(Scope::System) if name == mine => Some(Scope::User),
+                Some(Scope::System) if name.starts_with("user@") && name.ends_with(".service") => None,
+                other => other,
+            };
+            if let (Some(scope), true) = (scope, name.ends_with(".service")) {
+                // The first found wins, within one scope.
+                out.entry((scope, name)).or_insert_with(|| path.clone());
             }
             if depth < 8 {
-                stack.push((path, depth + 1));
+                stack.push((path, depth + 1, below));
             }
         }
     }
@@ -361,6 +375,25 @@ pub mod mock {
 mod tests {
     use super::*;
 
+    /// One name, two units: the system's and this user's each keep their
+    /// own cgroup, and another user's units are nobody's here.
+    #[test]
+    fn a_user_unit_and_a_system_unit_of_one_name_keep_their_own_counters() {
+        let t = tempfile::tempdir().unwrap();
+        let root = t.path();
+        let system = root.join("system.slice/pipewire.service");
+        let user = root.join("user.slice/user-1000.slice/user@1000.service/session.slice/pipewire.service");
+        let other = root.join("user.slice/user-1001.slice/user@1001.service/app.slice/theirs.service");
+        for d in [&system, &user, &other] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        let found = cgroups(root, 1000);
+        assert_eq!(found.get(&(Scope::System, "pipewire.service".into())), Some(&system));
+        assert_eq!(found.get(&(Scope::User, "pipewire.service".into())), Some(&user));
+        assert!(found.contains_key(&(Scope::System, "user@1000.service".into())), "the manager is a system unit");
+        assert!(!found.keys().any(|(_, n)| n == "theirs.service"), "another user's unit is not listed: {found:?}");
+    }
+
     fn unit(name: &str, active: &str, file: Option<&str>) -> Unit {
         Unit {
             name: name.into(),
@@ -426,9 +459,9 @@ mod tests {
         std::fs::write(svc.join("memory.current"), "1048576\n").unwrap();
         let user = t.path().join("user.slice/user-1000.slice/user@1000.service/app.slice/pipewire.service");
         std::fs::create_dir_all(&user).unwrap();
-        let found = cgroups(t.path());
-        assert_eq!(found["getty@tty1.service"], svc);
-        assert!(found.contains_key("user@1000.service") && found.contains_key("pipewire.service"));
+        let found = cgroups(t.path(), 1000);
+        assert_eq!(found[&(Scope::System, "getty@tty1.service".into())], svc);
+        assert!(found.contains_key(&(Scope::System, "user@1000.service".into())) && found.contains_key(&(Scope::User, "pipewire.service".into())));
         assert_eq!(counters(&svc), Some(Counters { cpu_usec: 17661922422, memory: 1048576 }));
     }
 
@@ -451,7 +484,8 @@ mod tests {
         for u in &units {
             assert!(["active", "inactive", "failed", "activating", "deactivating", "reloading", "maintenance", "refreshing"].contains(&u.active.as_str()), "{}: {}", u.name, u.active);
         }
-        let found = cgroups(Path::new("/sys/fs/cgroup"));
-        assert!(found.contains_key("systemd-journald.service"));
+        // SAFETY: getuid has no preconditions.
+        let found = cgroups(Path::new("/sys/fs/cgroup"), unsafe { libc::getuid() });
+        assert!(found.contains_key(&(Scope::System, "systemd-journald.service".into())));
     }
 }
