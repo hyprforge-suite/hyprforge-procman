@@ -99,6 +99,21 @@ impl Authority for Polkit {
 
 pub use crate::proc::Usage;
 
+/// Where the recorder writes its journal, from its config at `path`.
+///
+/// A missing file is the recorder's defaults, as it is for the recorder.
+/// A file that exists and does not parse is *not*: it used to fall back
+/// to the default directory here too, so a recorder configured to write
+/// elsewhere — or refusing to start over the same broken file — showed
+/// up in the window as "nothing has been recorded", with no hint that a
+/// file needed fixing. Kept as the error, logged once here, and returned
+/// by every call that needs the directory.
+pub fn history_from(path: &std::path::Path) -> Result<std::path::PathBuf, String> {
+    crate::recorder::load_config(path).map(|c| c.directory).inspect_err(|e| {
+        tracing::warn!("the recorder's history can't be found: {e}");
+    })
+}
+
 /// The service. `last_call` is when anything last asked, for the
 /// binary's idle exit.
 pub struct Service {
@@ -109,8 +124,9 @@ pub struct Service {
     /// any is, whenever its last call came in.
     pub asking: Arc<std::sync::atomic::AtomicUsize>,
     proc_root: std::path::PathBuf,
-    /// The recorder's journal directory, from its config.
-    pub history: std::path::PathBuf,
+    /// The recorder's journal directory, from its config — or why the
+    /// config couldn't say. See [`history_from`].
+    pub history: Result<std::path::PathBuf, String>,
     /// The network counter, loaded on the first `NetUsage` and kept for
     /// as long as the helper runs — or why it couldn't be.
     #[cfg(feature = "netbpf")]
@@ -143,7 +159,7 @@ impl Service {
     }
 
     pub fn new(authority: Arc<dyn Authority>) -> Service {
-        let history = crate::recorder::load_config(std::path::Path::new(crate::recorder::CONFIG_PATH)).map(|c| c.directory).unwrap_or_else(|_| crate::recorder::Config::default().directory);
+        let history = history_from(std::path::Path::new(crate::recorder::CONFIG_PATH));
         Service {
             authority,
             last_call: Arc::new(Mutex::new(Instant::now())),
@@ -256,7 +272,8 @@ impl Service {
     /// say only which days were recorded; reading one is `open_history`.
     async fn history_days(&self, interactive: bool, #[zbus(header)] header: Header<'_>) -> zbus::fdo::Result<Vec<(String, u64)>> {
         self.allow(&header, action::READ_ALL, interactive).await?;
-        match crate::journal::days(&self.history) {
+        let history = self.history.as_ref().map_err(|e| zbus::fdo::Error::Failed(e.clone()))?;
+        match crate::journal::days(history) {
             Ok(days) => Ok(days),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
             Err(e) => Err(zbus::fdo::Error::Failed(e.to_string())),
@@ -271,7 +288,8 @@ impl Service {
             return Err(zbus::fdo::Error::InvalidArgs(format!("{day:?} isn't a day")));
         }
         self.allow(&header, action::READ_ALL, interactive).await?;
-        let file = std::fs::File::open(self.history.join(format!("{day}.hfr"))).map_err(|e| zbus::fdo::Error::Failed(e.to_string()))?;
+        let history = self.history.as_ref().map_err(|e| zbus::fdo::Error::Failed(e.clone()))?;
+        let file = std::fs::File::open(history.join(format!("{day}.hfr"))).map_err(|e| zbus::fdo::Error::Failed(e.to_string()))?;
         Ok(std::os::fd::OwnedFd::from(file).into())
     }
 
@@ -479,7 +497,7 @@ mod tests {
         drop(w);
         let says = Arc::new(Says { yes: true, asked: Default::default() });
         let mut service = Service::new(says.clone());
-        service.history = t.path().to_path_buf();
+        service.history = Ok(t.path().to_path_buf());
         let (a, b) = tokio::net::UnixStream::pair().unwrap();
         let server = zbus::connection::Builder::unix_stream(a).server(zbus::Guid::generate()).unwrap().p2p().serve_at(OBJECT_PATH, service).unwrap().build();
         let client = zbus::connection::Builder::unix_stream(b).p2p().build();
@@ -491,6 +509,27 @@ mod tests {
         assert_eq!(reader.frame(0).unwrap().at_ms, 5);
         assert!(proxy.open_history("../../etc/shadow", false).await.is_err());
         assert!(says.asked.lock().unwrap().iter().all(|(a, _)| *a == action::READ_ALL));
+    }
+
+    /// A recorder config that exists and won't parse is a problem to
+    /// hear about, not an empty history: the helper used to fall back to
+    /// the default directory and answer with whatever was (not) there.
+    #[tokio::test]
+    async fn a_recorder_config_that_does_not_parse_is_an_error_not_an_empty_history() {
+        let t = tempfile::tempdir().unwrap();
+        let config = t.path().join("procman-recorder.toml");
+        std::fs::write(&config, "directory = [this is not toml").unwrap();
+        let mut service = Service::new(Arc::new(Says { yes: true, asked: Default::default() }));
+        service.history = history_from(&config);
+        let (a, b) = tokio::net::UnixStream::pair().unwrap();
+        let server = zbus::connection::Builder::unix_stream(a).server(zbus::Guid::generate()).unwrap().p2p().serve_at(OBJECT_PATH, service).unwrap().build();
+        let client = zbus::connection::Builder::unix_stream(b).p2p().build();
+        let (_server, client) = tokio::try_join!(server, client).unwrap();
+        let proxy = ProcManProxy::builder(&client).destination(BUS_NAME).unwrap().path(OBJECT_PATH).unwrap().build().await.unwrap();
+        let err = proxy.history_days(false).await.expect_err("a broken config read as an empty history");
+        assert!(err.to_string().contains("procman-recorder.toml"), "the error names the file to fix: {err}");
+        // A missing file is still the defaults, as it is for the recorder.
+        assert!(history_from(&t.path().join("absent.toml")).is_ok());
     }
 
     #[tokio::test]
